@@ -4,6 +4,12 @@
 
 Multi-tenant unconference platform with quadratic voting for session selection. Users can create events, propose sessions, vote on proposals, and organizers can schedule the final program.
 
+## Repository
+
+Canonical repo (owner: omniharmonic): `https://github.com/omniharmonic/schellingpoint`
+- `origin` → `omniharmonic/schellingpoint`, default branch `main` (the latest code).
+- Prior OpenCivics-Labs and RegenHub-Boulder remotes are no longer used.
+
 ## Current Development Phase
 
 **Active Work**: Multi-tenant implementation (Phases 3-8)

@@ -43,3 +43,7 @@ supabase/.temp/
 # Test results
 test-results/
 playwright-report/
+.playwright-mcp/
+
+# Local screenshots / scratch artifacts
+screenshots/
