@@ -1,0 +1,41 @@
+{
+  "lexicon": 1,
+  "id": "coop.lexicon.membership",
+  "description": "ASSUMED, 2026-09-13. No canonical coop.lexicon.* source exists yet (Lucian has not normalized the namespace) — this is a reconstruction of the shape `apps/appview/src/lib/membership-claims.ts#publishRoleClaim` actually writes (see `apps/appview/src/lexicons/coop.ts`). The regenOS handoff note (`docs/research/context/2026-09-12_regenos-building-blocks-handoff.md`, read from `technefoundation/regenOS@c3e34d4`, also not canonical) broadly agrees: `{subject, role: int, addedBy?}`, an open i16 role registry with the SAME numeric values (10/20/30/40), but labels rung 20 'Builder' where Free School calls it 'Host' — naming only, not a schema conflict. KNOWN DIVERGENCE: our code additionally writes `school` and `createdAt`, neither mentioned in the regenOS note. This is gap 7 in `docs/interop-audit.md`.",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Written by the school after deriveRole(); the protocol only ever sees this claim, and only for a role >= Host with the subject's explicit opt-in (R9). `addedBy` is always the school DID itself in v1.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["subject", "role"],
+        "properties": {
+          "subject": {
+            "type": "string",
+            "format": "did"
+          },
+          "role": {
+            "type": "integer",
+            "description": "Open integer registry: 10 member / 20 host (regenOS: 'Builder') / 30 facilitator / 40 steward."
+          },
+          "school": {
+            "type": "string",
+            "format": "did",
+            "description": "ASSUMED, beyond the regenOS `{subject, role, addedBy?}` shape."
+          },
+          "addedBy": {
+            "type": "string",
+            "format": "did",
+            "description": "Always the school DID itself in v1 — never a steward's personal DID."
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "ASSUMED, beyond the regenOS `{subject, role, addedBy?}` shape."
+          }
+        }
+      }
+    }
+  }
+}

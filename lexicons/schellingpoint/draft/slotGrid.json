@@ -1,0 +1,46 @@
+{
+  "lexicon": 1,
+  "id": "schellingpoint.draft.slotGrid",
+  "description": "The schedulable structure of one day in one venue: the time slots a gathering offers, before any proposal is programmed into them. One record per (day, venue). Written by the gathering actor. Successor of the time_slots table; the slot assignments themselves are schellingpoint.draft.slot records.",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["gathering", "day", "slots", "createdAt"],
+        "properties": {
+          "gathering": { "type": "string", "format": "at-uri" },
+          "venue": {
+            "type": "string",
+            "format": "at-uri",
+            "description": "The schellingpoint.draft.venue this grid belongs to. Absent for a venue-less grid (a fully virtual day)."
+          },
+          "day": {
+            "type": "string",
+            "minLength": 10,
+            "maxLength": 10,
+            "description": "Calendar date in the gathering's timezone, ISO 8601 YYYY-MM-DD."
+          },
+          "timezone": { "type": "string", "maxLength": 64, "description": "IANA zone the day is reckoned in." },
+          "slots": {
+            "type": "array",
+            "maxLength": 200,
+            "items": { "type": "ref", "ref": "#slot" }
+          },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    },
+    "slot": {
+      "type": "object",
+      "required": ["startsAt", "endsAt", "kind"],
+      "properties": {
+        "startsAt": { "type": "string", "format": "datetime" },
+        "endsAt": { "type": "string", "format": "datetime" },
+        "label": { "type": "string", "maxLength": 1200, "maxGraphemes": 120 },
+        "kind": { "type": "string", "knownValues": ["session", "break"], "default": "session" }
+      }
+    }
+  }
+}

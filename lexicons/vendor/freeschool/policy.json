@@ -1,0 +1,90 @@
+{
+  "lexicon": 1,
+  "id": "freeschool.draft.policy",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A school's public rules and role-ladder thresholds. Written by the school DID. Versioned; the app renders the current one on join.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": [
+          "title",
+          "text",
+          "version",
+          "effectiveAt",
+          "createdAt"
+        ],
+        "properties": {
+          "title": {
+            "type": "string",
+            "maxLength": 1200,
+            "maxGraphemes": 120
+          },
+          "text": {
+            "type": "string",
+            "maxLength": 200000,
+            "maxGraphemes": 20000
+          },
+          "version": {
+            "type": "string",
+            "maxLength": 20
+          },
+          "effectiveAt": {
+            "type": "string",
+            "format": "datetime"
+          },
+          "thresholds": {
+            "type": "ref",
+            "ref": "#thresholds"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          }
+        }
+      }
+    },
+    "thresholds": {
+      "type": "object",
+      "description": "Role-ladder parameters. Defaults follow Lex: hosting open on day one.",
+      "properties": {
+        "memberRequires": {
+          "type": "string",
+          "knownValues": [
+            "none",
+            "invite-or-vouch",
+            "attended-one"
+          ]
+        },
+        "hostMinAttended": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 20
+        },
+        "facilitatorMinHosted": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 50
+        },
+        "firstEventApproval": {
+          "type": "boolean"
+        },
+        "feedbackK": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 10
+        },
+        "destructiveActionStewards": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "publishRoles": {
+          "type": "boolean",
+          "description": "Let qualifying members' derived roles reach the protocol as coop.lexicon.membership claims. Off by default; publishing a given member's role additionally requires that member's own opt-in."
+        }
+      }
+    }
+  }
+}

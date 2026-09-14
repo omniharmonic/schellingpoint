@@ -1,0 +1,39 @@
+{
+  "lexicon": 1,
+  "id": "schellingpoint.draft.slot",
+  "description": "The gathering's decision to programme one proposal at one time in one venue. The join that used to be sessions.venue_id + sessions.time_slot_id, moved out of the proposer's record so that scheduling is the gathering's act and not an edit to someone else's repo. Accompanies a materialized community.lexicon.calendar.event (the thing a generic calendar client reads); this record is the provenance link back to the proposal.",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["gathering", "event", "proposal", "startsAt", "endsAt", "createdAt"],
+        "properties": {
+          "gathering": { "type": "string", "format": "at-uri" },
+          "event": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef",
+            "description": "The community.lexicon.calendar.event materialized for this slot, in this same repo."
+          },
+          "proposal": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef",
+            "description": "The proposer's own record. strongRef pins the version that was accepted: if the proposer rewrites the title after scheduling, the cid mismatch is exactly the signal the organiser needs to re-publish or not."
+          },
+          "venue": { "type": "string", "format": "at-uri" },
+          "track": { "type": "string", "format": "at-uri" },
+          "startsAt": { "type": "string", "format": "datetime" },
+          "endsAt": { "type": "string", "format": "datetime" },
+          "status": { "type": "string", "knownValues": ["scheduled", "moved", "cancelled"], "default": "scheduled" },
+          "supersedes": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef",
+            "description": "The slot this one replaces when a session is moved. Keeps the schedule's history legible without deleting the record someone already put in their calendar."
+          },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

@@ -7,11 +7,18 @@
     "build": "next build",
     "start": "next start -p 3001",
     "db:reset": "psql postgresql://postgres:postgres@127.0.0.1:54322/postgres -f supabase/schema.sql && psql postgresql://postgres:postgres@127.0.0.1:54322/postgres -f supabase/seed.sql",
-    "test": "playwright test tests/event-api.spec.ts tests/creation-database.spec.ts tests/creation-reliability.spec.ts tests/ux-logic.spec.ts tests/members-api.spec.ts",
+    "test": "playwright test tests/event-api.spec.ts tests/creation-database.spec.ts tests/creation-reliability.spec.ts tests/ux-logic.spec.ts tests/members-api.spec.ts tests/atproto-records.spec.ts",
     "test:sql": "for f in tests/sql/*.sql; do psql postgresql://postgres:postgres@127.0.0.1:54322/postgres -v ON_ERROR_STOP=1 -q -f $f || exit 1; done",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "lexicons:validate": "node scripts/validate-lexicons.mjs"
   },
   "dependencies": {
+    "@atproto/api": "^0.20.44",
+    "@atproto/identity": "^0.5.13",
+    "@atproto/jwk-jose": "^0.2.4",
+    "@atproto/lexicon": "^0.7.14",
+    "@atproto/oauth-client-node": "^0.5.7",
+    "@atproto/syntax": "^0.7.6",
     "@radix-ui/react-checkbox": "^1.3.3",
     "@radix-ui/react-dialog": "^1.0.5",
     "@radix-ui/react-dropdown-menu": "^2.0.6",

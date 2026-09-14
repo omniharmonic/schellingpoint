@@ -1,0 +1,40 @@
+{
+  "lexicon": 1,
+  "id": "schellingpoint.draft.tally",
+  "description": "The public result of one voting round: counts and presence, never averages, never ranks, never a voter. Written by the GATHERING actor after the round closes and the ballot key is destroyed. Entries below the k threshold are suppressed rather than rounded, because a suppressed row is honest and a rounded one is a reconstruction target.",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["gathering", "round", "mechanism", "closedAt", "createdAt"],
+        "properties": {
+          "gathering": { "type": "string", "format": "at-uri" },
+          "round": { "type": "string", "knownValues": ["pre-event", "attendance"] },
+          "mechanism": { "type": "string", "knownValues": ["quadratic", "linear", "approval"] },
+          "creditsPerVoter": { "type": "integer" },
+          "ballotsCast": { "type": "integer", "description": "Distinct participants in the round. A count, never a list." },
+          "k": { "type": "integer", "description": "The suppression threshold this tally was held to." },
+          "entries": { "type": "array", "maxLength": 2000, "items": { "type": "ref", "ref": "#entry" } },
+          "closedAt": { "type": "string", "format": "datetime" },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    },
+    "entry": {
+      "type": "object",
+      "required": ["proposal", "suppressed"],
+      "properties": {
+        "proposal": { "type": "ref", "ref": "com.atproto.repo.strongRef" },
+        "suppressed": {
+          "type": "boolean",
+          "description": "True when fewer than k distinct ballots named this proposal. When true, votes/voters/credits are ABSENT — not zero."
+        },
+        "voters": { "type": "integer", "minimum": 0 },
+        "votes": { "type": "integer", "minimum": 0 },
+        "credits": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

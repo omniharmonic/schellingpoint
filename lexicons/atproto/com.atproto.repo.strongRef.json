@@ -1,0 +1,16 @@
+{
+  "lexicon": 1,
+  "id": "com.atproto.repo.strongRef",
+  "description": "Minimal copy of the core atproto strongRef def so @atproto/lexicon can resolve every `ref: com.atproto.repo.strongRef` in the vendored and schellingpoint.draft.* lexicons. Canonical source: bluesky-social/atproto lexicons/com/atproto/repo/strongRef.json.",
+  "defs": {
+    "main": {
+      "type": "object",
+      "description": "A URI with a content-hash fingerprint.",
+      "required": ["uri", "cid"],
+      "properties": {
+        "uri": { "type": "string", "format": "at-uri" },
+        "cid": { "type": "string", "format": "cid" }
+      }
+    }
+  }
+}

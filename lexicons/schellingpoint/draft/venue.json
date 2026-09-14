@@ -1,0 +1,44 @@
+{
+  "lexicon": 1,
+  "id": "schellingpoint.draft.venue",
+  "description": "A room or place a gathering programmes sessions into. Written by the gathering actor. A venue is a place, not a person, so it publishes cleanly; for a private residence the address follows the calendar event's tiered disclosure (neighbourhood on the record, exact address app-side).",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["name", "createdAt"],
+        "properties": {
+          "name": { "type": "string", "maxLength": 1200, "maxGraphemes": 120 },
+          "slug": { "type": "string", "maxLength": 120 },
+          "capacity": { "type": "integer", "minimum": 1, "maximum": 100000 },
+          "features": {
+            "type": "array",
+            "maxLength": 20,
+            "items": { "type": "string", "maxLength": 400 },
+            "description": "Feature tags (projector, whiteboard, microphone) matched against schellingpoint.draft.proposal#requiredFeatures."
+          },
+          "style": { "type": "string", "maxLength": 400, "maxGraphemes": 40, "description": "Room style, e.g. theater, classroom, lounge." },
+          "primary": { "type": "boolean", "default": false },
+          "locations": {
+            "type": "array",
+            "maxLength": 5,
+            "description": "Where the venue is, in the same union community.lexicon.calendar.event uses.",
+            "items": {
+              "type": "union",
+              "refs": [
+                "community.lexicon.location.address",
+                "community.lexicon.location.fsq",
+                "community.lexicon.location.geo",
+                "community.lexicon.location.hthree"
+              ]
+            }
+          },
+          "notes": { "type": "string", "maxLength": 20000, "maxGraphemes": 2000 },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

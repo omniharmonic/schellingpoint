@@ -1,0 +1,59 @@
+{
+  "lexicon": 1,
+  "id": "coop.lexicon.event.config",
+  "description": "ASSUMED, 2026-09-13. No canonical coop.lexicon.* source exists yet (Lucian has not normalized the namespace) — this is a reconstruction of the shape `apps/appview/src/lib/events.ts` actually writes (see `apps/appview/src/lexicons/coop.ts`), so that this lexicon can validate our own output rather than invent requirements our code does not meet. KNOWN DIVERGENCE from `docs/research/context/2026-09-12_regenos-building-blocks-handoff.md` (read from `technefoundation/regenOS@c3e34d4`, also not canonical): that note describes an `attendance` field with values `open` | `approval`, plus `maxAttendees` and `waitlist` — our code has neither name; it writes a boolean `rsvpRequired` and an integer `capacity` instead, with no `waitlist` field at all (waitlisting is app-side, `lib/rsvp.ts#resolveGoingOrWaitlist`). `visibility`, `neighborhood`, `school` and `tags` below have no correspondence in the regenOS note at all. This is gap 7 in `docs/interop-audit.md`: ask Lucian whether `rsvpRequired`/`capacity` should be renamed to `attendance`/`maxAttendees`, or whether regenOS's shape is itself provisional.",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Written alongside a community.lexicon.calendar.event by its host: the knobs the base lexicon has no room for.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["event"],
+        "properties": {
+          "event": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef",
+            "description": "Strong reference to the community.lexicon.calendar.event this configures."
+          },
+          "timezone": {
+            "type": "string",
+            "description": "IANA zone; matches freeschool.draft.series#timezone when the event is a series occurrence."
+          },
+          "capacity": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "ASSUMED name. The regenOS handoff describes `maxAttendees` instead — unconfirmed which name (if either) Lucian's normalized lexicon will use."
+          },
+          "visibility": {
+            "type": "string",
+            "knownValues": ["listed", "unlisted", "private"],
+            "description": "ASSUMED, no regenOS correspondence found. 'listed' is the only value that reaches the public calendar (apps/appview/src/http/visibility.ts)."
+          },
+          "neighborhood": {
+            "type": "string",
+            "description": "ASSUMED, no regenOS correspondence found. Coarse location shown to everyone for a `listed` event; the exact address is app-side (R9 tiered disclosure)."
+          },
+          "rsvpRequired": {
+            "type": "boolean",
+            "description": "ASSUMED name. The regenOS handoff describes an `attendance` field with values `open` | `approval` instead — see the lexicon-level description for the divergence this needs resolving with Lucian."
+          },
+          "school": {
+            "type": "string",
+            "format": "did",
+            "description": "ASSUMED, no regenOS correspondence found. DID of the school this event is offered under."
+          },
+          "tags": {
+            "type": "array",
+            "description": "ASSUMED, no regenOS correspondence found. Lowercase kebab tags; routes the school's own curation listing (lib/events.ts#routeListing).",
+            "items": { "type": "string", "maxLength": 64 }
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          }
+        }
+      }
+    }
+  }
+}

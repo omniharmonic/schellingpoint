@@ -1,0 +1,25 @@
+{
+  "lexicon": 1,
+  "id": "schellingpoint.draft.cohost",
+  "description": "The second half of a double opt-in. A proposer invites a co-host through an opaque app-side token; the co-host accepts by writing THIS record into their own repo, naming the proposal. Neither record alone names a person who did not write it: the proposal names nobody, and this names only its own author. An AppView renders a co-hosted session by pairing them. Modelled on the deferred freeschool.draft.skillAttestation design (interop audit gap 15).",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["proposal", "createdAt"],
+        "properties": {
+          "proposal": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef",
+            "description": "strongRef — BOTH uri and cid — to the schellingpoint.draft.proposal being co-hosted. A cid-less ref is invalid com.atproto.repo.strongRef and a validating peer drops it (interop audit gap 3)."
+          },
+          "role": { "type": "string", "knownValues": ["cohost", "facilitator", "notetaker"], "default": "cohost" },
+          "displayOrder": { "type": "integer", "minimum": 0, "maximum": 20 },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

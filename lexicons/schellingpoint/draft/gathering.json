@@ -1,0 +1,52 @@
+{
+  "lexicon": 1,
+  "id": "schellingpoint.draft.gathering",
+  "description": "An unconference's public declaration (one per gathering DID, rkey \"self\"). Modelled line-for-line on freeschool.draft.school, plus the things a gathering has that a school does not: dates, a lifecycle phase, and a strongRef to its own community.lexicon.calendar.event. Written by the gathering actor. Names no person: peers are other gatherings' DIDs.",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "literal:self",
+      "record": {
+        "type": "object",
+        "required": ["name", "createdAt"],
+        "properties": {
+          "name": { "type": "string", "maxLength": 1200, "maxGraphemes": 120 },
+          "description": { "type": "string", "maxLength": 20000, "maxGraphemes": 2000 },
+          "region": { "type": "string", "maxLength": 1200, "maxGraphemes": 120 },
+          "startsAt": { "type": "string", "format": "datetime" },
+          "endsAt": { "type": "string", "format": "datetime" },
+          "event": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef",
+            "description": "The gathering's own community.lexicon.calendar.event (the thing a generic calendar client reads), in this same repo."
+          },
+          "phase": {
+            "type": "string",
+            "knownValues": ["draft", "proposals", "voting", "scheduling", "live", "completed", "archived"],
+            "default": "draft"
+          },
+          "policy": {
+            "type": "string",
+            "format": "at-uri",
+            "description": "Current freeschool.draft.policy record, reused verbatim."
+          },
+          "handleDomain": { "type": "string", "format": "handle" },
+          "website": { "type": "string", "format": "uri" },
+          "peers": {
+            "type": "array",
+            "description": "DIDs of peer gatherings or schools this gathering federates with (their PDS hosts are followed directly). Organisations, never people.",
+            "items": { "type": "string", "format": "did" },
+            "maxLength": 100
+          },
+          "tags": {
+            "type": "array",
+            "description": "Tags this gathering routes on for coop.lexicon.event.listing exchange.",
+            "items": { "type": "string", "maxLength": 400, "maxGraphemes": 40 },
+            "maxLength": 20
+          },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

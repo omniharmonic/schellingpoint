@@ -1,0 +1,23 @@
+{
+  "lexicon": 1,
+  "id": "freeschool.draft.approval",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A steward's signed approval of a proposed destructive moderation action. Written by the steward in their OWN repo (or the school's moderation space), so the two-steward threshold is verifiable from records rather than from app process state (R3 invariant 10: a policy engine can read a record; it cannot read our memory). The school's freeschool.draft.moderationAction then lists the approving stewards and points at the proposal.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["proposal", "action", "createdAt"],
+        "properties": {
+          "proposal": { "type": "string", "format": "at-uri", "description": "AT-URI of the proposed action (a freeschool.draft.moderationAction with status proposed, or an app-side proposal id expressed as an at-uri under the school DID)." },
+          "action": { "type": "string", "knownValues": ["remove-listing", "restore-listing", "suspend-role", "restore-role", "require-approval", "close-request", "void-attendance", "write-policy", "other"] },
+          "subjectRecord": { "type": "string", "format": "at-uri" },
+          "subjectDid": { "type": "string", "format": "did" },
+          "reason": { "type": "string", "maxLength": 20000, "maxGraphemes": 2000 },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

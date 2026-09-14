@@ -1,0 +1,73 @@
+{
+  "lexicon": 1,
+  "id": "schellingpoint.draft.proposal",
+  "description": "A session a person offers to an unconference. Lives in the PROPOSER'S repo: it is their offer, it survives the gathering, and no organiser can edit or delete it — an organiser declines by not writing a slot, and removes by deleting their own listing. Carries no co-host DIDs (R9: a co-host writes their own schellingpoint.draft.cohost) and no schedule (that is the gathering's schellingpoint.draft.slot).",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["gathering", "title", "format", "durationMinutes", "createdAt"],
+        "properties": {
+          "gathering": {
+            "type": "string",
+            "format": "at-uri",
+            "description": "AT-URI of the schellingpoint.draft.gathering this is offered to. A URI, not a strongRef: the gathering record is edited (dates move, description changes) and a proposal must not be orphaned by that."
+          },
+          "title": { "type": "string", "maxLength": 3000, "maxGraphemes": 300 },
+          "description": { "type": "string", "maxLength": 30000, "maxGraphemes": 3000 },
+          "format": { "type": "string", "knownValues": ["talk", "workshop", "discussion", "panel", "demo"] },
+          "durationMinutes": { "type": "integer", "minimum": 5, "maximum": 600 },
+          "track": {
+            "type": "string",
+            "format": "at-uri",
+            "description": "Optional schellingpoint.draft.track the proposer suggests. Advisory: the gathering's slot record decides the track it is actually programmed in."
+          },
+          "skills": {
+            "type": "array",
+            "maxLength": 5,
+            "items": { "type": "string", "format": "at-uri" },
+            "description": "freeschool.draft.skill URIs — the shared taxonomy, so this session is findable next to a Free School class on the same subject."
+          },
+          "topics": {
+            "type": "array",
+            "maxLength": 10,
+            "items": { "type": "string", "maxLength": 640, "maxGraphemes": 64 }
+          },
+          "expectedAttendance": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000,
+            "description": "The proposer's own estimate, used for venue matching. Never a vote-derived number: capacity fit must not become a public popularity proxy."
+          },
+          "requiredFeatures": {
+            "type": "array",
+            "maxLength": 10,
+            "items": { "type": "string", "maxLength": 400 },
+            "description": "Venue feature tags (projector, whiteboard, microphone). Matched against schellingpoint.draft.venue#features by the scheduler."
+          },
+          "selfHosted": {
+            "type": "boolean",
+            "default": false,
+            "description": "The proposer is running this at their own place and time and is not asking for a slot. When true, startsAt/endsAt and place are the proposer's own; the gathering may still list it."
+          },
+          "startsAt": { "type": "string", "format": "datetime" },
+          "endsAt": { "type": "string", "format": "datetime" },
+          "place": { "type": "string", "maxLength": 2000, "maxGraphemes": 200 },
+          "imported": {
+            "type": "boolean",
+            "description": "True only on a stub the GATHERING actor wrote into its own repo for a legacy session whose author has not claimed a DID (migration §11 phase 3). Absent on anything a human writes. The stub names nobody; an adopt flow replaces it with the author's own record."
+          },
+          "importedFrom": {
+            "type": "string",
+            "maxLength": 400,
+            "maxGraphemes": 40,
+            "description": "The legacy system a stub was imported from (e.g. \"schellingpoint-supabase\"). Absent on anything a human writes."
+          },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

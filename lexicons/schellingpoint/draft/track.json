@@ -1,0 +1,31 @@
+{
+  "lexicon": 1,
+  "id": "schellingpoint.draft.track",
+  "description": "A programme track of a gathering. Written by the gathering actor. No lead_name, no lead_email, no lead_did: a track lead is app-side; if a lead wants to be publicly associated with a track they write a coop.lexicon.membership claim naming themselves, gated the usual three ways.",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["name", "createdAt"],
+        "properties": {
+          "name": { "type": "string", "maxLength": 1200, "maxGraphemes": 120 },
+          "slug": { "type": "string", "maxLength": 120 },
+          "description": { "type": "string", "maxLength": 20000, "maxGraphemes": 2000 },
+          "color": { "type": "string", "maxLength": 32, "description": "CSS colour, e.g. #1a2b3c." },
+          "skills": {
+            "type": "array",
+            "maxLength": 20,
+            "items": { "type": "string", "format": "at-uri" },
+            "description": "freeschool.draft.skill URIs into the shared taxonomy. Tracks are not skills, but a track may carry skill URIs so a Free School class and a Schelling Point session are discoverable by the same vocabulary."
+          },
+          "maxSessions": { "type": "integer", "minimum": 0, "maximum": 10000 },
+          "displayOrder": { "type": "integer", "minimum": 0, "maximum": 10000 },
+          "active": { "type": "boolean", "default": true },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

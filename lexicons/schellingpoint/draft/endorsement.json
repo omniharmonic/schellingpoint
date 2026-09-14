@@ -1,0 +1,20 @@
+{
+  "lexicon": 1,
+  "id": "schellingpoint.draft.endorsement",
+  "description": "'I want this session to happen, and I am willing to say so publicly.' Entirely separate from the ballot: writing one does not spend credits and not writing one does not reduce a ballot's weight. Exists so that a participant who WANTS attribution can have it, without any participant's private allocation ever becoming visible. Never counted into a tally — it is a signal to other humans, not an input to the scheduler.",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["proposal", "createdAt"],
+        "properties": {
+          "proposal": { "type": "ref", "ref": "com.atproto.repo.strongRef" },
+          "note": { "type": "string", "maxLength": 1500, "maxGraphemes": 150 },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

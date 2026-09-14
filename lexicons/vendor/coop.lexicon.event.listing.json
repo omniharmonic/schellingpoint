@@ -1,0 +1,42 @@
+{
+  "lexicon": 1,
+  "id": "coop.lexicon.event.listing",
+  "description": "ASSUMED, 2026-09-13. No canonical coop.lexicon.* source exists yet (Lucian has not normalized the namespace) — this is a reconstruction of the shape `apps/appview/src/lib/events.ts#routeListing` actually writes (see `apps/appview/src/lexicons/coop.ts`). KNOWN DIVERGENCE from `docs/research/context/2026-09-12_regenos-building-blocks-handoff.md` (read from `technefoundation/regenOS@c3e34d4`, also not canonical): that note describes `event.listing` as 'Just a strongRef plus createdAt' — our code additionally writes `school`, `status` and `tags` (the whole point of tag-routed curation, per `docs/research-brief-v0.2.md`: 'coop.lexicon.event.listing has zero repos — we are the first mover on tag-routed listings'). This is gap 7 in `docs/interop-audit.md`: ask Lucian whether the extra fields are acceptable additions or need their own sidecar.",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Written by the SCHOOL (curate-listing / remove-listing), never the host: the curation surface that routes a borrowed event onto the school's own calendar and peer exchange.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["event", "school"],
+        "properties": {
+          "event": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef",
+            "description": "Strong reference to the community.lexicon.calendar.event being curated."
+          },
+          "school": {
+            "type": "string",
+            "format": "did",
+            "description": "ASSUMED, beyond the regenOS 'strongRef plus createdAt' shape. DID of the school doing the curating — the listing's own author, always."
+          },
+          "status": {
+            "type": "string",
+            "knownValues": ["listed", "removed"],
+            "description": "ASSUMED, beyond the regenOS shape. A moderation removal (`remove-listing`, Steward-gated) is sticky — see `lib/events.ts#decideListingEdit`."
+          },
+          "tags": {
+            "type": "array",
+            "description": "ASSUMED, beyond the regenOS shape. The event's tags at the time of listing, carried for peer routing.",
+            "items": { "type": "string", "maxLength": 64 }
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          }
+        }
+      }
+    }
+  }
+}
