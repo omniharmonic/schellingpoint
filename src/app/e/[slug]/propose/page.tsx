@@ -10,6 +10,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
+import { Checkbox } from '@/components/ui/checkbox'
 import { DashboardLayout } from '@/components/DashboardLayout'
 import { useAuth } from '@/hooks/useAuth'
 import { useEvent } from '@/contexts/EventContext'
@@ -138,6 +139,29 @@ export default function ProposePage() {
   const [isSubmitting, setIsSubmitting] = React.useState(false)
   const [isSuccess, setIsSuccess] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
+  // ATProto opt-in: shown only when the profile has a linked DID; the default
+  // is the profile's `publish_proposals` preference.
+  const [atprotoLinked, setAtprotoLinked] = React.useState(false)
+  const [publishToAtproto, setPublishToAtproto] = React.useState(false)
+
+  React.useEffect(() => {
+    if (!user) return
+    const token = getAccessToken()
+    if (!token) return
+    let cancelled = false
+    fetch('/api/atproto/me', { headers: { Authorization: `Bearer ${token}` } })
+      .then(async (res) => {
+        if (!res.ok || cancelled) return
+        const me = await res.json()
+        if (cancelled || me?.configured === false) return
+        setAtprotoLinked(!!me?.linked)
+        setPublishToAtproto(!!me?.linked && !!me?.publishProposals)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [user])
 
   // Generate event days from event dates
   const eventDays = React.useMemo(() => {
@@ -294,6 +318,7 @@ export default function ProposePage() {
           self_hosted_end_time: isSelfHosted && selfHostedDay && selfHostedEndTime
             ? buildTimestamp(selfHostedDay, selfHostedEndTime, event.timezone) : null,
           track_id: trackId,
+          ...(atprotoLinked ? { publish_to_atproto: publishToAtproto } : {}),
         }),
       })
 
@@ -755,6 +780,27 @@ export default function ProposePage() {
                     ))}
                 </div>
               </div>
+
+              {/* ATProto opt-in (only when the profile has a linked DID) */}
+              {atprotoLinked && (
+                <div className="rounded-lg border p-4 space-y-2">
+                  <label className="flex items-start gap-3 cursor-pointer">
+                    <Checkbox
+                      id="publish-to-atproto"
+                      checked={publishToAtproto}
+                      onCheckedChange={(checked) => setPublishToAtproto(checked === true)}
+                      className="mt-0.5"
+                    />
+                    <span className="text-sm">
+                      <span className="font-medium">Also publish this proposal to my ATProto repo</span>
+                      <span className="block text-xs text-muted-foreground mt-1">
+                        This writes a public record to your ATProto repository. It can be deleted, but copies may
+                        persist on the network. You can publish or withdraw later from the session page.
+                      </span>
+                    </span>
+                  </label>
+                </div>
+              )}
 
               {/* Error */}
               {error && (

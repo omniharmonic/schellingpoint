@@ -3,7 +3,7 @@
 import * as React from 'react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { FileText, LayoutGrid, Settings, ArrowLeft, Megaphone, BarChart3, Tags, Ticket, DollarSign, Users, Menu, X, ScanLine } from 'lucide-react'
+import { FileText, LayoutGrid, Settings, ArrowLeft, Megaphone, BarChart3, Tags, Ticket, DollarSign, Users, Menu, X, ScanLine, Globe } from 'lucide-react'
 import { useEvent, useEventRole } from '@/contexts/EventContext'
 import { NetworkMark } from '@/components/GatheringArtwork'
 import { WorkspaceHeader } from '@/components/WorkspaceHeader'
@@ -12,7 +12,7 @@ import { Badge } from '@/components/ui/badge'
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
   const event = useEvent()
-  const { can, isAdmin } = useEventRole()
+  const { can, isAdmin, role } = useEventRole()
   const pathname = usePathname()
   const [open, setOpen] = React.useState(false)
   const base = `/e/${event.slug}/admin`
@@ -33,6 +33,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
       { label: 'Tickets', href: `${base}/tickets`, icon: Ticket, show: isAdmin },
       { label: 'Revenue', href: `${base}/revenue`, icon: DollarSign, show: isAdmin },
       { label: 'Analytics', href: `${base}/analytics`, icon: BarChart3, show: can('viewAnalytics') },
+      { label: 'Network', href: `${base}/atproto`, icon: Globe, show: isAdmin || role === 'moderator' },
     ] },
   ]
   const active = (href: string) => href === base ? pathname === base || pathname?.startsWith(`${base}/sessions`) : pathname === href || pathname?.startsWith(`${href}/`)

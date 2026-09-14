@@ -1,9 +1,11 @@
-import { NextResponse } from 'next/server'
+import { NextResponse, after } from 'next/server'
 import { getUserFromRequest } from '@/lib/api/getUser'
 import { createAdminClient } from '@/lib/supabase/server'
 import { canRolePerform } from '@/lib/permissions'
 import { canDelete, isValidTransition } from '@/lib/events/lifecycle'
 import { formatInEventTimezone, parseTimeInTimezone } from '@/lib/events/timezone'
+import { publishPolicy } from '@/lib/atproto/publish'
+import { publishTally } from '@/lib/atproto/tally'
 import type { EventRow, EventStatus, EventTheme } from '@/types/event'
 
 /**
@@ -200,6 +202,44 @@ function buildUpdate(body: Body, current: EventRow): EventUpdate {
   return update
 }
 
+/** Settings whose change rewrites the public `freeschool.draft.policy` record. */
+const POLICY_KEYS: Array<keyof EventUpdate> = [
+  'vote_credits_per_user', 'voting_mechanism', 'voting_opens_at', 'voting_closes_at',
+  'proposals_open_at', 'proposals_close_at', 'allowed_formats', 'allowed_durations',
+  'max_proposals_per_user', 'require_proposal_approval',
+]
+
+/**
+ * Network side effects of a settings save, for gatherings with a linked actor.
+ * Runs after the response (`after`): a tally can mean dozens of PDS writes and
+ * a network failure must never turn a saved setting into an error.
+ */
+function scheduleNetworkWrites(eventId: string, userId: string, current: EventRow, nextStatus: EventStatus, update: EventUpdate): void {
+  const votingClosed = current.status === 'voting_open' && nextStatus !== 'voting_open'
+  const policyChanged = POLICY_KEYS.some((key) => key in update)
+  if (!votingClosed && !policyChanged) return
+  after(async () => {
+    if (votingClosed) {
+      try {
+        const { results } = await publishTally({ eventId, callerUserId: userId, round: 'pre-event' })
+        const failed = results.filter((r) => r.error)
+        if (failed.length) console.error('[settings] tally publish had failures:', failed)
+      } catch (err) {
+        console.error('[settings] tally publish failed:', err)
+      }
+    }
+    if (policyChanged) {
+      try {
+        const { results } = await publishPolicy({ eventId, callerUserId: userId })
+        const failed = results.filter((r) => r.error)
+        if (failed.length) console.error('[settings] policy publish had failures:', failed)
+      } catch (err) {
+        console.error('[settings] policy publish failed:', err)
+      }
+    }
+  })
+}
+
 async function loadMembership(eventId: string, userId: string) {
   const db = await createAdminClient()
   const { data: member, error } = await db.from('event_members').select('role').eq('event_id', eventId).eq('user_id', userId).maybeSingle()
@@ -271,6 +311,8 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ ev
 
   let notified = 0
   if (nextStatus === 'voting_open' && current.status !== 'voting_open') notified = await notifyMembers(db, saved as EventRow)
+
+  if ((saved as { actor_did?: string | null }).actor_did) scheduleNetworkWrites(eventId, user.id, current, nextStatus, update)
 
   return NextResponse.json({ success: true, event: saved, notified })
 }

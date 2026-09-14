@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/server'
 import { getUserFromRequest } from '@/lib/api/getUser'
+import { publishCohost } from '@/lib/atproto/participant'
 
 // POST /api/invite/[token]/accept — Accept a co-host invite
 export async function POST(
@@ -119,5 +120,23 @@ export async function POST(
     return NextResponse.json({ error: insertError.message }, { status: 500 })
   }
 
-  return NextResponse.json({ session_id: invite.session_id, event_slug: eventSlug })
+  // ATProto: if the acceptor has a linked DID and the author has published the
+  // proposal, write the co-host's own `schellingpoint.draft.cohost` record.
+  // Best-effort: a network failure never undoes the acceptance.
+  let atproto: { uri?: string; error?: string } | undefined
+  const [{ data: acceptorProfile }, { data: sessionRefs }] = await Promise.all([
+    admin.from('profiles').select('did').eq('id', user.id).maybeSingle(),
+    admin.from('sessions').select('proposal_uri, proposal_cid').eq('id', invite.session_id).maybeSingle(),
+  ])
+  if (acceptorProfile?.did && sessionRefs?.proposal_uri && sessionRefs?.proposal_cid) {
+    try {
+      const result = await publishCohost({ sessionId: invite.session_id, userId: user.id })
+      atproto = { uri: result.uri }
+    } catch (e) {
+      console.error('[invite/accept] atproto cohost publish failed:', e)
+      atproto = { error: e instanceof Error ? e.message : 'publish failed' }
+    }
+  }
+
+  return NextResponse.json({ session_id: invite.session_id, event_slug: eventSlug, ...(atproto ? { atproto } : {}) })
 }

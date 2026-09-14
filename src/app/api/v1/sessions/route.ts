@@ -1,6 +1,8 @@
+import { NextResponse } from 'next/server'
 import { createAdminClient, createRequestClient } from '@/lib/supabase/server'
 import { validateApiKey, resolvePartnerEvent } from '@/lib/api/auth'
 import { getUserFromRequest } from '@/lib/api/getUser'
+import { publishProposal } from '@/lib/atproto/participant'
 import {
   apiSuccess,
   unauthorized,
@@ -108,7 +110,7 @@ export async function POST(request: Request) {
   // Check event's require_proposal_approval setting
   const { data: event, error: eventError } = await supabase
     .from('events')
-    .select('require_proposal_approval')
+    .select('require_proposal_approval, gathering_uri')
     .eq('id', body.event_id)
     .single()
 
@@ -116,8 +118,11 @@ export async function POST(request: Request) {
     return badRequest('Event not found')
   }
 
-  // Build sanitized insert object — only allow known fields
-  const insert: Record<string, unknown> = { host_id: user.id }
+  // Build sanitized insert object — only allow known fields. The id is minted
+  // here so the ATProto hook below can find the row without a user-scoped
+  // SELECT after the RLS-respecting insert.
+  const sessionId = crypto.randomUUID()
+  const insert: Record<string, unknown> = { id: sessionId, host_id: user.id }
   for (const field of ALLOWED_FIELDS) {
     if (body[field] !== undefined) {
       insert[field] = body[field]
@@ -136,7 +141,31 @@ export async function POST(request: Request) {
     return badRequest(error.message)
   }
 
-  return new Response(null, { status: 201 })
+  // ATProto: publish the proposal into the AUTHOR's own repo, best-effort.
+  // The body flag overrides the profile default; a missing DID or an
+  // unpublished gathering simply skips. A network failure never fails the
+  // proposal — the author can publish later from the session page.
+  let atproto: { uri?: string; error?: string } | undefined
+  if (event.gathering_uri) {
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('did, publish_proposals')
+      .eq('id', user.id)
+      .maybeSingle()
+    const wantsPublish =
+      typeof body.publish_to_atproto === 'boolean' ? body.publish_to_atproto : !!profile?.publish_proposals
+    if (profile?.did && wantsPublish) {
+      try {
+        const result = await publishProposal({ sessionId, userId: user.id })
+        atproto = { uri: result.uri }
+      } catch (e) {
+        console.error('[sessions POST] atproto publish failed:', e)
+        atproto = { error: e instanceof Error ? e.message : 'publish failed' }
+      }
+    }
+  }
+
+  return NextResponse.json({ id: sessionId, ...(atproto ? { atproto } : {}) }, { status: 201 })
 }
 export async function PUT() { return methodNotAllowed() }
 export async function PATCH() { return methodNotAllowed() }

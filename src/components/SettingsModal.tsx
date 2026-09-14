@@ -13,6 +13,7 @@ import {
   X,
   Plus,
   Camera,
+  AtSign,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -41,6 +42,16 @@ function getAccessToken(): string | null {
 interface SettingsModalProps {
   isOpen: boolean
   onClose: () => void
+}
+
+/** Shape of GET /api/atproto/me. */
+interface AtIdentity {
+  configured: boolean
+  oauthMode: 'confidential' | 'loopback'
+  linked: boolean
+  did: string | null
+  handle: string | null
+  publishProposals: boolean
 }
 
 const DEFAULT_INTERESTS = [
@@ -128,6 +139,32 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       setShowSuggestions(false)
     }
   }, [isOpen, profile])
+
+  // ATProto identity (Bluesky). Loaded from /api/atproto/me when the modal opens.
+  const [atInfo, setAtInfo] = React.useState<AtIdentity | null>(null)
+  const [atHandle, setAtHandle] = React.useState('')
+  const [atBusy, setAtBusy] = React.useState(false)
+  const [atMessage, setAtMessage] = React.useState<{ type: 'success' | 'error'; text: string } | null>(null)
+
+  const loadAtIdentity = React.useCallback(async () => {
+    const token = getAccessToken()
+    if (!token) return
+    try {
+      const res = await fetch('/api/atproto/me', {
+        headers: { Accept: 'application/json', Authorization: `Bearer ${token}` },
+      })
+      if (res.ok) setAtInfo((await res.json()) as AtIdentity)
+    } catch (err) {
+      console.error('Error loading ATProto identity:', err)
+    }
+  }, [])
+
+  React.useEffect(() => {
+    if (isOpen) {
+      setAtMessage(null)
+      loadAtIdentity()
+    }
+  }, [isOpen, loadAtIdentity])
 
   // Filter suggestions based on input
   const filteredSuggestions = React.useMemo(() => {
@@ -262,6 +299,77 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       setSaveMessage({ type: 'error', text: 'An error occurred. Please try again.' })
     } finally {
       setIsSaving(false)
+    }
+  }
+
+  const handleAtLink = async () => {
+    const token = getAccessToken()
+    const handle = atHandle.trim().replace(/^@/, '')
+    if (!token || !handle) return
+    setAtBusy(true)
+    setAtMessage(null)
+    try {
+      const next = `${window.location.pathname}${window.location.search}`
+      const qs = new URLSearchParams({ handle, purpose: 'link', next })
+      const res = await fetch(`/api/atproto/auth/start?${qs}`, {
+        headers: { Accept: 'application/json', Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok || !data?.url) {
+        setAtMessage({ type: 'error', text: data?.detail || 'Could not start linking. Check the handle and try again.' })
+        setAtBusy(false)
+        return
+      }
+      window.location.assign(data.url)
+    } catch {
+      setAtMessage({ type: 'error', text: 'Could not start linking. Please try again.' })
+      setAtBusy(false)
+    }
+  }
+
+  const handleAtUnlink = async () => {
+    const token = getAccessToken()
+    if (!token) return
+    if (!window.confirm('Unlink this Bluesky identity? Records already published to your repo stay there; you can remove them from your Bluesky account.')) return
+    setAtBusy(true)
+    setAtMessage(null)
+    try {
+      const res = await fetch('/api/atproto/me', {
+        method: 'DELETE',
+        headers: { Accept: 'application/json', Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setAtMessage({ type: 'error', text: data?.detail || 'Could not unlink. Please try again.' })
+      } else {
+        setAtInfo(data as AtIdentity)
+        setAtMessage({ type: 'success', text: 'Unlinked.' })
+      }
+    } catch {
+      setAtMessage({ type: 'error', text: 'Could not unlink. Please try again.' })
+    } finally {
+      setAtBusy(false)
+    }
+  }
+
+  const handleAtPublishToggle = async (publish: boolean) => {
+    const token = getAccessToken()
+    if (!token || !atInfo) return
+    const previous = atInfo
+    setAtInfo({ ...atInfo, publishProposals: publish })
+    setAtMessage(null)
+    try {
+      const res = await fetch('/api/atproto/me', {
+        method: 'PATCH',
+        headers: { Accept: 'application/json', Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ publish_proposals: publish }),
+      })
+      if (!res.ok) throw new Error(await res.text())
+      setAtInfo((await res.json()) as AtIdentity)
+    } catch (err) {
+      console.error('Error updating publish_proposals:', err)
+      setAtInfo(previous)
+      setAtMessage({ type: 'error', text: 'Could not save that setting. Please try again.' })
     }
   }
 
@@ -466,6 +574,83 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
               </div>
             )}
           </div>
+
+          {/* ATProto identity */}
+          {atInfo?.configured && (
+            <div className="space-y-3 pt-4 border-t border-border" data-testid="atproto-identity">
+              <label className="text-sm font-medium flex items-center gap-2">
+                <AtSign className="h-4 w-4 text-muted-foreground" />
+                ATProto identity
+              </label>
+              {atInfo.linked ? (
+                <>
+                  <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/30 px-3 py-2">
+                    <div className="min-w-0">
+                      <a
+                        href={`https://bsky.app/profile/${encodeURIComponent(atInfo.handle || atInfo.did || '')}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-sm font-medium hover:underline truncate block"
+                      >
+                        @{atInfo.handle || atInfo.did}
+                      </a>
+                      {atInfo.did && (
+                        <p className="text-[11px] font-mono text-muted-foreground truncate">{atInfo.did}</p>
+                      )}
+                    </div>
+                    <Button type="button" variant="outline" size="sm" onClick={handleAtUnlink} disabled={atBusy}>
+                      Unlink
+                    </Button>
+                  </div>
+                  <label className="flex items-start gap-3 text-sm cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5 h-4 w-4"
+                      checked={atInfo.publishProposals}
+                      onChange={(e) => handleAtPublishToggle(e.target.checked)}
+                      disabled={atBusy}
+                    />
+                    <span>
+                      <span className="font-medium">Publish my proposals to my repo</span>
+                      <span className="block text-xs text-muted-foreground mt-0.5">
+                        Proposals you submit are written to your own repository on the open network under this
+                        identity. They are public and may be copied by other services even after you delete them.
+                      </span>
+                    </span>
+                  </label>
+                </>
+              ) : (
+                <div className="space-y-2">
+                  <div className="flex gap-2">
+                    <Input
+                      placeholder="you.bsky.social"
+                      autoComplete="username"
+                      value={atHandle}
+                      onChange={(e) => setAtHandle(e.target.value)}
+                      disabled={atBusy}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault()
+                          handleAtLink()
+                        }
+                      }}
+                    />
+                    <Button type="button" variant="outline" onClick={handleAtLink} disabled={atBusy || !atHandle.trim()}>
+                      {atBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Link'}
+                    </Button>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Your proposals and public actions will be attached to this identity on the open network.
+                  </p>
+                </div>
+              )}
+              {atMessage && (
+                <p className={`text-xs ${atMessage.type === 'success' ? 'text-green-500' : 'text-destructive'}`}>
+                  {atMessage.text}
+                </p>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Footer */}

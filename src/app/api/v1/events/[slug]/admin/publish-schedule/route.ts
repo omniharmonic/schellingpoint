@@ -8,6 +8,26 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/server'
 import { getUserFromRequest } from '@/lib/api/getUser'
+import { publishSchedule } from '@/lib/atproto/publish'
+
+/**
+ * Mirror the published schedule onto the ATProto network when the event has a
+ * gathering actor. Counts SESSIONS: one whose slot record was written is
+ * `published`, one with any failed record is `failed`. A network failure never
+ * fails the HTTP request — the app-side publish already succeeded.
+ */
+async function publishScheduleToNetwork(eventId: string, userId: string): Promise<{ published: number; failed: number; error?: string }> {
+  try {
+    const { results } = await publishSchedule({ eventId, callerUserId: userId })
+    const failedIds = new Set(results.filter((r) => r.error).map((r) => r.id))
+    const publishedIds = new Set(results.filter((r) => r.kind === 'slot' && !r.error).map((r) => r.id))
+    for (const id of failedIds) publishedIds.delete(id)
+    return { published: publishedIds.size, failed: failedIds.size }
+  } catch (err) {
+    console.error('[publish-schedule] atproto publish failed:', err)
+    return { published: 0, failed: 0, error: err instanceof Error ? err.message : 'Network publish failed' }
+  }
+}
 
 async function notifySchedulePublished(
   supabase: Awaited<ReturnType<typeof createAdminClient>>,
@@ -65,7 +85,7 @@ export async function POST(
   // Get event
   const { data: event, error: eventError } = await supabase
     .from('events')
-    .select('id, name, schedule_published_at, last_schedule_change_at')
+    .select('id, name, schedule_published_at, last_schedule_change_at, actor_did')
     .eq('slug', slug)
     .single()
 
@@ -112,11 +132,15 @@ export async function POST(
   // never undo a successful publish, so it is logged and reported, not thrown.
   const notified = await notifySchedulePublished(supabase, event.id, slug, event.name, scheduledCount || 0)
 
+  // Same rule for the network: linked gatherings mirror the schedule, errors are reported, never thrown.
+  const atproto = event.actor_did ? await publishScheduleToNetwork(event.id, user.id) : undefined
+
   return NextResponse.json({
     success: true,
     publishedAt: now,
     scheduledSessions: scheduledCount || 0,
     notified,
+    ...(atproto ? { atproto } : {}),
     message: `Schedule published with ${scheduledCount || 0} scheduled sessions`,
   })
 }

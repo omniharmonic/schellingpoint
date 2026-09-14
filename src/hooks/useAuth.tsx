@@ -347,7 +347,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signOut = React.useCallback(async () => {
     const storageKey = getStorageKey()
-    await fetch('/api/auth/session', { method: 'DELETE' })
+    await Promise.all([
+      fetch('/api/auth/session', { method: 'DELETE' }),
+      // Also drop the ATProto browser session (sp_at_session), if any.
+      fetch('/api/atproto/auth/logout', { method: 'POST' }).catch(() => undefined),
+    ])
     localStorage.removeItem(storageKey)
     setUser(null)
     setProfile(null)

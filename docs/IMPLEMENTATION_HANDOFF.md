@@ -355,6 +355,10 @@ npx supabase gen types typescript --local > src/types/supabase.ts
 See `docs/design/UX_POLISH_QA.md` for reproduced errors, fixes, validation, and remaining checks. New local migrations provide atomic event creation and database-enforced participation rules; deploy these before the corresponding app code. Event settings now supports publishing and lifecycle transitions. Build, typecheck, 20 targeted tests, and rolled-back SQL participation checks pass. Full organizer browser verification awaits the prepared local event's terms/submission approval; production readiness is not yet signed off.
 
 
+### ATProto branch (2026-09-14)
+
+Branch `atproto` layers the AT Protocol onto this stack: Bluesky sign-in and DID linking, a per-gathering actor account that publishes the gathering, venues, tracks, slot grids and every scheduled session as canonical `community.lexicon.calendar.event` records (plus `schellingpoint.draft.*` sidecars), proposals written to the proposer's own repo, co-host/endorsement/RSVP records in participants' repos, a k-suppressed public tally, a Jetstream indexer with hourly reconciliation, and a privacy audit. Read `docs/ATPROTO_IMPLEMENTATION.md` first; it lists the deviations from `docs/ATPROTO_MIGRATION_SPEC.md` and the go-live checklist.
+
 ### 2026-09-14 functional completeness pass
 
 Gap audit of the post-overhaul app found broken flows, security holes at the database boundary, and organizer capabilities the plan implied but never shipped. All fixed on `main`:

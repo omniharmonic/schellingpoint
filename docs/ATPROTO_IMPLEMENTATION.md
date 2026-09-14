@@ -1,6 +1,6 @@
 # Schelling Point on ATProto — implementation (branch `atproto`)
 
-Status: in progress, 2026-09-14. This document is the engineering companion to
+Status: first complete pass, 2026-09-14 (branch `atproto`, not merged). This document is the engineering companion to
 `ATPROTO_MIGRATION_SPEC.md`. The spec describes the target; this file records
 what is built, where, and where it deliberately deviates.
 
@@ -94,3 +94,28 @@ callback is `http://127.0.0.1:3001/oauth/callback`.
   `sessions.host_name` never appears in a public record.
 - Manual: link a bsky.social account, connect a gathering account, publish, and
   open the records in a generic client (e.g. `https://pdsls.dev/at://<did>`).
+
+## 7. What is built (2026-09-14)
+
+| Area | Files | Tests |
+|---|---|---|
+| Foundation: lexicons, builders, validation, OAuth client, sessions, agents, writes, actor port, index store | `lexicons/`, `src/lib/atproto/*`, `supabase/migrations/20260916000001_atproto_foundation.sql` | `tests/atproto-records.spec.ts` |
+| Identity: Bluesky sign-in, DID linking, gathering-account linking, Supabase session bridge, profile settings | `src/app/oauth/*`, `src/app/api/atproto/{auth,me}/*`, `src/lib/atproto/{bridge,bsky-profile}.ts`, `src/app/login/page.tsx`, `src/components/SettingsModal.tsx` | `tests/atproto-auth.spec.ts` |
+| Gathering publishing: policy, gathering, calendar events, configs, venues, tracks, slot grids, slots, stubs, move/cancel, tally; admin "Network" page | `src/lib/atproto/{publish,tally}.ts`, `src/app/api/v1/events/[slug]/admin/atproto/**`, `src/app/e/[slug]/admin/atproto/page.tsx`, hooks in `publish-schedule` and event settings routes | `tests/atproto-publish.spec.ts` |
+| Participant writes: proposal publish/withdraw, co-host confirmation, public endorsement, opt-in public RSVP; session "On the network" card; propose opt-in | `src/lib/atproto/participant.ts`, `src/app/api/v1/events/[slug]/sessions/[id]/atproto/route.ts`, `src/components/AtprotoSessionActions.tsx`, hooks in `sessions` POST and invite accept | `tests/atproto-participant.spec.ts` |
+| Indexing: Jetstream consumer, hourly reconciliation, public records read, privacy audit | `src/lib/atproto/ingest.ts`, `scripts/atproto-indexer.ts`, `scripts/atproto-privacy-audit.ts`, `src/app/api/atproto/{sync,records}/route.ts`, `vercel.json` cron, `supabase/migrations/20260916000002_atproto_ingest_rules.sql` | `tests/atproto-ingest.spec.ts` |
+
+Run: `npm run lexicons:validate`, `npm run typecheck`, `npm test`, `npm run atproto:audit`, `npm run atproto:indexer` (long-running; run it on a host that can hold a WebSocket, e.g. a small VM or Fly machine, with the production env).
+
+### Going live checklist
+1. Apply migrations `20260916000001` and `20260916000002` to production (`npx supabase db push`).
+2. Set `ATPROTO_SESSION_SECRET` and `ATPROTO_CUSTODY_KEY` (each `openssl rand -hex 32`) in Vercel; `NEXT_PUBLIC_APP_URL` must be the https origin. Optional: `ATPROTO_OAUTH_PRIVATE_JWK` to pin the client key across environments.
+3. Deploy; confirm `https://<host>/oauth/client-metadata.json` returns the confidential metadata and `jwks.json` a key.
+4. Sign in with a Bluesky account from `/login`; link a gathering account on `/e/<slug>/admin/atproto` (OAuth or app password); press "Publish all"; open the records at the pdsls link on that page.
+5. Keep `CRON_SECRET` set so `/api/atproto/sync` (and notification dispatch) run.
+
+### Known caveats
+- Local Supabase's GoTrue rejects the local `sb_secret_…` key on `auth.admin.*` calls, so the sign-in bridge (create user, mint session) cannot complete locally without an ES256 service-role JWT signed with the local container's key. Hosted Supabase is unaffected. Everything else (PAR against bsky.social, record building, publishing via injected writers, ingest) is exercised locally.
+- Jetstream v1 replays at most a 36-hour window from a cursor; the hourly reconciliation covers longer outages.
+- `sessions.host_name` is never written to any record. Host-less imported proposals (author DID not linked here) enter the review queue with `host_id` NULL and `host_did` set; organizers see the handle, not a typed name.
+- The ballot-key vote unlinkability design (spec §5.2–5.4) is not implemented; votes remain private rows and only the k-suppressed tally is public.

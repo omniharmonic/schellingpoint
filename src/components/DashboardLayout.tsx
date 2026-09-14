@@ -146,6 +146,17 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
   }
   const [showOnboarding, setShowOnboarding] = React.useState(false)
   const [showSettings, setShowSettings] = React.useState(false)
+  // Deep link: any page inside the workspace can open profile settings with ?settings=1
+  // (used by the ATProto "Link a Bluesky account" hint).
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return
+    const url = new URL(window.location.href)
+    if (url.searchParams.get('settings') === '1') {
+      setShowSettings(true)
+      url.searchParams.delete('settings')
+      window.history.replaceState(null, '', url.pathname + (url.search || '') + url.hash)
+    }
+  }, [])
 
   // Vote state with caching
   const [userVotes, setUserVotes] = React.useState<Record<string, number>>(() => {

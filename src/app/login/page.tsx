@@ -37,10 +37,54 @@ function LoginContent() {
     if (searchParams.get('error') === 'auth') {
       setError('Authentication failed. Please try again.')
     }
+    if (searchParams.get('error') === 'atproto') {
+      setError('Bluesky sign-in did not complete. Please try again.')
+    }
     if (searchParams.get('logged_out') === 'true') {
       setLoggedOutMessage(true)
     }
   }, [searchParams])
+
+  // Sign in with Bluesky (ATProto OAuth). Hidden until the server says it is configured.
+  const [atConfigured, setAtConfigured] = React.useState(false)
+  const [atHandle, setAtHandle] = React.useState('')
+  const [atLoading, setAtLoading] = React.useState(false)
+
+  React.useEffect(() => {
+    let cancelled = false
+    fetch('/api/atproto/me', { headers: { Accept: 'application/json' } })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!cancelled && data?.configured) setAtConfigured(true)
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const handleBluesky = async (e: React.FormEvent) => {
+    e.preventDefault()
+    const handle = atHandle.trim().replace(/^@/, '')
+    if (!handle) return
+    setAtLoading(true)
+    setError(null)
+    try {
+      const next = safeReturnPath(searchParams.get('returnTo') || searchParams.get('redirect'))
+      const qs = new URLSearchParams({ handle, purpose: 'signin', next })
+      const res = await fetch(`/api/atproto/auth/start?${qs}`, { headers: { Accept: 'application/json' } })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok || !data?.url) {
+        setError(data?.detail || 'Could not start Bluesky sign-in. Check the handle and try again.')
+        setAtLoading(false)
+        return
+      }
+      window.location.assign(data.url)
+    } catch {
+      setError('Could not start Bluesky sign-in. Please try again.')
+      setAtLoading(false)
+    }
+  }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -150,6 +194,32 @@ function LoginContent() {
               Send sign-in link <ArrowRight className="ml-2 h-4 w-4" />
             </Button>
           </form>
+          {atConfigured && (
+            <div className="mt-6 pt-6 border-t border-border" data-testid="bluesky-signin">
+              <p className="text-xs tracking-wider text-muted-foreground mb-3">Or sign in with Bluesky</p>
+              <form onSubmit={handleBluesky} className="space-y-3">
+                <div className="space-y-2">
+                  <label htmlFor="at-handle" className="block text-sm font-medium">Bluesky handle</label>
+                  <Input
+                    id="at-handle"
+                    name="handle"
+                    autoComplete="username"
+                    placeholder="you.bsky.social"
+                    value={atHandle}
+                    onChange={(e) => setAtHandle(e.target.value)}
+                    disabled={atLoading}
+                    className="text-base"
+                  />
+                </div>
+                <Button type="submit" variant="outline" className="w-full" loading={atLoading} disabled={!atHandle.trim()}>
+                  Continue with Bluesky <ArrowRight className="ml-2 h-4 w-4" />
+                </Button>
+                <p className="text-xs text-muted-foreground">
+                  Your proposals and public actions will be attached to this identity on the open network.
+                </p>
+              </form>
+            </div>
+          )}
           <p className="text-xs text-center text-muted-foreground mt-4 font-mono">
             No password to remember.
             <br />

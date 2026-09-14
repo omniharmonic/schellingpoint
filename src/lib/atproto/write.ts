@@ -9,7 +9,13 @@ import 'server-only'
  */
 import { Agent, AtpAgent, XRPCError } from '@atproto/api'
 import { atUri, resolveDidDoc, resolveIdentifier } from './identity'
-import { assertValidRecord } from './validate'
+import { assertNoUnknownFields, assertValidRecord } from './validate'
+
+/** Collections we borrow and must never extend (the sidecar rule, enforced at write time). */
+const BORROWED_PREFIXES = ['community.lexicon.', 'coop.lexicon.', 'freeschool.draft.']
+export function isBorrowedCollection(collection: string): boolean {
+  return BORROWED_PREFIXES.some((p) => collection.startsWith(p))
+}
 
 export interface WriteResult {
   uri: string
@@ -70,7 +76,10 @@ async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 export async function putRecord(agent: Agent, input: PutRecordInput): Promise<WriteResult> {
-  if (!input.skipLocalValidation) assertValidRecord(input.collection, input.record)
+  if (!input.skipLocalValidation) {
+    assertValidRecord(input.collection, input.record)
+    if (isBorrowedCollection(input.collection)) assertNoUnknownFields(input.collection, input.record as object)
+  }
   const record = { ...input.record, $type: input.collection }
   const res = await withRetry(() =>
     agent.com.atproto.repo.putRecord({

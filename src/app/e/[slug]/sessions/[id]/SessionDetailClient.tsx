@@ -40,6 +40,7 @@ import { AddToCalendar } from '@/components/AddToCalendar'
 import { RSVPButton } from '@/components/RSVPButton'
 import { SessionFeedback } from '@/components/SessionFeedback'
 import { SessionResources } from '@/components/SessionResources'
+import { AtprotoSessionActions } from '@/components/AtprotoSessionActions'
 import { useAuth } from '@/hooks/useAuth'
 import { useEvent, useEventRole } from '@/contexts/EventContext'
 import { votesToCredits, nextVoteCost } from '@/lib/utils'
@@ -1054,6 +1055,14 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
               sessionId={sessionId}
               eventSlug={event.slug}
               canManage={canManageSession}
+            />
+
+            {/* ATProto: the session on the network + participant-side actions */}
+            <AtprotoSessionActions
+              sessionId={sessionId}
+              eventSlug={event.slug}
+              signedIn={!!user}
+              userRsvpStatus={userRsvpStatus}
             />
 
             {/* Delete Confirmation Modal */}
