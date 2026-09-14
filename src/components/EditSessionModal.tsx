@@ -93,7 +93,7 @@ function ProfileSearch({
   const [isSearching, setIsSearching] = React.useState(false)
   const [showDropdown, setShowDropdown] = React.useState(false)
   const containerRef = React.useRef<HTMLDivElement>(null)
-  const debounceRef = React.useRef<ReturnType<typeof setTimeout>>()
+  const debounceRef = React.useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
   React.useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current)

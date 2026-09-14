@@ -21,3 +21,17 @@ test('slug availability identifies an existing event', async ({request}) => {
   expect(response.ok()).toBe(true)
   expect((await response.json()).available).toBe(false)
 })
+
+
+test('server session mirror rejects forged tokens', async ({request}) => {
+  const response = await request.post(`${base}/api/auth/session`, {headers:{Authorization:'Bearer invalid'}})
+  expect(response.status()).toBe(401)
+  expect(response.headers()['set-cookie']).toBeUndefined()
+})
+
+test('personal calendar requires sign-in and unknown event exports stay private', async ({request}) => {
+  const personal = await request.get(`${base}/api/v1/events/ethboulder-2026/calendar?favorites=true`)
+  expect(personal.status()).toBe(401)
+  const unknown = await request.get(`${base}/api/v1/events/not-a-real-gathering/calendar`)
+  expect(unknown.status()).toBe(404)
+})

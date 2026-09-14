@@ -46,3 +46,32 @@ export async function createAdminClient() {
     }
   )
 }
+
+/** User-scoped writes preserve auth.uid() for RLS and participation triggers. */
+export function createRequestClient(request: Request) {
+  return createSupabaseClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    { global: { headers: { Authorization: request.headers.get('Authorization') || '' } },
+      auth: { persistSession: false, autoRefreshToken: false } }
+  )
+}
+
+/** Access-only cookie; the browser remains responsible for refreshing its session. */
+export async function createAccessClient() {
+  const token = (await cookies()).get('sp-access-token')?.value
+  return createSupabaseClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    { global: { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+      auth: { persistSession: false, autoRefreshToken: false } }
+  )
+}
+
+export async function getAccessUser() {
+  const token = (await cookies()).get('sp-access-token')?.value
+  if (!token) return null
+  const client = await createAccessClient()
+  const { data: { user }, error } = await client.auth.getUser(token)
+  return error ? null : user
+}

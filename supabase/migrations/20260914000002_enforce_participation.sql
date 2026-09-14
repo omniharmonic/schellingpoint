@@ -11,6 +11,7 @@ BEGIN
     SELECT * INTO gathering FROM public.events WHERE id = OLD.event_id;
     -- Cascading account/event deletion must still be able to remove its rows.
     IF FOUND AND EXISTS (SELECT 1 FROM public.profiles WHERE id = OLD.user_id)
+      AND EXISTS (SELECT 1 FROM public.sessions WHERE id = OLD.session_id)
       AND (gathering.status <> 'voting_open'
         OR (gathering.voting_opens_at IS NOT NULL AND now() < gathering.voting_opens_at)
         OR (gathering.voting_closes_at IS NOT NULL AND now() >= gathering.voting_closes_at)) THEN

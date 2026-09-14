@@ -5,7 +5,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import { createAdminClient } from '@/lib/supabase/server'
+import { createAdminClient, createRequestClient } from '@/lib/supabase/server'
 import { getUserFromRequest } from '@/lib/api/getUser'
 
 const TEST_SESSIONS = [
@@ -110,7 +110,7 @@ export async function POST(
     track_id: s.trackPreference ? trackMap[s.trackPreference] || null : null,
   }))
 
-  const { data: created, error } = await supabase
+  const { data: created, error } = await createRequestClient(request)
     .from('sessions')
     .insert(sessionsToCreate)
     .select('id, title')

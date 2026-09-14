@@ -1,4 +1,4 @@
-import { createAdminClient } from '@/lib/supabase/server'
+import { createAdminClient, createRequestClient } from '@/lib/supabase/server'
 import { validateApiKey } from '@/lib/api/auth'
 import { getUserFromRequest } from '@/lib/api/getUser'
 import {
@@ -85,6 +85,7 @@ export async function POST(request: Request) {
   let body: Record<string, unknown>
   try {
     body = await request.json()
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('Invalid body')
   } catch {
     return badRequest('Invalid JSON body')
   }
@@ -124,7 +125,7 @@ export async function POST(request: Request) {
   // If approval is not required, auto-approve the session
   insert.status = event.require_proposal_approval ? 'pending' : 'approved'
 
-  const { error } = await supabase.from('sessions').insert(insert)
+  const { error } = await createRequestClient(request).from('sessions').insert(insert)
 
   if (error) {
     return badRequest(error.message)

@@ -1,10 +1,8 @@
 import type { Metadata } from 'next'
 import { getEventBySlug } from '@/lib/events'
-import { notFound } from 'next/navigation'
+import { EventAccessGate } from '@/components/EventAccessGate'
+import { createAccessClient } from '@/lib/supabase/server'
 import { SessionDetailClient } from './SessionDetailClient'
-
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 
 interface SessionPageProps {
   params: Promise<{ slug: string; id: string }>
@@ -12,26 +10,11 @@ interface SessionPageProps {
 
 // Fetch session data for metadata generation (server-side)
 async function getSession(id: string, eventId: string) {
-  try {
-    const response = await fetch(
-      `${SUPABASE_URL}/rest/v1/sessions?id=eq.${id}&event_id=eq.${eventId}&select=*,host:profiles!host_id(id,display_name,bio,avatar_url,affiliation,building,telegram,ens,interests),cohosts:session_cohosts(user_id,display_order,profile:profiles(id,display_name,bio,avatar_url,affiliation,building,telegram,ens,interests)),track:tracks(id,name,color),venue:venues(*),time_slot:time_slots(*)`,
-      {
-        headers: {
-          'apikey': SUPABASE_KEY,
-          'Authorization': `Bearer ${SUPABASE_KEY}`,
-        },
-        next: { revalidate: 60 }, // Cache for 60 seconds
-      }
-    )
-
-    if (response.ok) {
-      const data = await response.json()
-      return data[0] || null
-    }
-    return null
-  } catch {
-    return null
-  }
+  const db = await createAccessClient()
+  const { data } = await db.from('sessions')
+    .select('*,host:profiles!host_id(id,display_name,bio,avatar_url,affiliation,building,telegram,ens,interests),cohosts:session_cohosts(user_id,display_order,profile:profiles(id,display_name,bio,avatar_url,affiliation,building,telegram,ens,interests)),track:tracks(id,name,color),venue:venues(*),time_slot:time_slots(*)')
+    .eq('id', id).eq('event_id', eventId).maybeSingle()
+  return data
 }
 
 // Generate dynamic metadata for social sharing
@@ -77,7 +60,7 @@ export async function generateMetadata({ params }: SessionPageProps): Promise<Me
   const description = `${format} by ${hostName}${trackName}. ${truncatedDescription}`
 
   // Build the canonical URL
-  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ||
+  const siteUrl = process.env.NEXT_PUBLIC_APP_URL ||
     (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000')
   const sessionUrl = `${siteUrl}/e/${slug}/sessions/${id}`
 
@@ -121,7 +104,7 @@ export default async function SessionDetailPage({ params }: SessionPageProps) {
   const event = await getEventBySlug(slug)
 
   if (!event) {
-    notFound()
+    return <EventAccessGate />
   }
 
   // Fetch session data server-side for initial render

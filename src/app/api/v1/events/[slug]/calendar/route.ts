@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { createAdminClient, createClient } from '@/lib/supabase/server'
+import { createAccessClient, getAccessUser } from '@/lib/supabase/server'
 import { generateICS, type ICSEvent, type ICSCalendar } from '@/lib/calendar/ics'
 
 /**
@@ -15,10 +15,9 @@ export async function GET(
 ) {
   const { slug } = await params
   const { searchParams } = new URL(request.url)
-  const includeAll = searchParams.get('all') === 'true'
   const favoritesOnly = searchParams.get('favorites') === 'true'
 
-  const supabase = await createAdminClient()
+  const supabase = await createAccessClient()
 
   // Fetch event
   const { data: event, error: eventError } = await supabase
@@ -38,8 +37,9 @@ export async function GET(
   let favoriteSessionIds: Set<string> | null = null
   if (favoritesOnly) {
     // Get user session to fetch favorites
-    const userSupabase = await createClient()
-    const { data: { user } } = await userSupabase.auth.getUser()
+    const user = await getAccessUser()
+    if (!user) return NextResponse.json({ error: 'Sign in to export your schedule' }, { status: 401 })
+    favoriteSessionIds = new Set()
 
     if (user) {
       const { data: favorites } = await supabase
@@ -78,7 +78,7 @@ export async function GET(
 
   // Filter to favorites if requested
   let filteredSessions = sessions || []
-  if (favoriteSessionIds && favoriteSessionIds.size > 0) {
+  if (favoriteSessionIds) {
     filteredSessions = filteredSessions.filter(s => favoriteSessionIds!.has(s.id))
   }
 

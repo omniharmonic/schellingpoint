@@ -67,3 +67,14 @@ Release requirements and remaining verification:
 - Full organizer creation/publishing/scheduling browser verification remains pending approval to accept the prepared local event's terms checkbox and submit it. The draft is still at `/create`; no test owner role was granted.
 - Payments remain disabled in this environment because `STRIPE_SECRET_KEY` is not configured. Payment processing was not exercised.
 - Existing private-event server rendering uses the admin client and relies on client-side access handling; a server-side privacy/isolation review remains necessary before a production readiness claim. This pass does not claim a full security audit or production sign-off.
+
+
+## Production release hardening — 2026-09-14
+
+- Upgraded Next.js to 15.5.25 and React to 19.3.0; updated compatible icon/types packages and patched transitive dependencies. PostCSS 8.5.28 override removes Next's stale nested dependency. npm audit reports zero vulnerabilities.
+- Verified access-token cookie bridges existing browser sign-in to server event authorization. Private/draft event data and metadata are gated before serialization. Added restrictive event visibility policies for events, sessions, rooms, time slots, tracks, roster, and cohosts; predicates avoid RLS recursion.
+- Organizer and participant session APIs preserve the caller's JWT for RLS/participation triggers. Existing organizers can curate external-host sessions in drafts.
+- Calendar exports now respect event visibility and session event_id. Personal exports require sign-in and preserve an empty selection.
+- Auth sign-out clears the access mirror and legacy SSR cookies.
+- 22 targeted regression tests pass; transaction-only SQL integration tests cover vote budgets, proposal limits, anonymous isolation, and organizer creation. No fixture roles were granted; all SQL fixture changes roll back.
+- Local browser confirms authenticated navigation and the interactive landing example after the runtime upgrade. Full organizer creation through the browser remains unexecuted because the terms checkbox was not approved; SQL tests cover the organizer insert regression with an existing fixture role.

@@ -1,4 +1,4 @@
-import { notFound } from 'next/navigation';
+import { EventAccessGate } from '@/components/EventAccessGate';
 import { getEventBySlug } from '@/lib/events';
 import { EventProvider } from '@/contexts/EventContext';
 
@@ -12,7 +12,7 @@ export default async function EventLayout({ params, children }: EventLayoutProps
   const event = await getEventBySlug(slug);
 
   if (!event) {
-    notFound();
+    return <EventAccessGate />;
   }
 
   return <EventProvider event={event}>{children}</EventProvider>;

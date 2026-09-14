@@ -353,3 +353,8 @@ npx supabase gen types typescript --local > src/types/supabase.ts
 ### September 14 reliability follow-up
 
 See `docs/design/UX_POLISH_QA.md` for reproduced errors, fixes, validation, and remaining checks. New local migrations provide atomic event creation and database-enforced participation rules; deploy these before the corresponding app code. Event settings now supports publishing and lifecycle transitions. Build, typecheck, 20 targeted tests, and rolled-back SQL participation checks pass. Full organizer browser verification awaits the prepared local event's terms/submission approval; production readiness is not yet signed off.
+
+
+### 2026-09-14 release hardening
+
+Production candidate includes Next.js 15.5.25 / React 19.3.0, zero npm audit findings, verified server access-token cookies, private/draft read isolation, JWT-scoped session creation, and corrected calendar exports. New migrations: `20260914000001` atomic creation, `20260914000002` participation guards, and `20260914000003` event read access. See `docs/design/UX_POLISH_QA.md` for validation and its limits.

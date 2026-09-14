@@ -75,6 +75,13 @@ async function refreshSession(refreshToken: string): Promise<{
   return null
 }
 
+async function syncServerSession(accessToken: string) {
+  const response = await fetch('/api/auth/session', {
+    method: 'POST', headers: { Authorization: `Bearer ${accessToken}` },
+  })
+  if (!response.ok) throw new Error('Could not synchronize sign-in. Please try again.')
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   // StrictMode replays effects. Both runs must await the same token exchange.
   const hashSessionRef = React.useRef<Promise<User | null> | null>(null)
@@ -133,6 +140,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               expires_at: Math.floor(Date.now() / 1000) + expiresIn,
               token_type: 'bearer', user: userData,
             }))
+            await syncServerSession(accessToken)
             return userData
           } catch (error) {
             console.error('Unable to verify sign-in link:', error)
@@ -210,6 +218,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
             if (response.ok) {
               const userData = await response.json()
+              await syncServerSession(session.access_token)
               console.log('Session valid for:', userData.email)
               // Only update React state if still mounted
               if (mounted) {
@@ -224,6 +233,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 if (newSession) {
                   console.log('Session refreshed after validation failure')
                   localStorage.setItem(storageKey, JSON.stringify(newSession))
+                  await syncServerSession(newSession.access_token)
                   if (mounted) {
                     setUser(newSession.user as User)
                     await fetchProfile(newSession.user.id, newSession.access_token)
@@ -278,6 +288,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           if (newSession) {
             console.log('Token refreshed proactively')
             localStorage.setItem(storageKey, JSON.stringify(newSession))
+            await syncServerSession(newSession.access_token)
             setUser(newSession.user as User)
           }
         }
@@ -336,9 +347,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signOut = React.useCallback(async () => {
     const storageKey = getStorageKey()
+    await fetch('/api/auth/session', { method: 'DELETE' })
     localStorage.removeItem(storageKey)
     setUser(null)
     setProfile(null)
+    window.location.assign('/')
   }, [])
 
   const refreshProfile = React.useCallback(async () => {

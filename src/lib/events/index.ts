@@ -1,4 +1,4 @@
-import { createClient, createAdminClient } from '@/lib/supabase/server';
+import { createClient, createAdminClient, getAccessUser } from '@/lib/supabase/server';
 import type { Event, EventRow, EventMember } from '@/types/event';
 import { transformEventRow } from '@/types/event';
 
@@ -8,16 +8,8 @@ export * from './timezone';
 export * from './lifecycle';
 export * from './templates';
 
-/**
- * Get event by slug (server-side)
- * Uses admin client to bypass RLS - this is safe because:
- * 1. This runs server-side only
- * 2. Public/unlisted events should be viewable by anyone
- * 3. Private events have their own access control in the UI layer
- */
+/** Event records are authorized before they enter a server component payload. */
 export async function getEventBySlug(slug: string): Promise<Event | null> {
-  // Use admin client to ensure we can always fetch events server-side
-  // Access control for private events is handled at the UI/page level
   const supabase = await createAdminClient();
 
   const { data, error } = await supabase
@@ -36,6 +28,7 @@ export async function getEventBySlug(slug: string): Promise<Event | null> {
     return null;
   }
 
+  if (!(await canReadEvent(data))) return null;
   return transformEventRow(data as EventRow);
 }
 
@@ -60,6 +53,7 @@ export async function getEventById(id: string): Promise<Event | null> {
     return null;
   }
 
+  if (!(await canReadEvent(data))) return null;
   return transformEventRow(data as EventRow);
 }
 
@@ -102,7 +96,8 @@ export async function getPublicEvents(): Promise<Event[]> {
   const { data, error } = await supabase
     .from('events')
     .select('*')
-    .in('visibility', ['public', 'unlisted'])
+    .eq('visibility', 'public')
+    .neq('status', 'draft')
     .order('start_date', { ascending: false });
 
   if (error) {
@@ -115,4 +110,15 @@ export async function getPublicEvents(): Promise<Event[]> {
   }
 
   return data.map((row) => transformEventRow(row as EventRow));
+}
+
+async function canReadEvent(event: EventRow): Promise<boolean> {
+  if (event.visibility !== 'private' && event.status !== 'draft') return true;
+  // getUser verifies the access token; cookie claims alone never authorize access.
+  const user = await getAccessUser();
+  if (!user) return false;
+  const db = await createAdminClient();
+  const { data: membership } = await db.from('event_members').select('role')
+    .eq('event_id', event.id).eq('user_id', user.id).maybeSingle();
+  return Boolean(membership && (event.status !== 'draft' || ['owner', 'admin'].includes(membership.role)));
 }

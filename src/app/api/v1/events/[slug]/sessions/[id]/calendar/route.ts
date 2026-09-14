@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { createAdminClient } from '@/lib/supabase/server'
+import { createAccessClient } from '@/lib/supabase/server'
 import { generateSingleEventICS, type ICSEvent } from '@/lib/calendar/ics'
 
 /**
@@ -13,32 +13,14 @@ export async function GET(
 ) {
   const { slug, id } = await params
 
-  const supabase = await createAdminClient()
+  const supabase = await createAccessClient()
 
-  // Fetch event and session data
-  const [eventResult, sessionResult] = await Promise.all([
-    supabase
-      .from('events')
-      .select('id, name, timezone, location_name')
-      .eq('slug', slug)
-      .single(),
-    supabase
-      .from('sessions')
-      .select(`
-        id, title, description, host_name, duration,
-        venue:venues(name, address),
-        time_slot:time_slots(start_time, end_time)
-      `)
-      .eq('id', id)
-      .single(),
-  ])
-
-  if (eventResult.error || !eventResult.data) {
-    return NextResponse.json(
-      { error: 'Event not found' },
-      { status: 404 }
-    )
-  }
+  const { data: event, error: eventError } = await supabase.from('events')
+    .select('id, name, timezone, location_name').eq('slug', slug).single()
+  if (eventError || !event) return NextResponse.json({ error: 'Event not found' }, { status: 404 })
+  const sessionResult = await supabase.from('sessions')
+    .select('id, title, description, host_name, duration, venue:venues(name, address), time_slot:time_slots(start_time, end_time)')
+    .eq('id', id).eq('event_id', event.id).eq('status', 'scheduled').single()
 
   if (sessionResult.error || !sessionResult.data) {
     return NextResponse.json(
@@ -47,7 +29,6 @@ export async function GET(
     )
   }
 
-  const event = eventResult.data
   const session = sessionResult.data
 
   // Type helpers for Supabase nested selects
