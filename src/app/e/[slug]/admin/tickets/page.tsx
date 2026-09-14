@@ -336,9 +336,9 @@ export default function AdminTicketsPage() {
   return (
         <div className="space-y-6">
           {/* Header */}
-          <div className="flex items-center justify-between">
+          <div className="page-heading">
             <div>
-              <h1 className="text-2xl font-display font-bold">Ticket Tiers</h1>
+              <h1 className="text-2xl font-display font-bold">Tickets</h1>
               <p className="text-muted-foreground mt-1">
                 Configure ticket types and pricing
               </p>

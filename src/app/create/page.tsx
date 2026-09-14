@@ -1,6 +1,7 @@
 'use client';
 
 import * as React from 'react';
+import * as Dialog from '@radix-ui/react-dialog';
 import { Suspense } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
@@ -8,6 +9,7 @@ import { ArrowLeft, Loader2, AlertCircle, LogIn } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import { validateWizardState } from '@/lib/events/validate-creation';
 import { useAuth } from '@/hooks/useAuth';
 
 import { useWizardStateWithPersistence } from './useWizardPersistence';
@@ -39,15 +41,14 @@ function getAccessToken(): string | null {
   return null;
 }
 
-// Lazy load step components for better performance
-const BasicsStep = React.lazy(() => import('./steps/BasicsStep'));
-const DatesStep = React.lazy(() => import('./steps/DatesStep'));
-const VenuesStep = React.lazy(() => import('./steps/VenuesStep'));
-const ScheduleStep = React.lazy(() => import('./steps/ScheduleStep'));
-const TracksStep = React.lazy(() => import('./steps/TracksStep'));
-const VotingStep = React.lazy(() => import('./steps/VotingStep'));
-const BrandingStep = React.lazy(() => import('./steps/BrandingStep'));
-const ReviewStep = React.lazy(() => import('./steps/ReviewStep'));
+import BasicsStep from './steps/BasicsStep';
+import DatesStep from './steps/DatesStep';
+import VenuesStep from './steps/VenuesStep';
+import ScheduleStep from './steps/ScheduleStep';
+import TracksStep from './steps/TracksStep';
+import VotingStep from './steps/VotingStep';
+import BrandingStep from './steps/BrandingStep';
+import ReviewStep from './steps/ReviewStep';
 
 // ============================================================================
 // Step Props Interface
@@ -91,13 +92,11 @@ function ResumeDraftDialog({ timestamp, onResume, onStartFresh }: ResumeDraftDia
     : 'Unknown';
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm">
+    <Dialog.Root open><Dialog.Portal><Dialog.Overlay className="fixed inset-0 z-50 bg-foreground/20 backdrop-blur-sm"/><Dialog.Content onEscapeKeyDown={e => e.preventDefault()} onPointerDownOutside={e => e.preventDefault()} className="fixed inset-0 z-50 flex items-center justify-center">
       <Card className="w-full max-w-md mx-4">
         <CardHeader>
-          <CardTitle>Resume Your Draft?</CardTitle>
-          <CardDescription>
-            You have a saved draft from {formattedTime}
-          </CardDescription>
+          <Dialog.Title className="text-xl font-semibold">Pick up where you left off?</Dialog.Title>
+          <Dialog.Description className="text-sm text-muted-foreground">Your event draft was saved on {formattedTime}.</Dialog.Description>
         </CardHeader>
         <CardContent className="space-y-4">
           <p className="text-sm text-muted-foreground">
@@ -113,7 +112,7 @@ function ResumeDraftDialog({ timestamp, onResume, onStartFresh }: ResumeDraftDia
           </div>
         </CardContent>
       </Card>
-    </div>
+    </Dialog.Content></Dialog.Portal></Dialog.Root>
   );
 }
 
@@ -195,6 +194,13 @@ function CreateWizardContent() {
 
   // Handler for event submission
   const handleSubmit = React.useCallback(async () => {
+    if (isSubmitting) return;
+    const validation = validateWizardState(state);
+    if (!validation.valid) {
+      setSubmitError(validation.error || 'Review your event details.');
+      dispatch({ type: 'SET_STEP', payload: validation.step ?? 0 });
+      return;
+    }
     setIsSubmitting(true);
     setSubmitError(null);
     setSlugSuggestions([]);
@@ -253,7 +259,11 @@ function CreateWizardContent() {
       setSubmitError('An unexpected error occurred. Please try again.');
       setIsSubmitting(false);
     }
-  }, [state, clearDraft, router]);
+  }, [state, clearDraft, router, dispatch, isSubmitting]);
+
+  React.useEffect(() => {
+    if (submitError) document.getElementById('create-submit-error')?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }, [submitError]);
 
   // Handler to apply a slug suggestion
   const handleApplySlugSuggestion = React.useCallback((suggestion: string) => {
@@ -329,7 +339,7 @@ function CreateWizardContent() {
   // Show loading while checking authentication
   if (authLoading || !user) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-muted/30">
+      <div className="min-h-screen flex items-center justify-center bg-background">
         <div className="text-center space-y-4">
           <Loader2 className="h-8 w-8 animate-spin text-muted-foreground mx-auto" />
           <p className="text-sm text-muted-foreground">
@@ -341,7 +351,7 @@ function CreateWizardContent() {
   }
 
   return (
-    <div className="min-h-screen bg-muted/30">
+    <div className="min-h-screen bg-background">
       {/* Header */}
       <header className="border-b border-border bg-background sticky top-0 z-10 ruler-edge">
         <div className="container mx-auto px-4">
@@ -354,7 +364,7 @@ function CreateWizardContent() {
               Back to home
             </Link>
             <div className="text-sm text-muted-foreground">
-              Draft auto-saved
+              Draft saved on this device
             </div>
           </div>
         </div>
@@ -362,12 +372,12 @@ function CreateWizardContent() {
 
       {/* Main Content */}
       <main className="container mx-auto px-4 py-8">
-        <div className="max-w-3xl mx-auto space-y-8">
+        <div className="max-w-5xl mx-auto space-y-8">
           {/* Page Title */}
-          <div className="text-center space-y-2">
-            <h1 className="text-3xl font-display font-bold">Create Event</h1>
+          <div className="space-y-3 max-w-2xl">
+            <h1 className="text-4xl sm:text-5xl font-display font-semibold">Make room for your people.</h1>
             <p className="text-muted-foreground">
-              Set up your unconference, hackathon, or community event
+              Start with the essentials. Add the spaces, topics, and small details that make this gathering yours.
             </p>
           </div>
 
@@ -375,7 +385,7 @@ function CreateWizardContent() {
           <div className="space-y-6">
             {/* Error Alert */}
             {submitError && (
-              <Alert variant="destructive">
+              <Alert id="create-submit-error" variant="destructive">
                 <AlertCircle className="h-4 w-4" />
                 <AlertDescription className="space-y-3">
                   <p>{submitError}</p>
@@ -398,7 +408,7 @@ function CreateWizardContent() {
                             variant="outline"
                             size="sm"
                             onClick={() => handleApplySlugSuggestion(suggestion)}
-                            className="font-mono text-xs"
+                            className="text-xs"
                           >
                             {suggestion}
                           </Button>
@@ -435,9 +445,9 @@ function CreateWizardContent() {
               {renderStep()}
             </div>
 
-            {/* Bottom Navigation: only on last step (review) for easy access */}
-            {state.currentStep === WIZARD_STEPS.length - 1 && (
-              <Card>
+            {/* Keep the next action available after the form. */}
+            {state.currentStep < WIZARD_STEPS.length - 1 && (
+              <Card className="sticky bottom-3 z-10 shadow-lg">
                 <CardContent className="py-4">
                   <WizardNavButtons
                     state={state}
@@ -472,7 +482,7 @@ export default function CreateEventPage() {
   return (
     <Suspense
       fallback={
-        <div className="min-h-screen flex items-center justify-center bg-muted/30">
+        <div className="min-h-screen flex items-center justify-center bg-background">
           <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
         </div>
       }

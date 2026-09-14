@@ -195,10 +195,10 @@ export const INITIAL_STATE: WizardState = {
     logoUrl: null,
     bannerUrl: null,
     theme: {
-      primary: '#6366f1', // indigo-500
-      secondary: '#8b5cf6', // violet-500
-      accent: '#f59e0b', // amber-500
-      mode: 'system',
+      primary: '#246653', // spruce
+      secondary: '#E8F1EB', // pale mint
+      accent: '#DCD5ED', // lilac
+      mode: 'light',
     },
     social: {
       twitter: '',

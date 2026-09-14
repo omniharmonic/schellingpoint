@@ -859,11 +859,12 @@ export default function AdminSchedulePage() {
 
   return (
     <>
-    <div className="flex h-[calc(100vh-57px)]">
+    <div className="mb-6"><h1 className="font-semibold">Schedule builder</h1><p className="text-muted-foreground mt-2">Bring ideas into the room. Arrange sessions, resolve conflicts, and publish when you’re ready.</p></div>
+    <div className="relative flex min-h-[600px] h-[calc(100dvh-220px)] calendar-workspace overflow-hidden bg-card">
         {/* Session Tray - Left Sidebar */}
         <div className={cn(
           "border-r bg-muted/30 flex flex-col transition-all duration-200",
-          showSidebar ? "w-72 sm:w-80" : "w-0 overflow-hidden"
+          showSidebar ? "absolute inset-y-0 left-0 z-10 w-72 bg-card shadow-xl lg:static lg:w-72 lg:shadow-none shrink-0" : "w-0 overflow-hidden"
         )}>
           <div className="p-3 sm:p-4 border-b bg-background flex items-center justify-between gap-2">
             <div className="min-w-0">
@@ -876,6 +877,7 @@ export default function AdminSchedulePage() {
               variant="ghost"
               size="icon"
               className="h-8 w-8 flex-shrink-0"
+              aria-label="Close unscheduled sessions"
               onClick={() => setShowSidebar(false)}
             >
               <PanelLeftClose className="h-4 w-4" />
@@ -927,10 +929,10 @@ export default function AdminSchedulePage() {
                   variant={selectedDay === dayDate ? 'default' : 'outline'}
                   size="sm"
                   onClick={() => setSelectedDay(dayDate)}
-                  className="whitespace-nowrap flex-shrink-0"
+                  aria-pressed={selectedDay === dayDate}
+                  className="calendar-day whitespace-nowrap flex-shrink-0"
                 >
-                  <span className="hidden sm:inline">{dayLabel}</span>
-                  <span className="sm:hidden">{dayLabel.split(' ')[0]}</span>
+                  <span>{dayLabel}</span>
                 </Button>
               )
             })}
@@ -1292,7 +1294,7 @@ export default function AdminSchedulePage() {
                                   {a.warnings.length > 0 && (
                                     <div className="mt-2 flex flex-wrap gap-1">
                                       {a.warnings.map((w, i) => (
-                                        <span key={i} className="text-[10px] text-amber-600 dark:text-amber-400">
+                                        <span key={i} className="text-xs text-amber-600 dark:text-amber-400">
                                           ⚠️ {w}
                                         </span>
                                       ))}
@@ -1603,7 +1605,7 @@ function DropZone({
 
       {/* Duration warning when hovering */}
       {isOver && hasDurationWarning && (
-        <div className="flex items-center gap-1 text-[10px] text-amber-600 dark:text-amber-400">
+        <div className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
           <Clock className="h-3 w-3" />
           Session is {draggedSession.duration}min
         </div>
@@ -1611,7 +1613,7 @@ function DropZone({
 
       {/* Capacity warning when hovering */}
       {isOver && hasCapacityWarning && (
-        <div className="flex items-center gap-1 text-[10px] text-amber-600 dark:text-amber-400">
+        <div className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
           <AlertTriangle className="h-3 w-3" />
           {draggedSession.total_votes} votes &gt; {venue.capacity} cap
         </div>
@@ -1642,15 +1644,16 @@ function ScheduledSlot({
   return (
     <div
       className={cn(
-        'h-20 rounded-lg border p-2 relative group overflow-hidden',
+        'min-h-24 rounded-xl border-l-4 border p-3 relative group overflow-hidden',
         hasDurationMismatch || hasCapacityWarning
           ? 'bg-amber-500/10 border-amber-500/30'
-          : 'bg-primary/10 border-primary/30'
+          : 'bg-secondary border-primary/60'
       )}
     >
       <button
         onClick={onRemove}
-        className="absolute top-1 right-1 p-1 rounded bg-background/80 opacity-0 group-hover:opacity-100 transition-opacity hover:bg-destructive hover:text-destructive-foreground z-10"
+        aria-label={`Remove ${session.title} from this time slot`}
+        className="absolute top-1 right-1 p-1 rounded bg-background/80 opacity-100 lg:opacity-0 lg:group-hover:opacity-100 focus-visible:opacity-100 transition-opacity hover:bg-destructive hover:text-destructive-foreground z-10"
       >
         <X className="h-3 w-3" />
       </button>
@@ -1676,14 +1679,14 @@ function ScheduledSlot({
       </div>
 
       <div className="flex items-start gap-1 mt-3">
-        <Badge variant="outline" className="text-[10px] capitalize shrink-0">
+        <Badge variant="outline" className="text-xs capitalize shrink-0">
           {session.format}
         </Badge>
-        <span className="text-[10px] text-muted-foreground">{session.duration}m</span>
+        <span className="text-xs text-muted-foreground">{session.duration}m</span>
       </div>
       <h4 className="text-xs font-medium line-clamp-2 mt-0.5">{session.title}</h4>
       {session.host_name && (
-        <p className="text-[10px] text-muted-foreground mt-0.5 truncate">{session.host_name}</p>
+        <p className="text-xs text-muted-foreground mt-0.5 truncate">{session.host_name}</p>
       )}
     </div>
   )

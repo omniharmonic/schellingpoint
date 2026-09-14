@@ -243,7 +243,7 @@ export function BasicsStep({ state, dispatch }: BasicsStepProps) {
             />
             <p className="text-sm text-muted-foreground">
               Your event URL:{' '}
-              <span className="font-mono text-foreground">
+              <span className="text-foreground">
                 schellingpoint.xyz/e/{basics.slug || 'your-event'}
               </span>
             </p>

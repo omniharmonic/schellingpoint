@@ -54,56 +54,25 @@ export function parseTimeInTimezone(
   dateStr: string,
   timezone: string
 ): Date {
-  // Create the full date-time string
-  const dateTimeStr = `${dateStr}T${timeStr}:00`;
-
-  // Strategy: Create a date using the parts from the input, then figure out
-  // the offset for the target timezone at that moment.
-
-  // Parse the date/time components directly
   const [year, month, day] = dateStr.split('-').map(Number);
   const [hours, minutes] = timeStr.split(':').map(Number);
-
-  // Create a date in UTC with these components
-  // This gives us a "reference point" - e.g., 09:00 on Feb 27 in UTC
-  const utcDate = new Date(Date.UTC(year, month - 1, day, hours, minutes, 0, 0));
-
-  // Now we need to adjust: if it's 09:00 in Mountain Time, what is that in UTC?
-  // Mountain Time is typically UTC-7 (or UTC-6 in daylight saving)
-  // So 09:00 MT = 16:00 UTC (in winter)
-
-  // Use Intl.DateTimeFormat to get the timezone offset
-  // We format the UTC date in the target timezone and see what time it shows
+  const reference = Date.UTC(year, month - 1, day, hours, minutes);
+  if (!Number.isFinite(reference)) throw new RangeError('Invalid schedule date or time');
   const formatter = new Intl.DateTimeFormat('en-US', {
-    timeZone: timezone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
+    timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
   });
-
-  // Format the UTC reference date in the target timezone
-  const parts = formatter.formatToParts(utcDate);
-  const getPart = (type: string) => parts.find(p => p.type === type)?.value || '0';
-
-  const tzHours = parseInt(getPart('hour'), 10);
-  const tzMinutes = parseInt(getPart('minute'), 10);
-
-  // Calculate the offset: how many hours/minutes difference between UTC and target timezone
-  // If utcDate is 09:00 UTC and target timezone shows 02:00, offset is -7 hours
-  const tzTotalMinutes = tzHours * 60 + tzMinutes;
-  const utcTotalMinutes = hours * 60 + minutes;
-  let offsetMinutes = tzTotalMinutes - utcTotalMinutes;
-
-  // Handle day boundary crossings
-  if (offsetMinutes > 12 * 60) offsetMinutes -= 24 * 60;
-  if (offsetMinutes < -12 * 60) offsetMinutes += 24 * 60;
-
-  // Adjust: we want input time to BE in the target timezone
-  // So we subtract the offset to get UTC time
-  return new Date(utcDate.getTime() - offsetMinutes * 60 * 1000);
+  let candidate = reference;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const parts = formatter.formatToParts(new Date(candidate));
+    const part = (type: string) => Number(parts.find(p => p.type === type)?.value);
+    const local = Date.UTC(part('year'), part('month') - 1, part('day'), part('hour'), part('minute'));
+    const difference = reference - local;
+    if (difference === 0) return new Date(candidate);
+    candidate += difference;
+  }
+  // Clocks can skip local times during a DST transition. Never silently move a slot.
+  throw new RangeError('This local time does not exist in the event timezone');
 }
 
 /**

@@ -166,7 +166,7 @@ function ParticipantsContent() {
     <DashboardLayout>
       <div className="space-y-6">
         <div>
-          <h1 className="text-2xl font-bold">Participants</h1>
+          <h1 className="text-2xl font-bold">People</h1>
           <p className="text-muted-foreground mt-1">
             {participants.length} people registered for {event.name}
           </p>
@@ -178,7 +178,8 @@ function ParticipantsContent() {
             <div className="relative flex-1">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
               <Input
-                placeholder="Search by name, email, or affiliation..."
+                aria-label="Search people"
+                placeholder="Search by name, email, or affiliation"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 className="pl-10"
@@ -340,7 +341,7 @@ function ParticipantCard({
               {roleLabel && (
                 <Badge
                   variant="secondary"
-                  className="text-xs bg-[#B2FF00]/20 text-[#B2FF00] border-[#B2FF00]/30"
+                  className="text-xs bg-primary/10 text-primary border-primary/20"
                 >
                   {roleLabel}
                 </Badge>
@@ -427,7 +428,7 @@ function ProfileModal({
                   {profile.display_name || 'Anonymous'}
                 </h2>
                 {roleLabel && (
-                  <Badge className="bg-[#B2FF00]/20 text-[#B2FF00] border-[#B2FF00]/30">
+                  <Badge className="bg-primary/10 text-primary border-primary/20">
                     {roleLabel}
                   </Badge>
                 )}

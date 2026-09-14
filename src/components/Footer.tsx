@@ -42,9 +42,7 @@ interface FooterBranding {
 const PLATFORM_BRANDING: FooterBranding = {
   name: 'Schelling Point',
   tagline: 'Coordination protocol for unconferences',
-  social: {
-    twitter: 'https://twitter.com/schellingpoint',
-  },
+
 }
 
 function SocialIcons({ social, className }: { social?: SocialLinks; className?: string }) {
@@ -89,64 +87,19 @@ export function Footer({ className, variant = 'default', event }: FooterProps) {
       }
     : PLATFORM_BRANDING
 
-  // Minimal footer — single line, used in dashboards
-  if (isMinimal) {
-    return (
-      <footer className={cn('border-t border-border bg-background', className)}>
-        <div className="container mx-auto px-4 py-4">
-          <div className="flex flex-col sm:flex-row justify-between items-center gap-3">
-            <div className="flex items-center gap-3 text-xs font-mono text-muted-foreground uppercase tracking-wider">
-              <span className="node-indicator" />
-              <span>{branding.name}</span>
-              <span className="text-border">·</span>
-              <span>v2.0</span>
-            </div>
-            <div className="flex items-center gap-4">
-              <SocialIcons social={branding.social} />
-              <div className="flex items-center gap-3 text-xs font-mono text-muted-foreground">
-                <Link href="/codeofconduct" className="hover:text-primary transition-colors">Conduct</Link>
-                <Link href="/privacy" className="hover:text-primary transition-colors">Privacy</Link>
-                <Link href="/terms" className="hover:text-primary transition-colors">Terms</Link>
-              </div>
-            </div>
-          </div>
-        </div>
-      </footer>
-    )
-  }
-
-  // Default footer — "Network Status Bar"
   return (
-    <footer className={cn('border-t border-border bg-background', className)}>
-      <div className="container mx-auto px-4 py-10 sm:py-12">
-        <div className="max-w-2xl mx-auto">
-          {/* Network Status Block */}
-          <div className="protocol-box border-border text-muted-foreground">
-            <div className="flex items-center gap-2 mb-3">
-              <span className="node-indicator" />
-              <span className="font-bold text-foreground text-sm tracking-wide">
-                {branding.name.toUpperCase()}
-              </span>
-            </div>
-            {branding.tagline && (
-              <p className="text-muted-foreground mb-4">{branding.tagline}</p>
-            )}
-            <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-xs">
-              <span>STATUS</span><span className="text-primary">OPERATIONAL</span>
-              <span>PROTOCOL</span><span className="text-foreground">v2.0.0</span>
-            </div>
+    <footer className={cn('border-t bg-background', className)}>
+      <div className={cn('container mx-auto px-5', isMinimal ? 'py-6' : 'py-10')}>
+        <div className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <Link href="/" className="font-semibold tracking-tight">{event ? 'Powered by Schelling Point' : 'Schelling Point'}</Link>
+            {!isMinimal && <p className="text-sm text-muted-foreground mt-1">A little structure. A lot of possibility.</p>}
           </div>
-
-          {/* Links row */}
-          <div className="flex flex-col sm:flex-row justify-between items-center gap-4 mt-6 pt-6 border-t border-border">
+          <div className="flex flex-wrap items-center gap-5 text-xs text-muted-foreground">
             <SocialIcons social={branding.social} />
-            <div className="flex items-center gap-4 text-xs font-mono text-muted-foreground">
-              <span>© {new Date().getFullYear()} {branding.name}</span>
-              <span className="text-border">·</span>
-              <Link href="/codeofconduct" className="hover:text-primary transition-colors">Conduct</Link>
-              <Link href="/privacy" className="hover:text-primary transition-colors">Privacy</Link>
-              <Link href="/terms" className="hover:text-primary transition-colors">Terms</Link>
-            </div>
+            <Link href="/codeofconduct" className="hover:text-foreground">Code of conduct</Link>
+            <Link href="/privacy" className="hover:text-foreground">Privacy</Link>
+            <Link href="/terms" className="hover:text-foreground">Terms</Link>
           </div>
         </div>
       </div>

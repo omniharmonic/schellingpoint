@@ -1,5 +1,6 @@
 'use client'
 
+import { isParticipationOpen } from '@/lib/events/lifecycle'
 import * as React from 'react'
 import { useRouter } from 'next/navigation'
 import { Loader2, ClipboardList, Plus, Minus } from 'lucide-react'
@@ -45,25 +46,27 @@ export default function MyVotesPage() {
   const router = useRouter()
   const { user, isLoading: authLoading } = useAuth()
   const event = useEvent()
+  const votingClosed = !isParticipationOpen(event, 'vote')
   const { voteCredits } = useEventRole()
 
   // Use event's vote credits
   const totalCredits = voteCredits
 
+  const [saveError, setSaveError] = React.useState<string | null>(null)
   const [votes, setVotes] = React.useState<Vote[]>([])
   const [isLoading, setIsLoading] = React.useState(true)
 
   React.useEffect(() => {
     if (!authLoading && !user) {
-      router.push('/login')
+      router.push(`/login?returnTo=${encodeURIComponent(`/e/${event.slug}/my-votes`)}`)
     }
-  }, [user, authLoading, router])
+  }, [user, authLoading, router, event.slug])
 
   const fetchVotes = React.useCallback(async () => {
-    if (!user) return
+    if (!user) { setIsLoading(false); return }
 
     const token = getAccessToken()
-    if (!token) return
+    if (!token) { setSaveError('Sign in again to load your votes.'); setIsLoading(false); return }
 
     try {
       const response = await fetch(
@@ -76,12 +79,11 @@ export default function MyVotesPage() {
         }
       )
 
-      if (response.ok) {
-        const data = await response.json()
-        setVotes(data.filter((v: Vote) => v.session))
-      }
+      if (!response.ok) throw new Error('Could not load your votes. Refresh the page to try again.')
+      const data = await response.json()
+      setVotes(data.filter((v: Vote) => v.session))
     } catch (err) {
-      console.error('Error fetching votes:', err)
+      setSaveError(err instanceof Error ? err.message : 'Could not load your votes.')
     } finally {
       setIsLoading(false)
     }
@@ -96,7 +98,7 @@ export default function MyVotesPage() {
   const remainingCredits = totalCredits - totalCreditsSpent
 
   const handleVote = async (sessionId: string, currentVotes: number, delta: number) => {
-    if (!user) return
+    if (!user || votingClosed) return
 
     const token = getAccessToken()
     if (!token) return
@@ -122,9 +124,10 @@ export default function MyVotesPage() {
           )
     )
 
+    setSaveError(null)
     try {
       if (newVoteCount === 0) {
-        await fetch(
+        const response = await fetch(
           `${SUPABASE_URL}/rest/v1/votes?user_id=eq.${user.id}&session_id=eq.${sessionId}`,
           {
             method: 'DELETE',
@@ -134,8 +137,9 @@ export default function MyVotesPage() {
             },
           }
         )
+        if (!response.ok) throw new Error('Your vote could not be saved. Please try again.')
       } else {
-        await fetch(
+        const response = await fetch(
           `${SUPABASE_URL}/rest/v1/votes?on_conflict=user_id,session_id`,
           {
             method: 'POST',
@@ -154,8 +158,11 @@ export default function MyVotesPage() {
             }),
           }
         )
+        if (!response.ok) throw new Error('Your vote could not be saved. Please try again.')
       }
+      window.dispatchEvent(new CustomEvent('schelling:votes-changed', { detail: { eventId: event.id } }))
     } catch (err) {
+      setSaveError('Your vote could not be saved. Please try again.')
       console.error('Error updating vote:', err)
       // Revert on error
       fetchVotes()
@@ -178,9 +185,11 @@ export default function MyVotesPage() {
         <div>
           <h1 className="text-2xl font-bold">My Votes</h1>
           <p className="text-muted-foreground mt-1">
-            Track your voting activity and credit usage
+            {votingClosed ? 'Voting is not open right now. Here is the support you contributed.' : 'Track your voting activity and credit usage'}
           </p>
         </div>
+
+        {saveError && <p role="alert" className="rounded-xl bg-destructive/10 p-4 text-destructive">{saveError}</p>}
 
         {/* Summary Card */}
         <Card>
@@ -212,7 +221,7 @@ export default function MyVotesPage() {
               <ClipboardList className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
               <h2 className="text-lg font-semibold mb-2">No votes yet</h2>
               <p className="text-muted-foreground mb-4">
-                Browse sessions and vote for the ones you want to attend.
+                {votingClosed ? 'You haven’t voted in this gathering. You can still explore its sessions.' : 'Browse sessions and vote for the ones you want to attend.'}
               </p>
               <Button asChild>
                 <Link href={`/e/${event.slug}/sessions`}>Browse Sessions</Link>
@@ -253,6 +262,8 @@ export default function MyVotesPage() {
                           <Button
                             size="icon"
                             variant="outline"
+                            aria-label={`Remove a vote from ${vote.session.title}`}
+                            disabled={votingClosed}
                             onClick={(e) => {
                               e.preventDefault()
                               handleVote(vote.session_id, vote.vote_count, -1)
@@ -270,11 +281,12 @@ export default function MyVotesPage() {
                           <Button
                             size="icon"
                             variant="outline"
+                            aria-label={`Add a vote to ${vote.session.title}`}
                             onClick={(e) => {
                               e.preventDefault()
                               handleVote(vote.session_id, vote.vote_count, 1)
                             }}
-                            disabled={!canAddVote}
+                            disabled={votingClosed || !canAddVote}
                             className="h-10 w-10"
                           >
                             <Plus className="h-4 w-4" />

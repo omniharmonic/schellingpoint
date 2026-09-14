@@ -61,18 +61,6 @@ export function SessionFilters({
   filteredCount,
 }: SessionFiltersProps) {
   const [isExpanded, setIsExpanded] = React.useState(false)
-  const [searchValue, setSearchValue] = React.useState(filters.search)
-
-  // Debounce search
-  React.useEffect(() => {
-    const timer = setTimeout(() => {
-      if (searchValue !== filters.search) {
-        onFiltersChange({ ...filters, search: searchValue })
-      }
-    }, 300)
-    return () => clearTimeout(timer)
-  }, [searchValue, filters, onFiltersChange])
-
   const activeFilterCount = [
     filters.statuses.length > 0,
     filters.tracks.length > 0,
@@ -104,11 +92,10 @@ export function SessionFilters({
   }
 
   const clearAllFilters = () => {
-    setSearchValue('')
     onFiltersChange(defaultFilters)
   }
 
-  const hasActiveFilters = searchValue || activeFilterCount > 0
+  const hasActiveFilters = filters.search || activeFilterCount > 0
 
   const statusOptions: SessionStatus[] = ['pending', 'approved', 'scheduled', 'rejected']
 
@@ -120,14 +107,16 @@ export function SessionFilters({
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <Input
             type="text"
+            aria-label="Search session proposals"
             placeholder="Search by title, host, or tags..."
-            value={searchValue}
-            onChange={(e) => setSearchValue(e.target.value)}
+            value={filters.search}
+            onChange={(e) => onFiltersChange({ ...filters, search: e.target.value })}
             className="pl-9 pr-9"
           />
-          {searchValue && (
+          {filters.search && (
             <button
-              onClick={() => setSearchValue('')}
+              aria-label="Clear search"
+              onClick={() => onFiltersChange({ ...filters, search: '' })}
               className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
             >
               <X className="h-4 w-4" />

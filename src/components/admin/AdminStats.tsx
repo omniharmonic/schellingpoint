@@ -83,7 +83,7 @@ export function AdminStats({
   ]
 
   return (
-    <section className="rounded-xl border bg-card stats-card">
+    <section className="rounded-2xl border border-foreground/20 bg-card stats-card">
       {/* Primary KPIs */}
       <div className="grid grid-cols-2 md:grid-cols-4 divide-y md:divide-y-0 md:divide-x divide-border">
         {primary.map((stat) => (
@@ -154,17 +154,17 @@ function StatCell({
         {icon}
       </span>
       <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <span
             className={cn(
               'font-semibold tabular-nums',
-              compact ? 'text-xl' : 'text-2xl'
+              compact ? 'text-2xl' : 'text-4xl tracking-tight'
             )}
           >
             {value}
           </span>
           {hint && (
-            <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-600 dark:text-amber-400">
+            <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-xs font-medium tracking-wide text-amber-600 dark:text-amber-400">
               <span className={cn('h-1.5 w-1.5 rounded-full', styles.dot)} />
               {hint}
             </span>

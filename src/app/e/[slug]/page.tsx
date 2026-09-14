@@ -1,6 +1,8 @@
 'use client';
 
+import { isParticipationOpen } from '@/lib/events/lifecycle';
 import * as React from 'react';
+import { GatheringArtwork } from '@/components/GatheringArtwork';
 import Link from 'next/link';
 import {
   Calendar,
@@ -22,7 +24,7 @@ import { SiteHeader } from '@/components/SiteHeader';
 import { Footer } from '@/components/Footer';
 import { useEvent, useEventRole } from '@/contexts/EventContext';
 import { useAuth } from '@/hooks/useAuth';
-import { formatEventDate } from '@/lib/events/dates';
+import { formatCalendarDate } from '@/lib/events/dates';
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
@@ -110,91 +112,37 @@ export default function EventPage() {
     archived: { label: 'Archived', variant: 'outline' },
   };
 
+  const eventIsOver = event.status === 'completed' || event.status === 'archived';
   const badge = statusConfig[event.status] || statusConfig.draft;
 
   return (
     <div className="min-h-screen bg-background flex flex-col">
       <SiteHeader />
 
-      {/* Hero */}
-      <section className="relative overflow-hidden">
-        <div className="absolute inset-0 geodesic-mesh opacity-[0.04]" />
-        <div className="relative container mx-auto max-w-4xl px-4 py-16 sm:py-20 lg:py-24">
-          <div className="text-center">
-            {/* Logo */}
-            {event.logoUrl && (
-              <div className="flex justify-center mb-6">
-                <img
-                  src={event.logoUrl}
-                  alt={event.name}
-                  className="h-16 w-16 sm:h-20 sm:w-20 rounded-xl object-contain border border-border"
-                />
-              </div>
-            )}
-
-            <Badge variant={badge.variant} className="mb-4">
-              {badge.label}
-            </Badge>
-
-            <h1 className="font-display text-4xl sm:text-5xl lg:text-6xl font-bold tracking-tight mb-3">
-              {event.name}
-            </h1>
-
-            {event.tagline && (
-              <p className="text-lg sm:text-xl text-muted-foreground mb-6 max-w-2xl mx-auto">
-                {event.tagline}
-              </p>
-            )}
-
-            {/* Event spec — monospace metadata */}
-            <div className="flex flex-wrap justify-center gap-4 sm:gap-6 font-mono text-xs uppercase tracking-wider text-muted-foreground mb-8">
-              <span className="flex items-center gap-1.5">
-                <Calendar className="h-3.5 w-3.5" strokeWidth={1.5} />
-                {formatEventDate(event.startDate, event.timezone, { month: 'short', day: 'numeric' })}
-                {' – '}
-                {formatEventDate(event.endDate, event.timezone, { month: 'short', day: 'numeric', year: 'numeric' })}
-              </span>
-              {event.locationName && (
-                <span className="flex items-center gap-1.5">
-                  <MapPin className="h-3.5 w-3.5" strokeWidth={1.5} />
-                  {event.locationName}
-                </span>
-              )}
-              <span className="flex items-center gap-1.5">
-                <Clock className="h-3.5 w-3.5" strokeWidth={1.5} />
-                {dayCount} day{dayCount > 1 ? 's' : ''}
-              </span>
+      <main id="event-main">
+      <section className="container mx-auto px-5 py-10 sm:py-16">
+        <div className="grid lg:grid-cols-[1.2fr_1fr] gap-10 lg:gap-16 items-center">
+          <div>
+            <div className="flex items-center gap-3 mb-6">{event.logoUrl && <img src={event.logoUrl} alt="" className="h-12 w-12 rounded-xl object-contain border bg-card"/>}<Badge variant={badge.variant}>{badge.label}</Badge></div>
+            <h1 className="font-display text-5xl sm:text-6xl font-semibold tracking-tight mb-5 break-words">{event.name}</h1>
+            <p className="text-lg text-muted-foreground mb-7 max-w-xl leading-relaxed">{event.tagline || 'A gathering shaped by the people who show up. Bring your curiosity and help make it happen.'}</p>
+            <div className="flex flex-col gap-3 text-sm text-muted-foreground mb-8">
+              <span className="flex items-center gap-2"><Calendar className="h-4 w-4"/>{formatCalendarDate(event.startDate, { month: 'long', day: 'numeric' })} – {formatCalendarDate(event.endDate, { month: 'long', day: 'numeric', year: 'numeric' })}</span>
+              {event.locationName && <span className="flex items-center gap-2"><MapPin className="h-4 w-4"/>{event.locationName}</span>}
             </div>
-
-            {/* CTAs */}
-            <div className="flex flex-col sm:flex-row justify-center gap-3 px-4 sm:px-0">
-              <Button asChild size="lg" className="w-full sm:w-auto">
-                <Link href={`/e/${event.slug}/sessions`}>
-                  Browse Sessions
-                  <ArrowRight className="ml-2 h-4 w-4" />
-                </Link>
-              </Button>
-              <Button asChild variant="outline" size="lg" className="w-full sm:w-auto">
-                <Link href={`/e/${event.slug}/schedule`}>
-                  View Schedule
-                </Link>
-              </Button>
-              {isAdmin && (
-                <Button asChild variant="secondary" size="lg">
-                  <Link href={`/e/${event.slug}/admin`}>
-                    <Settings className="mr-2 h-4 w-4" strokeWidth={1.5} />
-                    Admin
-                  </Link>
-                </Button>
-              )}
+            <div className="flex flex-wrap gap-3">
+              <Button asChild size="lg"><Link href={`/e/${event.slug}/${event.status === 'live' || event.status === 'completed' ? 'schedule' : 'sessions'}`}>{event.status === 'live' || event.status === 'completed' ? 'Explore the schedule' : 'Explore sessions'}<ArrowRight className="ml-3 h-4 w-4"/></Link></Button>
+              <Button asChild variant="outline" size="lg"><Link href={event.ticketingEnabled && !eventIsOver ? `/e/${event.slug}/tickets` : user ? `/e/${event.slug}/dashboard` : `/login?redirect=${encodeURIComponent(`/e/${event.slug}/dashboard`)}`}>{event.ticketingEnabled && !eventIsOver ? 'Get tickets' : user ? 'Your gathering' : eventIsOver ? 'Sign in to reconnect' : 'Join the gathering'}</Link></Button>
+              {isAdmin && <Button asChild variant="ghost" size="lg"><Link href={`/e/${event.slug}/admin`}>Manage event</Link></Button>}
             </div>
           </div>
+          {event.bannerUrl ? <img src={event.bannerUrl} alt={`${event.name} event artwork`} className="w-full aspect-[5/4] object-cover rounded-[2rem]"/> : <GatheringArtwork compact/>}
         </div>
       </section>
 
       {/* Stats strip */}
       <section className="border-y border-border bg-card/50">
-        <div className="container mx-auto max-w-4xl px-4 py-6">
+        <div className="container mx-auto max-w-6xl px-4 py-6">
           {isLoading ? (
             <div className="flex justify-center">
               <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
@@ -202,26 +150,26 @@ export default function EventPage() {
           ) : stats && (
             <div className="grid grid-cols-3 gap-6 text-center">
               <div>
-                <div className="font-mono text-2xl sm:text-3xl font-bold tabular-nums">
+                <div className="text-2xl sm:text-3xl font-bold tabular-nums">
                   {stats.sessionCount}
                 </div>
-                <div className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground mt-1">
+                <div className="text-xs text-muted-foreground mt-1">
                   Sessions
                 </div>
               </div>
               <div>
-                <div className="font-mono text-2xl sm:text-3xl font-bold tabular-nums">
+                <div className="text-2xl sm:text-3xl font-bold tabular-nums">
                   {stats.participantCount}
                 </div>
-                <div className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground mt-1">
+                <div className="text-xs text-muted-foreground mt-1">
                   Participants
                 </div>
               </div>
               <div>
-                <div className="font-mono text-2xl sm:text-3xl font-bold tabular-nums">
+                <div className="text-2xl sm:text-3xl font-bold tabular-nums">
                   {stats.trackCount}
                 </div>
-                <div className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground mt-1">
+                <div className="text-xs text-muted-foreground mt-1">
                   Tracks
                 </div>
               </div>
@@ -231,18 +179,18 @@ export default function EventPage() {
       </section>
 
       {/* Main content */}
-      <div className="container mx-auto max-w-4xl px-4 py-10 space-y-10 flex-1">
-        {/* Top Sessions */}
+      <div className="container mx-auto max-w-6xl px-4 py-10 space-y-10 flex-1">
+        {/* Ideas people are gathering around */}
         {topSessions.length > 0 && (
           <section>
             <div className="flex items-center justify-between mb-4">
               <h2 className="font-display text-lg font-bold flex items-center gap-2">
                 <TrendingUp className="h-5 w-5 text-primary" strokeWidth={1.5} />
-                Top Sessions
+                Ideas people are gathering around
               </h2>
               <Link
                 href={`/e/${event.slug}/sessions`}
-                className="text-xs font-mono uppercase tracking-wider text-muted-foreground hover:text-primary transition-colors"
+                className="text-xs text-muted-foreground hover:text-primary transition-colors"
               >
                 View all →
               </Link>
@@ -261,12 +209,12 @@ export default function EventPage() {
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2 mb-1">
                             {session.format && (
-                              <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+                              <span className="text-xs text-muted-foreground">
                                 {session.format}
                               </span>
                             )}
                             {session.track && (
-                              <span className="flex items-center gap-1 text-[10px] text-muted-foreground">
+                              <span className="flex items-center gap-1 text-xs text-muted-foreground">
                                 <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: session.track.color || undefined }} />
                                 {session.track.name}
                               </span>
@@ -280,10 +228,10 @@ export default function EventPage() {
                           )}
                         </div>
                         <div className="text-right flex-shrink-0">
-                          <div className="font-mono text-lg font-bold tabular-nums text-primary">
+                          <div className="text-lg font-bold tabular-nums text-primary">
                             {session.total_votes}
                           </div>
-                          <div className="font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+                          <div className="text-xs text-muted-foreground">
                             votes
                           </div>
                         </div>
@@ -306,30 +254,14 @@ export default function EventPage() {
           </section>
         )}
 
-        {/* Protocol spec block */}
-        <section>
-          <div className="protocol-box border-border max-w-lg">
-            <div className="text-primary font-bold mb-2">{event.name.toUpperCase()}</div>
-            <div className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-1 text-xs text-muted-foreground">
-              <span>STATUS</span>
-              <span className="text-foreground">{badge.label.toUpperCase()}</span>
-              <span>DATE</span>
-              <span className="text-foreground">
-                {formatEventDate(event.startDate, event.timezone, { month: 'short', day: 'numeric' })}
-                {' – '}
-                {formatEventDate(event.endDate, event.timezone, { month: 'short', day: 'numeric', year: 'numeric' })}
-              </span>
-              {event.locationName && (
-                <>
-                  <span>LOCATION</span>
-                  <span className="text-foreground">{event.locationName}</span>
-                </>
-              )}
-              <span>VOTING</span>
-              <span className="text-foreground">{event.votingMechanism.toUpperCase()} · {event.voteCreditsPerUser} CREDITS</span>
-              <span>FORMATS</span>
-              <span className="text-foreground">{event.allowedFormats.map(f => f.toUpperCase()).join(', ')}</span>
-            </div>
+        <section className="rounded-2xl bg-secondary/50 p-6 sm:p-8">
+          <h2 className="text-2xl font-semibold mb-6">{eventIsOver ? 'Keep the connections going.' : 'There’s more than one way to take part.'}</h2>
+          <div className="grid sm:grid-cols-3 gap-6">
+            {[
+              !isParticipationOpen(event, 'propose') ? { icon: Calendar, title: 'Explore the gathering', description: 'Explore the program and the sessions we made together.', href: 'schedule', action: 'Explore the schedule' } : { icon: FileText, title: 'Bring an idea', description: 'Start a session around something you want to share or explore.', href: 'propose', action: 'Propose a session' },
+              !isParticipationOpen(event, 'vote') ? { icon: Vote, title: 'Follow an idea', description: 'Discover the questions and conversations that brought people together.', href: 'sessions', action: 'Explore sessions' } : { icon: Vote, title: 'Shape the program', description: `Use your ${event.voteCreditsPerUser} credits to support the sessions that matter to you.`, href: 'sessions', action: 'Discover sessions' },
+              { icon: Users, title: 'Find your people', description: 'Meet the people bringing this gathering to life.', href: 'participants', action: 'Meet the community' },
+            ].map(item => <div key={item.title}><item.icon className="h-5 w-5 text-primary mb-3"/><h3 className="font-semibold mb-2">{item.title}</h3><p className="text-sm text-muted-foreground leading-relaxed mb-3">{item.description}</p><Link href={`/e/${event.slug}/${item.href}`} className="text-sm font-medium text-primary hover:underline">{item.action}</Link></div>)}
           </div>
         </section>
 
@@ -339,7 +271,7 @@ export default function EventPage() {
             <div className="section-rule mb-4">Quick Actions</div>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
               {[
-                { href: `/e/${event.slug}/propose`, icon: FileText, label: 'Propose' },
+                { href: `/e/${event.slug}/${isParticipationOpen(event, 'propose') ? 'propose' : 'sessions'}`, icon: FileText, label: isParticipationOpen(event, 'propose') ? 'Propose' : 'Sessions' },
                 { href: `/e/${event.slug}/my-votes`, icon: Vote, label: 'My Votes' },
                 { href: `/e/${event.slug}/my-schedule`, icon: Calendar, label: 'Saved' },
                 { href: `/e/${event.slug}/participants`, icon: Users, label: 'People' },
@@ -348,7 +280,7 @@ export default function EventPage() {
                   <Card interactive className="h-full">
                     <CardContent className="p-4 text-center">
                       <Icon className="h-5 w-5 mx-auto mb-2 text-primary" strokeWidth={1.5} />
-                      <span className="text-xs font-mono uppercase tracking-wider text-muted-foreground">
+                      <span className="text-xs text-muted-foreground">
                         {label}
                       </span>
                     </CardContent>
@@ -360,6 +292,7 @@ export default function EventPage() {
         )}
       </div>
 
+      </main>
       <Footer variant="minimal" event={event} />
     </div>
   );

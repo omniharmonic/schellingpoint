@@ -1,79 +1,34 @@
 'use client'
 
 import Link from 'next/link'
+import { usePathname } from 'next/navigation'
 import { Button } from '@/components/ui/button'
 import { useAuth } from '@/hooks/useAuth'
-import { LogIn, LogOut, Plus } from 'lucide-react'
+import { LogOut, Plus } from 'lucide-react'
+import { NetworkMark } from '@/components/GatheringArtwork'
 
 export function SiteHeader() {
   const { user, profile, isLoading, signOut } = useAuth()
-
+  const pathname = usePathname()
+  const loginHref = `/login?redirect=${encodeURIComponent(pathname || '/')}`
   return (
-    <header className="sticky top-0 z-50 w-full border-b border-border bg-background ruler-edge">
-      <div className="container mx-auto px-4 flex h-14 items-center justify-between">
-        {/* Logo with connection indicator */}
-        <Link href="/" className="flex items-center gap-2.5 font-display font-bold text-lg group">
-          <span className={user ? 'node-indicator' : 'node-indicator-idle'} />
-          <span className="text-foreground group-hover:text-primary transition-colors">
-            Schelling <span className="text-primary">Point</span>
-          </span>
+    <header className="sticky top-0 z-40 border-b bg-background/95 backdrop-blur-md">
+      <div className="container mx-auto px-5 flex h-[76px] items-center justify-between gap-3">
+        <Link href="/" className="flex items-center gap-2.5 font-display font-semibold text-lg tracking-tight">
+          <NetworkMark className="h-8 w-8 text-primary shrink-0" />
+          <span className="leading-tight">Schelling Point</span>
         </Link>
-
-        {/* Navigation — monospace system labels */}
-        <div className="flex items-center gap-2 sm:gap-3">
-          {isLoading ? (
-            <div className="h-9 w-20 rounded-md bg-muted animate-pulse" />
-          ) : user ? (
-            <>
-              <Button asChild variant="default" size="sm">
-                <Link href="/create" className="font-mono text-xs uppercase tracking-wider">
-                  <Plus className="h-3.5 w-3.5 sm:mr-1.5" strokeWidth={1.5} />
-                  <span className="hidden sm:inline">Create</span>
-                </Link>
-              </Button>
-              <div className="flex items-center gap-2">
-                {profile?.avatar_url ? (
-                  <img
-                    src={profile.avatar_url}
-                    alt=""
-                    className="h-7 w-7 rounded-full border"
-                  />
-                ) : (
-                  <div className="h-7 w-7 rounded-full bg-primary/10 flex items-center justify-center text-xs font-mono font-medium text-primary">
-                    {(profile?.display_name || user.email || 'U')[0].toUpperCase()}
-                  </div>
-                )}
-                <span className="text-sm hidden md:inline max-w-[120px] truncate font-mono text-muted-foreground">
-                  {profile?.display_name || user.email?.split('@')[0]}
-                </span>
-              </div>
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                onClick={() => signOut()}
-                className="text-muted-foreground hover:text-foreground"
-              >
-                <LogOut className="h-4 w-4" strokeWidth={1.5} />
-                <span className="sr-only">Sign out</span>
-              </Button>
-            </>
-          ) : (
-            <>
-              <Button asChild variant="ghost" size="sm">
-                <Link href="/login" className="font-mono text-xs uppercase tracking-wider">
-                  <LogIn className="h-3.5 w-3.5 sm:mr-1.5" strokeWidth={1.5} />
-                  <span className="hidden sm:inline">Sign In</span>
-                </Link>
-              </Button>
-              <Button asChild variant="default" size="sm">
-                <Link href="/login?redirect=/create" className="font-mono text-xs uppercase tracking-wider">
-                  <Plus className="h-3.5 w-3.5 sm:mr-1.5" strokeWidth={1.5} />
-                  <span className="hidden sm:inline">Create</span>
-                </Link>
-              </Button>
-            </>
-          )}
-        </div>
+        <nav aria-label="Main navigation" className="flex items-center gap-2 sm:gap-4">
+          <Link href="/#upcoming" className="hidden md:block text-sm text-muted-foreground hover:text-foreground">Explore events</Link>
+          {isLoading ? <div className="h-10 w-20 rounded-lg bg-muted animate-pulse" /> : user ? <>
+            <Button asChild size="sm"><Link href="/create" aria-label="Create an event"><Plus className="h-4 w-4 sm:mr-2" /><span className="hidden sm:inline">Create event</span></Link></Button>
+            <span className="hidden lg:block text-sm max-w-[140px] truncate">{profile?.display_name || user.email?.split('@')[0]}</span>
+            <Button variant="ghost" size="icon-sm" onClick={() => signOut()} aria-label="Sign out"><LogOut className="h-4 w-4" /></Button>
+          </> : <>
+            <Button asChild variant="ghost" size="sm"><Link href={loginHref}>Sign in</Link></Button>
+            <Button asChild size="sm" className="hidden sm:inline-flex"><Link href="/create">Create event</Link></Button>
+          </>}
+        </nav>
       </div>
     </header>
   )

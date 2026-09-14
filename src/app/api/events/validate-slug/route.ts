@@ -44,7 +44,7 @@ export async function POST(request: Request): Promise<NextResponse<ValidateSlugR
       );
     }
 
-    const { slug } = body;
+    const slug = body?.slug;
 
     // Check if slug was provided
     if (!slug || typeof slug !== 'string') {

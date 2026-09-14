@@ -1,6 +1,7 @@
 'use client'
 
 import * as React from 'react'
+import { safeReturnPath } from '@/lib/auth-redirect'
 import type { User } from '@supabase/supabase-js'
 
 interface Profile {
@@ -25,7 +26,7 @@ interface AuthContextValue {
   isLoading: boolean
   isAdmin: boolean
   needsOnboarding: boolean
-  signIn: (email: string) => Promise<{ error: Error | null }>
+  signIn: (email: string, returnTo?: string) => Promise<{ error: Error | null }>
   signOut: () => Promise<void>
   refreshProfile: () => Promise<void>
 }
@@ -75,9 +76,8 @@ async function refreshSession(refreshToken: string): Promise<{
 }
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  // Track if we've processed the hash to avoid race conditions in StrictMode
-  // Using useRef to ensure it's component-scoped, not module-scoped
-  const hashProcessedRef = React.useRef(false)
+  // StrictMode replays effects. Both runs must await the same token exchange.
+  const hashSessionRef = React.useRef<Promise<User | null> | null>(null)
   const [user, setUser] = React.useState<User | null>(null)
   const [profile, setProfile] = React.useState<Profile | null>(null)
   const [isLoading, setIsLoading] = React.useState(true)
@@ -114,59 +114,42 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const storageKey = getStorageKey()
       let stored = localStorage.getItem(storageKey)
 
-      // Check for hash-based auth tokens (from Supabase magic link redirect)
-      // Use a ref to prevent race conditions in StrictMode
-      if (typeof window !== 'undefined' && window.location.hash && !hashProcessedRef.current) {
-        const hash = window.location.hash.substring(1)
-        const params = new URLSearchParams(hash)
-        const accessToken = params.get('access_token')
+      // Share in-flight hash verification before clearing the one-time URL token.
+      const params = new URLSearchParams(window.location.hash.substring(1))
+      const accessToken = params.get('access_token')
+      if (accessToken && !hashSessionRef.current) {
         const refreshToken = params.get('refresh_token')
-        const expiresIn = params.get('expires_in')
-        const tokenType = params.get('token_type')
-
-        if (accessToken) {
-          hashProcessedRef.current = true // Prevent second run from processing
-          console.log('Found auth tokens in URL hash, storing...')
-
-          // Clear the hash from URL immediately to prevent re-processing
-          window.history.replaceState(null, '', window.location.pathname + window.location.search)
-
-          // Fetch user data with the access token
+        const expiresIn = Number(params.get('expires_in') || 3600)
+        window.history.replaceState(null, '', window.location.pathname + window.location.search)
+        hashSessionRef.current = (async () => {
           try {
-            const userResponse = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
-              headers: {
-                'apikey': SUPABASE_KEY,
-                'Authorization': `Bearer ${accessToken}`,
-              },
+            const response = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+              headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${accessToken}` },
             })
-
-            if (userResponse.ok) {
-              const userData = await userResponse.json()
-              const session = {
-                access_token: accessToken,
-                refresh_token: refreshToken,
-                expires_at: expiresIn ? Math.floor(Date.now() / 1000) + parseInt(expiresIn) : null,
-                token_type: tokenType || 'bearer',
-                user: userData,
-              }
-              // Always store to localStorage, even if component unmounts
-              localStorage.setItem(storageKey, JSON.stringify(session))
-              console.log('Stored session for:', userData.email)
-
-              // Only update React state if still mounted
-              if (mounted) {
-                setUser(userData as User)
-                await fetchProfile(userData.id, accessToken)
-                setIsLoading(false)
-              }
-              return // Auth complete, no need to continue
-            } else {
-              const errorText = await userResponse.text()
-              console.error('Failed to fetch user with hash token:', errorText)
-            }
-          } catch (err) {
-            console.error('Error fetching user with hash token:', err)
+            if (!response.ok) return null
+            const userData = await response.json() as User
+            localStorage.setItem(storageKey, JSON.stringify({
+              access_token: accessToken, refresh_token: refreshToken,
+              expires_at: Math.floor(Date.now() / 1000) + expiresIn,
+              token_type: 'bearer', user: userData,
+            }))
+            return userData
+          } catch (error) {
+            console.error('Unable to verify sign-in link:', error)
+            return null
           }
+        })()
+      }
+      if (hashSessionRef.current) {
+        const signedInUser = await hashSessionRef.current
+        if (signedInUser) {
+          if (mounted) {
+            setUser(signedInUser)
+            const verified = JSON.parse(localStorage.getItem(storageKey) || '{}')
+            await fetchProfile(signedInUser.id, verified.access_token)
+            setIsLoading(false)
+          }
+          return
         }
       }
 
@@ -320,14 +303,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, [user])
 
-  const signIn = React.useCallback(async (email: string) => {
+  const signIn = React.useCallback(async (email: string, returnTo?: string) => {
     try {
       // Get the current origin for redirect (works in both dev and prod)
       const redirectTo = typeof window !== 'undefined'
-        ? `${window.location.origin}/auth/callback`
+        ? `${window.location.origin}/auth/callback?next=${encodeURIComponent(safeReturnPath(returnTo))}`
         : undefined
 
-      const response = await fetch(`${SUPABASE_URL}/auth/v1/otp`, {
+      const response = await fetch(`${SUPABASE_URL}/auth/v1/otp${redirectTo ? `?redirect_to=${encodeURIComponent(redirectTo)}` : ''}`, {
         method: 'POST',
         headers: {
           'apikey': SUPABASE_KEY,
@@ -337,7 +320,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           email,
           create_user: true,
           gotrue_meta_security: {},
-          ...(redirectTo && { redirect_to: redirectTo }),
         }),
       })
 

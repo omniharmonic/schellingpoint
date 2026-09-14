@@ -234,9 +234,9 @@ export default function RevenueDashboardPage() {
 
   return (
       <div className="space-y-8">
-        <div className="flex items-center justify-between">
+        <div className="page-heading">
           <div>
-            <h1 className="text-2xl font-display font-bold">Revenue Dashboard</h1>
+            <h1 className="text-2xl font-display font-bold">Revenue</h1>
             <p className="text-muted-foreground">Track ticket sales and revenue</p>
           </div>
           <Button variant="outline" disabled>

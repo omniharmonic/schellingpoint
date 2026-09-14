@@ -1,5 +1,6 @@
 'use client'
 
+import { isParticipationOpen } from '@/lib/events/lifecycle'
 import * as React from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
@@ -117,6 +118,7 @@ export default function ProposePage() {
   const router = useRouter()
   const { user, profile, isLoading: authLoading } = useAuth()
   const event = useEvent()
+  const proposalsClosed = !isParticipationOpen(event, 'propose')
 
   const [tracks, setTracks] = React.useState<Track[]>([])
   const [title, setTitle] = React.useState('')
@@ -213,7 +215,7 @@ export default function ProposePage() {
   // Redirect if not logged in
   React.useEffect(() => {
     if (!authLoading && !user) {
-      router.push('/login')
+      router.push(`/login?redirect=${encodeURIComponent(`/e/${event.slug}/propose`)}`)
     }
   }, [user, authLoading, router])
 
@@ -318,6 +320,10 @@ export default function ProposePage() {
     )
   }
 
+  if (proposalsClosed) {
+    return <DashboardLayout><Card className="max-w-xl mx-auto p-8"><h1 className="text-2xl font-semibold">Proposals are not open right now.</h1><p className="mt-3 text-muted-foreground">Explore the sessions while the organizers prepare the next phase.</p><Button asChild className="mt-6"><Link href={`/e/${event.slug}/sessions`}>Explore sessions</Link></Button></Card></DashboardLayout>
+  }
+
   if (isSuccess) {
     return (
       <DashboardLayout>
@@ -331,7 +337,7 @@ export default function ProposePage() {
               </div>
               <CardTitle className="text-2xl">Session Proposed!</CardTitle>
               <CardDescription>
-                Your session "{title}" has been submitted for review.
+                {event.requireProposalApproval ? `Your session “${title}” is ready for organizer review.` : `Your session “${title}” is now open for the community to discover.`}
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -379,9 +385,9 @@ export default function ProposePage() {
     <DashboardLayout>
       <div className="max-w-2xl mx-auto">
         <div className="mb-6">
-          <h1 className="text-2xl font-bold">Propose a Session</h1>
+          <h1 className="text-2xl font-bold">Bring an idea to the room.</h1>
           <p className="text-muted-foreground mt-1">
-            Share your knowledge with the {event.name} community
+            A question, a skill, a conversation worth having. What would you like to explore with {event.name}?
           </p>
         </div>
 

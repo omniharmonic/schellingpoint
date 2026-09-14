@@ -112,7 +112,7 @@ export default function CheckInPage() {
     try {
       const token = getAccessToken()
       if (!token) {
-        router.push('/login')
+        router.push(`/login?redirect=${encodeURIComponent(`/e/${event.slug}/checkin`)}`)
         return
       }
 
@@ -170,7 +170,7 @@ export default function CheckInPage() {
             <p className="text-muted-foreground mb-4">
               You need to be logged in to use the check-in scanner.
             </p>
-            <Button onClick={() => router.push('/login')}>Log In</Button>
+            <Button onClick={() => router.push(`/login?redirect=${encodeURIComponent(`/e/${event.slug}/checkin`)}`)}>Log In</Button>
           </CardContent>
         </Card>
       </div>

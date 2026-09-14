@@ -2,7 +2,7 @@
 
 import * as React from 'react'
 import { useRouter } from 'next/navigation'
-import { Loader2, Mail, LayoutGrid, Plus, Table, Grid3X3, Beaker, Trash2 } from 'lucide-react'
+import { Loader2, Mail, LayoutGrid, Plus, Table, Grid3X3, Beaker, Trash2, ArrowUpRight, FileText } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { useAuth } from '@/hooks/useAuth'
@@ -67,8 +67,11 @@ export default function AdminPage() {
   const [timeSlots, setTimeSlots] = React.useState<TimeSlot[]>([])
   const [tracks, setTracks] = React.useState<Track[]>([])
   const [isLoading, setIsLoading] = React.useState(true)
-  const [activeTab, setActiveTab] = React.useState<'all' | 'pending' | 'approved' | 'scheduled'>('pending')
+  const [activeTab, setActiveTab] = React.useState<'all' | 'pending' | 'approved' | 'scheduled'>('all')
   const [viewMode, setViewMode] = React.useState<ViewMode>('table')
+
+  const [loadError, setLoadError] = React.useState<string | null>(null)
+  const [actionError, setActionError] = React.useState<string | null>(null)
 
   // Selection state
   const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set())
@@ -90,10 +93,13 @@ export default function AdminPage() {
 
   // Fetch data
   React.useEffect(() => {
+    if (authLoading || roleLoading || !isAdmin) return
     const fetchData = async () => {
+      setIsLoading(true)
       const token = getAccessToken()
       const authHeader = token ? `Bearer ${token}` : `Bearer ${SUPABASE_KEY}`
 
+      setLoadError(null)
       try {
         const [sessionsRes, venuesRes, timeSlotsRes, tracksRes] = await Promise.all([
           fetch(
@@ -134,6 +140,9 @@ export default function AdminPage() {
           ),
         ])
 
+        if (![sessionsRes, venuesRes, timeSlotsRes, tracksRes].every(response => response.ok)) {
+          throw new Error('Unable to load the organizer workspace. Refresh the page to try again.')
+        }
         if (sessionsRes.ok) {
           const data = await sessionsRes.json()
           setSessions(data)
@@ -151,19 +160,19 @@ export default function AdminPage() {
           setTracks(data)
         }
       } catch (err) {
-        console.error('Error fetching admin data:', err)
+        setLoadError(err instanceof Error ? err.message : 'Unable to load event data. Please try again.')
       } finally {
         setIsLoading(false)
       }
     }
 
     fetchData()
-  }, [event.id])
+  }, [event.id, authLoading, roleLoading, isAdmin])
 
   // Clear selection when tab changes
   React.useEffect(() => {
     setSelectedIds(new Set())
-  }, [activeTab])
+  }, [activeTab, filters])
 
   // Filter and sort sessions
   const filteredSessions = React.useMemo(() => {
@@ -262,6 +271,7 @@ export default function AdminPage() {
     const token = getAccessToken()
     if (!token) return
 
+    setActionError(null)
     setIsBatchLoading(true)
 
     try {
@@ -280,7 +290,7 @@ export default function AdminPage() {
 
       if (!response.ok) {
         const data = await response.json()
-        alert(data.error || 'Batch operation failed')
+        setActionError(data.error || 'The selected sessions could not be updated. Please try again.')
         return
       }
 
@@ -313,10 +323,18 @@ export default function AdminPage() {
       setSelectedIds(new Set())
     } catch (err) {
       console.error('Batch operation error:', err)
-      alert('An error occurred')
+      setActionError('The selected sessions could not be updated. Please try again.')
     } finally {
       setIsBatchLoading(false)
     }
+  }
+
+  // A failed HTTP response must never appear to be a successful session change.
+  const saveSessionChange = async (url: string, options: RequestInit) => {
+    setActionError(null)
+    const response = await fetch(url, options)
+    if (!response.ok) throw new Error('Unable to save session')
+    return response
   }
 
   // Single session operations (for card view)
@@ -325,7 +343,7 @@ export default function AdminPage() {
     if (!token) return
 
     try {
-      await fetch(
+      await saveSessionChange(
         `${SUPABASE_URL}/rest/v1/sessions?id=eq.${sessionId}&event_id=eq.${event.id}`,
         {
           method: 'PATCH',
@@ -342,6 +360,7 @@ export default function AdminPage() {
         prev.map((s) => (s.id === sessionId ? { ...s, status: 'approved' as SessionStatus } : s))
       )
     } catch (err) {
+      setActionError('The session could not be updated. Please try again.')
       console.error('Error approving session:', err)
     }
   }
@@ -351,7 +370,7 @@ export default function AdminPage() {
     if (!token) return
 
     try {
-      await fetch(
+      await saveSessionChange(
         `${SUPABASE_URL}/rest/v1/sessions?id=eq.${sessionId}&event_id=eq.${event.id}`,
         {
           method: 'PATCH',
@@ -368,6 +387,7 @@ export default function AdminPage() {
         prev.map((s) => (s.id === sessionId ? { ...s, status: 'rejected' as SessionStatus } : s))
       )
     } catch (err) {
+      setActionError('The session could not be updated. Please try again.')
       console.error('Error rejecting session:', err)
     }
   }
@@ -380,7 +400,7 @@ export default function AdminPage() {
     const timeSlot = timeSlots.find((t) => t.id === timeSlotId)
 
     try {
-      await fetch(
+      await saveSessionChange(
         `${SUPABASE_URL}/rest/v1/sessions?id=eq.${sessionId}&event_id=eq.${event.id}`,
         {
           method: 'PATCH',
@@ -420,6 +440,7 @@ export default function AdminPage() {
         headers: { Authorization: `Bearer ${token}` },
       }).catch((err) => console.error('Notify host error:', err))
     } catch (err) {
+      setActionError('The session could not be updated. Please try again.')
       console.error('Error scheduling session:', err)
     }
   }
@@ -429,7 +450,7 @@ export default function AdminPage() {
     if (!token) return
 
     try {
-      await fetch(
+      await saveSessionChange(
         `${SUPABASE_URL}/rest/v1/sessions?id=eq.${sessionId}&event_id=eq.${event.id}`,
         {
           method: 'PATCH',
@@ -461,6 +482,7 @@ export default function AdminPage() {
         )
       )
     } catch (err) {
+      setActionError('The session could not be updated. Please try again.')
       console.error('Error unscheduling session:', err)
     }
   }
@@ -470,7 +492,7 @@ export default function AdminPage() {
     if (!token) return
 
     try {
-      const response = await fetch(
+      const response = await saveSessionChange(
         `${SUPABASE_URL}/rest/v1/sessions?id=eq.${sessionId}&event_id=eq.${event.id}`,
         {
           method: 'DELETE',
@@ -485,6 +507,7 @@ export default function AdminPage() {
         setSessions((prev) => prev.filter((s) => s.id !== sessionId))
       }
     } catch (err) {
+      setActionError('The session could not be updated. Please try again.')
       console.error('Error deleting session:', err)
     }
   }
@@ -588,7 +611,7 @@ export default function AdminPage() {
       }
     } catch (err) {
       console.error('Error seeding test sessions:', err)
-      alert('An error occurred')
+      setActionError('The selected sessions could not be updated. Please try again.')
     } finally {
       setIsSeeding(false)
     }
@@ -622,7 +645,7 @@ export default function AdminPage() {
       }
     } catch (err) {
       console.error('Error clearing test sessions:', err)
-      alert('An error occurred')
+      setActionError('The selected sessions could not be updated. Please try again.')
     } finally {
       setIsClearing(false)
     }
@@ -663,20 +686,26 @@ export default function AdminPage() {
 
   return (
     <>
-        <div className="space-y-6">
+        <div className="space-y-8">
           {/* Page Header */}
-          <div className="flex items-center justify-between">
+          <div className="page-heading organizer-welcome">
             <div>
-              <h1 className="text-2xl font-display font-bold">Sessions</h1>
-              <p className="text-muted-foreground">Manage proposals and scheduled sessions</p>
+              <h1 className="text-2xl font-display font-bold">Make space for good ideas.</h1>
+              <p className="text-muted-foreground">Your program takes shape here. Review ideas and help them find their place.</p>
             </div>
             <Button asChild>
               <Link href={`/e/${event.slug}/admin/sessions/new`}>
                 <Plus className="h-4 w-4 mr-2" />
-                Create Session
+                Add a session
               </Link>
             </Button>
           </div>
+
+          {loadError && <div role="alert" className="rounded-xl border border-destructive/30 bg-destructive/5 p-4 flex flex-wrap items-center justify-between gap-3"><p className="text-sm text-destructive">{loadError}</p><Button variant="outline" size="sm" onClick={() => window.location.reload()}>Try again</Button></div>}
+
+          {actionError && <p role="alert" className="sticky top-20 z-10 rounded-xl border border-destructive/30 bg-card p-4 text-sm text-destructive">{actionError}</p>}
+
+          {event.status === 'draft' && can('editEventSettings') && <Card className="border-primary/25 bg-secondary"><CardContent className="p-6 flex flex-wrap items-center justify-between gap-5"><div><h2 className="text-xl font-semibold">Ready to invite your people?</h2><p className="mt-2 text-sm text-muted-foreground max-w-xl">Your event is a draft. Review the invitation, publish it, then open proposals when you’re ready to hear from the community.</p></div><Button asChild><Link href={`/e/${event.slug}/admin/settings`}>Review & publish</Link></Button></CardContent></Card>}
 
           {/* Stats Overview */}
           <AdminStats
@@ -688,31 +717,25 @@ export default function AdminPage() {
             timeSlots={timeSlots.length}
           />
 
-          {/* Quick Actions */}
-          {approvedSessions.length > 0 && can('manageSchedule') && (
-            <Card className="bg-primary/5 border-primary/20">
-              <CardContent className="py-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-                <div>
-                  <p className="font-medium">
-                    {approvedSessions.length} session{approvedSessions.length > 1 ? 's' : ''} ready to schedule
-                  </p>
-                  <p className="text-sm text-muted-foreground">
-                    Use Schedule Builder for drag-and-drop scheduling
-                  </p>
-                </div>
-                <Button asChild>
-                  <Link href={`/e/${event.slug}/admin/schedule`}>
-                    <LayoutGrid className="h-4 w-4 mr-2" />
-                    Open Schedule Builder
-                  </Link>
-                </Button>
-              </CardContent>
-            </Card>
-          )}
+          <section className="grid gap-4 lg:grid-cols-[1.35fr_1fr]" aria-label="Next steps">
+            <div className="rounded-2xl border border-primary/25 bg-secondary p-6 sm:p-8">
+              <div className="flex items-center gap-2 text-primary text-sm font-medium mb-4"><FileText className="h-4 w-4"/>Next up</div>
+              <h2 className="text-2xl sm:text-3xl font-semibold mb-3 leading-tight">{pendingSessions.length > 0 ? `${pendingSessions.length} idea${pendingSessions.length === 1 ? '' : 's'} waiting for a little attention` : 'You’re all caught up on reviews.'}</h2>
+              <p className="text-sm text-muted-foreground max-w-md mb-5">{pendingSessions.length > 0 ? 'Review proposals so your community can discover and support them.' : 'New proposals will appear here. In the meantime, keep shaping your gathering.'}</p>
+              {pendingSessions.length > 0 ? <Button onClick={() => { setActiveTab('pending'); setFilters(defaultFilters); document.getElementById('session-review')?.scrollIntoView({ block: 'start' }) }}>Review proposals</Button> : <Button asChild variant="outline"><Link href={`/e/${event.slug}`}>View event page<ArrowUpRight className="h-4 w-4 ml-2"/></Link></Button>}
+            </div>
+            <div className="rounded-2xl border bg-card p-6 flex flex-col">
+              <div className="flex items-center gap-2 text-muted-foreground text-sm mb-4"><LayoutGrid className="h-4 w-4"/>Program progress</div>
+              <h2 className="text-xl font-semibold mb-2">{scheduledSessions.length} session{scheduledSessions.length === 1 ? '' : 's'} on the schedule</h2>
+              <p className="text-sm text-muted-foreground mb-4">{approvedSessions.length} approved and ready to place.</p>
+              <div className="h-2 bg-muted rounded-full overflow-hidden mb-5" role="progressbar" aria-label="Approved sessions scheduled" aria-valuemin={0} aria-valuemax={approvedSessions.length + scheduledSessions.length || 1} aria-valuenow={scheduledSessions.length}><div className="h-full bg-primary rounded-full" style={{ width: `${scheduledSessions.length / (approvedSessions.length + scheduledSessions.length || 1) * 100}%` }}/></div>
+              {can('manageSchedule') && <Link href={`/e/${event.slug}/admin/schedule`} className="mt-auto inline-flex gap-2 items-center text-sm font-semibold text-primary">Open schedule builder<ArrowUpRight className="h-4 w-4"/></Link>}
+            </div>
+          </section>
 
           {/* Test Data Tools */}
           {process.env.NODE_ENV === 'development' && (
-            <Card className="bg-amber-500/5 border-amber-500/20">
+            <details className="rounded-xl border p-4 text-sm"><summary className="cursor-pointer text-muted-foreground">Development tools</summary><Card className="mt-4 bg-amber-500/5 border-amber-500/20">
               <CardContent className="py-4">
                 <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
                   <div>
@@ -772,11 +795,11 @@ export default function AdminPage() {
                   </div>
                 </div>
               </CardContent>
-            </Card>
+            </Card></details>
           )}
 
           {/* Tabs and View Toggle */}
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div id="session-review" className="scroll-mt-24 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div className="flex gap-1 sm:gap-2 border-b overflow-x-auto -mx-4 px-4 sm:mx-0 sm:px-0 sm:border-b-0">
               {(['all', 'pending', 'approved', 'scheduled'] as const).map((tab) => {
                 const count = tab === 'all' ? sessions.length :
@@ -786,6 +809,7 @@ export default function AdminPage() {
                 return (
                   <button
                     key={tab}
+                    aria-pressed={activeTab === tab}
                     onClick={() => setActiveTab(tab)}
                     className={cn(
                       'px-3 sm:px-4 py-2 text-sm font-medium border-b-2 sm:border-b-0 sm:rounded-md -mb-px sm:mb-0 transition-colors whitespace-nowrap capitalize',
@@ -806,6 +830,7 @@ export default function AdminPage() {
                   variant={viewMode === 'table' ? 'secondary' : 'ghost'}
                   size="sm"
                   onClick={() => setViewMode('table')}
+                  aria-label="Table view" aria-pressed={viewMode === 'table'}
                   className="rounded-r-none"
                 >
                   <Table className="h-4 w-4" />
@@ -814,6 +839,7 @@ export default function AdminPage() {
                   variant={viewMode === 'cards' ? 'secondary' : 'ghost'}
                   size="sm"
                   onClick={() => setViewMode('cards')}
+                  aria-label="Card view" aria-pressed={viewMode === 'cards'}
                   className="rounded-l-none"
                 >
                   <Grid3X3 className="h-4 w-4" />
@@ -839,7 +865,7 @@ export default function AdminPage() {
 
           {/* Notify All Banner (for scheduled tab) */}
           {activeTab === 'scheduled' && scheduledSessions.some((s) => !s.host_notified_at) && (
-            <div className="flex items-center justify-between bg-amber-500/10 border border-amber-500/20 rounded-lg p-3">
+            <div className="flex flex-wrap gap-3 items-center justify-between bg-amber-500/10 border border-amber-500/20 rounded-lg p-3">
               <p className="text-sm text-amber-700 dark:text-amber-400">
                 {scheduledSessions.filter((s) => !s.host_notified_at).length} scheduled session(s) have not been notified.
               </p>
@@ -867,9 +893,10 @@ export default function AdminPage() {
           {filteredSessions.length === 0 ? (
             <Card>
               <CardContent className="py-8 text-center text-muted-foreground">
-                {filters.search || Object.values(filters).some((v) => v && (Array.isArray(v) ? v.length > 0 : true))
+                {JSON.stringify(filters) !== JSON.stringify(defaultFilters)
                   ? 'No sessions match your filters.'
                   : `No ${activeTab === 'all' ? '' : activeTab} sessions yet.`}
+                <div className="mt-4"><Button variant="outline" onClick={() => { setFilters(defaultFilters); setActiveTab('all') }}>Show all sessions</Button></div>
               </CardContent>
             </Card>
           ) : viewMode === 'table' ? (

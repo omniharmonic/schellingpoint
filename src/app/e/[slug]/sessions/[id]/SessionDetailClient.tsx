@@ -1,5 +1,6 @@
 'use client'
 
+import { isParticipationOpen } from '@/lib/events/lifecycle'
 import * as React from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
@@ -83,6 +84,7 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
   const router = useRouter()
   const { user } = useAuth()
   const event = useEvent()
+  const votingClosed = !isParticipationOpen(event, 'vote')
   const { voteCredits, isAdmin } = useEventRole()
 
   // Use event's vote credits per user
@@ -90,6 +92,7 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
 
   const [session, setSession] = React.useState<any>(initialSession || null)
   const [isLoading, setIsLoading] = React.useState(!initialSession)
+  const [actionError, setActionError] = React.useState<string | null>(null)
   const [error, setError] = React.useState<string | null>(null)
   const [userVotes, setUserVotes] = React.useState(0)
   const [isFavorited, setIsFavorited] = React.useState(false)
@@ -238,14 +241,15 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
 
   // Handle vote change
   const handleVote = async (delta: number) => {
+    if (votingClosed) return
     if (!user) {
-      router.push('/login')
+      router.push(`/login?returnTo=${encodeURIComponent(`/e/${event.slug}/sessions/${sessionId}`)}`)
       return
     }
 
     const token = getAccessToken()
     if (!token) {
-      router.push('/login')
+      router.push(`/login?returnTo=${encodeURIComponent(`/e/${event.slug}/sessions/${sessionId}`)}`)
       return
     }
 
@@ -259,13 +263,14 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
       return
     }
 
+    setActionError(null)
     // Optimistic update
     setUserVotes(newVoteCount)
     setAllUserVotes(prev => ({ ...prev, [sessionId]: newVoteCount }))
 
     try {
       if (newVoteCount === 0) {
-        await fetch(
+        const voteResponse = await fetch(
           `${SUPABASE_URL}/rest/v1/votes?user_id=eq.${user.id}&session_id=eq.${sessionId}`,
           {
             method: 'DELETE',
@@ -275,8 +280,9 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
             },
           }
         )
+        if (!voteResponse.ok) throw new Error('Your vote could not be saved. Please try again.')
       } else {
-        await fetch(
+        const voteResponse = await fetch(
           `${SUPABASE_URL}/rest/v1/votes?on_conflict=user_id,session_id`,
           {
             method: 'POST',
@@ -295,8 +301,10 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
             }),
           }
         )
+        if (!voteResponse.ok) throw new Error('Your vote could not be saved. Please try again.')
       }
 
+      window.dispatchEvent(new CustomEvent('schelling:votes-changed', { detail: { eventId: event.id } }))
       // Refresh session to get updated vote counts
       const response = await fetch(
         `${SUPABASE_URL}/rest/v1/sessions?id=eq.${sessionId}&event_id=eq.${event.id}&select=*,venue:venues(*),time_slot:time_slots(*),host:profiles!host_id(id,display_name,bio,avatar_url,affiliation,building,telegram,ens,interests),cohosts:session_cohosts(user_id,display_order,profile:profiles(id,display_name,bio,avatar_url,affiliation,building,telegram,ens,interests)),track:tracks(id,name,color)`,
@@ -315,6 +323,7 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
         }
       }
     } catch (err) {
+      setActionError('Your vote could not be saved. Please try again.')
       console.error('Error voting:', err)
       setUserVotes(userVotes)
       setAllUserVotes(prev => ({ ...prev, [sessionId]: userVotes }))
@@ -324,22 +333,23 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
   // Handle favorite toggle
   const handleToggleFavorite = async () => {
     if (!user) {
-      router.push('/login')
+      router.push(`/login?returnTo=${encodeURIComponent(`/e/${event.slug}/sessions/${sessionId}`)}`)
       return
     }
 
     const token = getAccessToken()
     if (!token) {
-      router.push('/login')
+      router.push(`/login?returnTo=${encodeURIComponent(`/e/${event.slug}/sessions/${sessionId}`)}`)
       return
     }
 
+    setActionError(null)
     // Optimistic update
     setIsFavorited(!isFavorited)
 
     try {
       if (isFavorited) {
-        await fetch(
+        const response = await fetch(
           `${SUPABASE_URL}/rest/v1/favorites?user_id=eq.${user.id}&session_id=eq.${sessionId}`,
           {
             method: 'DELETE',
@@ -349,8 +359,9 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
             },
           }
         )
+        if (!response.ok) throw new Error('Save failed')
       } else {
-        await fetch(
+        const response = await fetch(
           `${SUPABASE_URL}/rest/v1/favorites`,
           {
             method: 'POST',
@@ -366,10 +377,12 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
             }),
           }
         )
+        if (!response.ok) throw new Error('Save failed')
       }
     } catch (err) {
       console.error('Error toggling favorite:', err)
-      setIsFavorited(!isFavorited)
+      setActionError('Your saved schedule could not be updated. Please try again.')
+      setIsFavorited(isFavorited)
     }
   }
 
@@ -477,6 +490,7 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
   return (
     <DashboardLayout>
       <div className="space-y-6 overflow-hidden">
+        {actionError && <p role="alert" className="rounded-xl border p-4 text-sm text-destructive">{actionError}</p>}
         {/* Back Button */}
         <Button variant="ghost" onClick={() => router.back()} className="gap-2">
           <ArrowLeft className="h-4 w-4" />
@@ -863,7 +877,8 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
           <div className="space-y-6">
             {/* Voting Card */}
             <Card className="p-6">
-              <h3 className="font-semibold mb-4">Cast Your Votes</h3>
+              <h3 className="font-semibold mb-4">{votingClosed ? 'Community support' : 'Cast your votes'}</h3>
+              {votingClosed && <p className="text-sm text-muted-foreground mb-4">Voting is not open right now.</p>}
               <div className="space-y-4">
                 <div className="flex items-center justify-between text-sm">
                   <span className="text-muted-foreground">Total votes</span>
@@ -881,7 +896,7 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
                   <span className="font-medium">{session.total_credits || 0}</span>
                 </div>
 
-                {user && (
+                {user && !votingClosed && (
                   <div className="pt-4 border-t">
                     <div className="flex items-center justify-between mb-3">
                       <span className="text-sm text-muted-foreground">Your votes</span>
@@ -891,6 +906,7 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
                       <Button
                         variant="outline"
                         size="icon"
+                        aria-label="Remove a vote"
                         onClick={() => handleVote(-1)}
                         disabled={userVotes === 0}
                       >
@@ -905,6 +921,7 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
                       <Button
                         variant="outline"
                         size="icon"
+                        aria-label="Add a vote"
                         onClick={() => handleVote(1)}
                         disabled={!canAddVote}
                       >
@@ -924,13 +941,13 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
                   </div>
                 )}
 
-                {!user && (
+                {!user && !votingClosed && (
                   <div className="pt-4 border-t text-center">
                     <p className="text-sm text-muted-foreground mb-3">
                       Sign in to vote on this session
                     </p>
                     <Button asChild className="w-full">
-                      <Link href="/login">Sign In</Link>
+                      <Link href={`/login?returnTo=${encodeURIComponent(`/e/${event.slug}/sessions/${sessionId}`)}`}>Sign in</Link>
                     </Button>
                   </div>
                 )}

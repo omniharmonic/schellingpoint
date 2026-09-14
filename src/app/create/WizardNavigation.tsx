@@ -92,7 +92,7 @@ export function WizardStepTabs({ state, dispatch }: WizardCommonProps) {
       <div className="hidden md:block">
         <div
           role="tablist"
-          className="flex items-stretch gap-1 border-b border-border overflow-x-auto"
+          className="flex items-stretch justify-between gap-1 border-b border-border overflow-x-auto"
         >
           {WIZARD_STEPS.map((stepName, index) => {
             const status = getStepStatus(index, currentStep, state);
@@ -108,7 +108,7 @@ export function WizardStepTabs({ state, dispatch }: WizardCommonProps) {
                 onClick={() => handleStepClick(index)}
                 disabled={!isClickable}
                 className={cn(
-                  'relative flex items-center gap-2 px-4 py-3 text-sm font-medium whitespace-nowrap transition-colors',
+                  'relative flex items-center gap-1.5 px-2.5 py-3 text-sm font-medium whitespace-nowrap transition-colors',
                   'focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded-t-md',
                   status === 'current' && 'text-foreground',
                   status === 'completed' && 'text-muted-foreground hover:text-foreground',
@@ -195,7 +195,7 @@ export function WizardValidationErrors({ state }: { state: WizardState }) {
   if (errors.length === 0) return null;
 
   return (
-    <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-4">
+    <div role="alert" className="rounded-lg border border-destructive/50 bg-destructive/10 p-4">
       <div className="flex items-start gap-3">
         <AlertCircle className="h-5 w-5 text-destructive flex-shrink-0 mt-0.5" />
         <div className="space-y-1">
@@ -270,10 +270,9 @@ export function WizardNavButtons({
           <Button
             type="button"
             onClick={handleNext}
-            disabled={!isCurrentStepValid}
-            className="gap-2"
+                        className="gap-2"
           >
-            Next
+            Continue to {STEP_LABELS[WIZARD_STEPS[currentStep + 1]]}
             <ChevronRight className="h-4 w-4" />
           </Button>
         )}

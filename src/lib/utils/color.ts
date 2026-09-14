@@ -9,7 +9,8 @@
  */
 export function hexToHslValues(hex: string): string {
   // Remove # if present
-  const cleanHex = hex.replace('#', '');
+  const raw = hex.replace('#', '');
+  const cleanHex = raw.length === 3 ? raw.split('').map(c => c + c).join('') : raw;
 
   // Parse hex to RGB
   const r = parseInt(cleanHex.substring(0, 2), 16) / 255;
@@ -61,14 +62,36 @@ export function isValidHexColor(color: string): boolean {
  * @returns HSL values for white or dark foreground
  */
 export function getContrastingForeground(hex: string): string {
-  const cleanHex = hex.replace('#', '');
+  const raw = hex.replace('#', '');
+  const cleanHex = raw.length === 3 ? raw.split('').map(c => c + c).join('') : raw;
   const r = parseInt(cleanHex.substring(0, 2), 16);
   const g = parseInt(cleanHex.substring(2, 4), 16);
   const b = parseInt(cleanHex.substring(4, 6), 16);
 
-  // Calculate relative luminance
-  const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  const luminance = relativeLuminance([r, g, b]);
+  return luminance > 0.179 ? '0 0% 0%' : '0 0% 100%';
+}
 
-  // Return white for dark backgrounds, dark for light backgrounds
-  return luminance > 0.5 ? '222 47% 6%' : '210 40% 98%';
+function relativeLuminance(rgb: number[]): number {
+  const [r, g, b] = rgb.map(channel => {
+    const c = channel / 255;
+    return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+/** Preserve brand hue while making primary text readable on the app canvas. */
+export function accessiblePrimary(hex: string, dark: boolean): string {
+  const raw = hex.replace('#', '');
+  const full = raw.length === 3 ? raw.split('').map(c => c + c).join('') : raw;
+  const rgb = [0, 2, 4].map(offset => parseInt(full.slice(offset, offset + 2), 16));
+  const canvas = dark ? relativeLuminance([22, 29, 27]) : relativeLuminance([247, 249, 248]);
+  for (let i = 0; i <= 100; i++) {
+    const amount = i / 100;
+    const mixed = rgb.map(c => Math.round(c + ((dark ? 255 : 0) - c) * amount));
+    const lum = relativeLuminance(mixed);
+    const contrast = (Math.max(lum, canvas) + .05) / (Math.min(lum, canvas) + .05);
+    if (contrast >= 4.6 || i === 100) return '#' + mixed.map(c => c.toString(16).padStart(2, '0')).join('');
+  }
+  return hex;
 }

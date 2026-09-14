@@ -18,6 +18,17 @@ Read this document first, then:
 
 ## Current State Summary
 
+### September 2026 frontend polish
+
+The second design pass adds a scroll-driven, interactive propose/vote/gather walkthrough, event posters, stronger dashboard summaries, and larger calendar controls with track-colored session cards.
+
+A shared daylight visual system now covers the public site, event workspaces, organizer tools, creation wizard, onboarding, and utility pages. See [UX direction](design/UX_POLISH.md) and [verification notes](design/UX_POLISH_QA.md).
+
+Notable behavior fixes: event-aware sign-in return paths and magic-link initialization; per-event voting-credit cache refresh; rollback and visible feedback for failed vote/bookmark/organizer saves; calendar date boundaries and event-timezone display; accessible theme shades and light/dark mode; completed-event participation controls; working filter reset; recoverable empty/error states.
+
+Production build and six focused logic checks pass. Browser verification covers public and attendee flows, including fresh local email sign-in and saving a session. Full organizer workflow verification remains pending approval to accept the disposable local test event’s terms. No production data was changed or deployment performed.
+
+
 ### Completed Work
 
 #### Phase 1: Foundation ✅ COMPLETE
@@ -338,3 +349,7 @@ npx supabase gen types typescript --local > src/types/supabase.ts
 - Each task has an ID like P4.1.2 (Phase 4, Task 1, Subtask 2)
 - Private event invitations are NOT explicitly in the plan - may need to be added if visibility:private is used
 - Current co-host invite system at `/invite/[token]` is for session co-hosts, not event membership
+
+### September 14 reliability follow-up
+
+See `docs/design/UX_POLISH_QA.md` for reproduced errors, fixes, validation, and remaining checks. New local migrations provide atomic event creation and database-enforced participation rules; deploy these before the corresponding app code. Event settings now supports publishing and lifecycle transitions. Build, typecheck, 20 targeted tests, and rolled-back SQL participation checks pass. Full organizer browser verification awaits the prepared local event's terms/submission approval; production readiness is not yet signed off.

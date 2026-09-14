@@ -87,7 +87,7 @@ const config: Config = {
         sm: 'calc(var(--radius) - 4px)',
       },
       fontFamily: {
-        sans: ['var(--font-inter)', 'Inter', 'system-ui', 'sans-serif'],
+        sans: ['BDO Grotesk', 'system-ui', 'sans-serif'],
         display: ['BDO Grotesk', 'system-ui', 'sans-serif'],
         mono: ['var(--font-mono)', 'Space Mono', 'JetBrains Mono', 'monospace'],
       },

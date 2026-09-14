@@ -41,7 +41,7 @@ const VOTING_MECHANISMS: {
   {
     value: 'approval',
     label: 'Approval',
-    description: 'Unlimited votes per session. Good for preference collection.',
+    description: 'One vote per session, costing one credit. Support as many sessions as your budget allows.',
   },
 ];
 
@@ -50,10 +50,9 @@ const SESSION_FORMATS: { value: string; label: string }[] = [
   { value: 'workshop', label: 'Workshop' },
   { value: 'panel', label: 'Panel' },
   { value: 'discussion', label: 'Discussion' },
-  { value: 'lightning', label: 'Lightning Talk' },
   { value: 'demo', label: 'Demo' },
-  { value: 'keynote', label: 'Keynote' },
-  { value: 'networking', label: 'Networking' },
+  { value: 'fireside', label: 'Fireside Chat' },
+  { value: 'ceremony', label: 'Ceremony' },
 ];
 
 const SESSION_DURATIONS: { value: number; label: string }[] = [
@@ -182,6 +181,7 @@ export function VotingStep({ state, dispatch }: VotingStepProps) {
 
   return (
     <div className="space-y-6">
+      <p className="text-sm text-muted-foreground">All opening and closing times use {state.dates.timezone}. The organizer also opens each phase from Event settings.</p>
       {/* Vote Credits */}
       <Card>
         <CardHeader>
@@ -478,7 +478,7 @@ export function VotingStep({ state, dispatch }: VotingStepProps) {
             (v) => !SESSION_FORMATS.some((f) => f.value === v)
           ).length > 0 && (
             <div className="space-y-2">
-              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+              <p className="text-xs font-medium text-muted-foreground tracking-wide">
                 Custom formats
               </p>
               <div className="flex flex-wrap gap-2">
@@ -599,7 +599,7 @@ export function VotingStep({ state, dispatch }: VotingStepProps) {
             (v) => !SESSION_DURATIONS.some((d) => d.value === v)
           ).length > 0 && (
             <div className="space-y-2">
-              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+              <p className="text-xs font-medium text-muted-foreground tracking-wide">
                 Custom durations
               </p>
               <div className="flex flex-wrap gap-2">

@@ -41,11 +41,11 @@ function formatDateRange(startDate: string, endDate: string): string {
   const start = new Date(startDate);
   const end = new Date(endDate);
 
-  const startMonth = start.toLocaleDateString('en-US', { month: 'short' });
-  const startDay = start.getDate();
-  const endMonth = end.toLocaleDateString('en-US', { month: 'short' });
-  const endDay = end.getDate();
-  const year = end.getFullYear();
+  const startMonth = start.toLocaleDateString('en-US', { month: 'short', timeZone: 'UTC' });
+  const startDay = start.getUTCDate();
+  const endMonth = end.toLocaleDateString('en-US', { month: 'short', timeZone: 'UTC' });
+  const endDay = end.getUTCDate();
+  const year = end.getUTCFullYear();
 
   if (startMonth === endMonth) {
     return `${startMonth} ${startDay}-${endDay}, ${year}`;
@@ -192,7 +192,7 @@ export function MyEventsSection() {
               const badge = statusBadgeConfig[event.status] || statusBadgeConfig.draft;
 
               return (
-                <Card key={event.id} className="group card-hover border-border/50 hover:border-primary/30">
+                <Card key={event.id} className="group border-foreground/20 border-t-8 border-t-primary">
                   <CardContent className="p-5">
                     <div className="flex items-start justify-between gap-3 mb-3">
                       <div className="flex items-center gap-3 min-w-0">
@@ -204,7 +204,7 @@ export function MyEventsSection() {
                           />
                         )}
                         <div className="min-w-0">
-                          <h3 className="font-semibold line-clamp-1 group-hover:text-primary transition-colors">
+                          <h3 className="text-2xl font-semibold tracking-tight leading-tight break-words">
                             {event.name}
                           </h3>
                           <span className="text-xs text-muted-foreground capitalize">
@@ -237,7 +237,7 @@ export function MyEventsSection() {
                         </Link>
                       </Button>
                       <Button asChild variant="ghost" size="sm">
-                        <Link href={`/e/${event.slug}/admin`}>
+                        <Link href={`/e/${event.slug}/admin`} aria-label={`Manage ${event.name}`}>
                           <Settings className="h-4 w-4" />
                         </Link>
                       </Button>

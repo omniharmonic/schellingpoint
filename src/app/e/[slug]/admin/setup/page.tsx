@@ -1,5 +1,7 @@
 'use client'
 
+import { parseTimeInTimezone } from '@/lib/events/timezone'
+import { requireSavedRows } from '@/lib/api/saved-rows'
 import * as React from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
@@ -82,6 +84,8 @@ export default function AdminSetupPage() {
     }))
   }, [event.startDate, event.endDate, event.timezone])
 
+  const [saveError, setSaveError] = React.useState<string | null>(null)
+  const [isSaving, setIsSaving] = React.useState(false)
   const [venues, setVenues] = React.useState<Venue[]>([])
   const [timeSlots, setTimeSlots] = React.useState<TimeSlot[]>([])
   const [isLoading, setIsLoading] = React.useState(true)
@@ -131,6 +135,7 @@ export default function AdminSetupPage() {
           }),
         ])
 
+        if (!venuesRes.ok || !timeSlotsRes.ok) throw new Error('Could not load rooms and availability. Refresh to try again.')
         if (venuesRes.ok) {
           setVenues(await venuesRes.json())
         }
@@ -138,7 +143,7 @@ export default function AdminSetupPage() {
           setTimeSlots(await timeSlotsRes.json())
         }
       } catch (err) {
-        console.error('Error fetching data:', err)
+        setSaveError(err instanceof Error ? err.message : 'Could not load rooms and availability.')
       } finally {
         setIsLoading(false)
       }
@@ -155,8 +160,12 @@ export default function AdminSetupPage() {
   // Venue CRUD operations
   const handleSaveVenue = async () => {
     const token = getAccessToken()
-    if (!token) return
+    if (!token) { setSaveError('Please sign in again to save changes.'); return false }
 
+    if (isSaving) return
+    if (!venueName.trim() || (venueCapacity && (!Number.isInteger(Number(venueCapacity)) || Number(venueCapacity) <= 0))) { setSaveError('Enter a room name and a positive whole-number capacity.'); return }
+    setIsSaving(true)
+    setSaveError(null)
     const features = venueFeatures
       .split(',')
       .map((f) => f.trim())
@@ -187,10 +196,8 @@ export default function AdminSetupPage() {
           body: JSON.stringify(venueData),
         })
 
-        if (response.ok) {
-          const [updated] = await response.json()
-          setVenues((prev) => prev.map((v) => (v.id === editingVenue.id ? updated : v)))
-        }
+        const [updated] = await requireSavedRows<Venue>(response)
+        setVenues((prev) => prev.map((v) => (v.id === editingVenue.id ? updated : v)))
       } else {
         const response = await fetch(`${SUPABASE_URL}/rest/v1/venues`, {
           method: 'POST',
@@ -203,21 +210,19 @@ export default function AdminSetupPage() {
           body: JSON.stringify(venueData),
         })
 
-        if (response.ok) {
-          const [created] = await response.json()
-          setVenues((prev) => [...prev, created])
-        }
+        const [created] = await requireSavedRows<Venue>(response)
+        setVenues((prev) => [...prev, created])
       }
 
       resetVenueForm()
     } catch (err) {
-      console.error('Error saving venue:', err)
-    }
+      setSaveError(err instanceof Error ? err.message : 'Could not save this room.')
+    } finally { setIsSaving(false) }
   }
 
   const handleDeleteVenue = async (id: string) => {
     const token = getAccessToken()
-    if (!token) return
+    if (!token) { setSaveError('Please sign in again to save changes.'); return false }
 
     if (!confirm('Delete this venue? All time slots and scheduled sessions will be affected.')) return
 
@@ -227,15 +232,17 @@ export default function AdminSetupPage() {
         headers: {
           'apikey': SUPABASE_KEY,
           'Authorization': `Bearer ${token}`,
+          'Prefer': 'return=representation',
         },
       })
 
-      if (response.ok) {
+      await requireSavedRows<Venue>(response)
+      {
         setVenues((prev) => prev.filter((v) => v.id !== id))
         setTimeSlots((prev) => prev.filter((s) => s.venue_id !== id))
       }
     } catch (err) {
-      console.error('Error deleting venue:', err)
+      setSaveError(err instanceof Error ? err.message : 'Could not remove this room.')
     }
   }
 
@@ -262,53 +269,42 @@ export default function AdminSetupPage() {
   }
 
   // Time Slot CRUD operations
-  const handleAddTimeSlot = async (venueId: string, dayDate: string, startTime: string, endTime: string, label: string, slotType: string, isBreak: boolean) => {
+  const handleSaveTimeSlots = async (slots: (GeneratedSlot & {slotType?: string})[]) => {
     const token = getAccessToken()
-    if (!token) return
-
-    // Use the event's timezone offset for the datetime
-    const startDateTime = `${dayDate}T${startTime}:00`
-    const endDateTime = `${dayDate}T${endTime}:00`
-
-    const slotData = {
-      venue_id: venueId,
-      event_id: event.id,
-      day_date: dayDate,
-      label: label || null,
-      start_time: startDateTime,
-      end_time: endDateTime,
-      is_break: isBreak,
-      slot_type: slotType,
-    }
-
+    if (!token) { setSaveError('Please sign in again to save changes.'); return false }
+    if (isSaving) return false
+    setIsSaving(true)
+    setSaveError(null)
     try {
-      const response = await fetch(`${SUPABASE_URL}/rest/v1/time_slots`, {
-        method: 'POST',
-        headers: {
-          'apikey': SUPABASE_KEY,
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-          'Prefer': 'return=representation',
-        },
-        body: JSON.stringify(slotData),
+      const rows = slots.map(slot => {
+        if (!venues.some(v => v.id === slot.venueId) || !eventDays.some(day => day.date === slot.dayDate) || !slot.startTime || !slot.endTime || slot.endTime <= slot.startTime) throw new Error('Choose a room, an event day, and an end time after the start time.')
+        const start = parseTimeInTimezone(slot.startTime, slot.dayDate, event.timezone)
+        const end = parseTimeInTimezone(slot.endTime, slot.dayDate, event.timezone)
+        return { venue_id: slot.venueId, event_id: event.id, day_date: slot.dayDate, label: slot.label || null, start_time: start.toISOString(), end_time: end.toISOString(), is_break: slot.isBreak, slot_type: slot.slotType || (slot.isBreak ? 'break' : 'session') }
       })
-
-      if (response.ok) {
-        const [created] = await response.json()
-        setTimeSlots((prev) =>
-          [...prev, created].sort((a, b) =>
-            new Date(a.start_time).getTime() - new Date(b.start_time).getTime()
-          )
-        )
-      }
+      rows.forEach((row,index) => {
+        if ([...timeSlots,...rows.slice(0,index)].some(other => other.venue_id === row.venue_id && Date.parse(other.start_time) < Date.parse(row.end_time) && Date.parse(row.start_time) < Date.parse(other.end_time))) throw new Error('These slots overlap existing availability in the same room. Adjust the times before saving.')
+      })
+      // A single PostgREST insert is transactional: the whole batch succeeds or fails.
+      const response = await fetch(`${SUPABASE_URL}/rest/v1/time_slots`, {
+        method: 'POST', headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Prefer: 'return=representation' },
+        body: JSON.stringify(rows),
+      })
+      const created = await requireSavedRows<TimeSlot>(response)
+      setTimeSlots(prev => [...prev,...created].sort((a,b) => Date.parse(a.start_time) - Date.parse(b.start_time)))
+      return true
     } catch (err) {
-      console.error('Error adding time slot:', err)
-    }
+      setSaveError(err instanceof Error ? err.message : 'Could not save this availability.')
+      return false
+    } finally { setIsSaving(false) }
   }
+
+  const handleAddTimeSlot = (venueId: string, dayDate: string, startTime: string, endTime: string, label: string, slotType: string, isBreak: boolean) =>
+    handleSaveTimeSlots([{venueId,dayDate,startTime,endTime,label,slotType,isBreak}])
 
   const handleDeleteTimeSlot = async (id: string) => {
     const token = getAccessToken()
-    if (!token) return
+    if (!token) { setSaveError('Please sign in again to save changes.'); return false }
 
     try {
       const response = await fetch(`${SUPABASE_URL}/rest/v1/time_slots?id=eq.${id}&event_id=eq.${event.id}`, {
@@ -316,14 +312,16 @@ export default function AdminSetupPage() {
         headers: {
           'apikey': SUPABASE_KEY,
           'Authorization': `Bearer ${token}`,
+          'Prefer': 'return=representation',
         },
       })
 
-      if (response.ok) {
+      await requireSavedRows<TimeSlot>(response)
+      {
         setTimeSlots((prev) => prev.filter((s) => s.id !== id))
       }
     } catch (err) {
-      console.error('Error deleting time slot:', err)
+      setSaveError(err instanceof Error ? err.message : 'Could not remove this availability.')
     }
   }
 
@@ -341,18 +339,7 @@ export default function AdminSetupPage() {
 
   // Bulk generate time slots
   const handleBulkGenerate = async (slots: GeneratedSlot[]) => {
-    for (const slot of slots) {
-      await handleAddTimeSlot(
-        slot.venueId,
-        slot.dayDate,
-        slot.startTime,
-        slot.endTime,
-        slot.label,
-        slot.isBreak ? 'break' : 'session',
-        slot.isBreak
-      )
-    }
-    setShowBulkGenerator(false)
+    if (await handleSaveTimeSlots(slots)) setShowBulkGenerator(false)
   }
 
   if (authLoading || roleLoading || isLoading) {
@@ -369,6 +356,9 @@ export default function AdminSetupPage() {
 
   return (
         <div className="space-y-6">
+      {saveError && <div role="alert" className="rounded-xl border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">{saveError}</div>}
+
+<div><h1 className="font-semibold">Spaces & times</h1><p className="text-muted-foreground mt-2">Give your gathering a place to happen.</p></div>
           {/* Info Card */}
           <Card className="bg-muted/30">
             <CardContent className="py-4">
@@ -418,6 +408,7 @@ export default function AdminSetupPage() {
                   venues={venues.map(v => ({ id: v.id, name: v.name, capacity: v.capacity }))}
                   eventDays={eventDays}
                   onGenerate={handleBulkGenerate}
+                  isSaving={isSaving}
                   onCancel={() => setShowBulkGenerator(false)}
                 />
               </CardContent>
@@ -496,7 +487,7 @@ export default function AdminSetupPage() {
                   <Button variant="outline" onClick={resetVenueForm}>
                     Cancel
                   </Button>
-                  <Button onClick={handleSaveVenue} disabled={!venueName}>
+                  <Button onClick={handleSaveVenue} disabled={!venueName.trim() || isSaving}>
                     <Check className="h-4 w-4 mr-2" />
                     {editingVenue ? 'Update' : 'Create'}
                   </Button>
@@ -523,7 +514,7 @@ export default function AdminSetupPage() {
                             <Badge variant="default" className="text-xs">Primary</Badge>
                           )}
                           {venue.slug && (
-                            <Badge variant="outline" className="text-xs font-mono hidden sm:inline-flex">{venue.slug}</Badge>
+                            <Badge variant="outline" className="text-xs hidden sm:inline-flex">{venue.slug}</Badge>
                           )}
                         </div>
                         <div className="flex items-center gap-3 sm:gap-4 text-sm text-muted-foreground flex-wrap">
@@ -635,9 +626,11 @@ function VenueAvailabilityEditor({
   slots: TimeSlot[]
   eventDays: { date: string; label: string }[]
   canManage: boolean
-  onAddSlot: (venueId: string, dayDate: string, startTime: string, endTime: string, label: string, slotType: string, isBreak: boolean) => void
+  onAddSlot: (venueId: string, dayDate: string, startTime: string, endTime: string, label: string, slotType: string, isBreak: boolean) => Promise<boolean>
   onDeleteSlot: (id: string) => void
 }) {
+  const event = useEvent()
+  const [isAdding, setIsAdding] = React.useState(false)
   const [selectedDay, setSelectedDay] = React.useState(eventDays[0]?.date || '')
   const [showAddForm, setShowAddForm] = React.useState(false)
   const [newStartTime, setNewStartTime] = React.useState('09:00')
@@ -650,8 +643,12 @@ function VenueAvailabilityEditor({
     .filter((s) => s.day_date === selectedDay)
     .sort((a, b) => new Date(a.start_time).getTime() - new Date(b.start_time).getTime())
 
-  const handleAdd = () => {
-    onAddSlot(venue.id, selectedDay, newStartTime, newEndTime, newLabel, newSlotType, newIsBreak)
+  const handleAdd = async () => {
+    if (isAdding) return
+    setIsAdding(true)
+    const saved = await onAddSlot(venue.id, selectedDay, newStartTime, newEndTime, newLabel, newSlotType, newIsBreak)
+    setIsAdding(false)
+    if (!saved) return
     setShowAddForm(false)
     setNewLabel('')
     setNewSlotType('session')
@@ -659,7 +656,7 @@ function VenueAvailabilityEditor({
   }
 
   const formatTime = (dateStr: string) => {
-    return new Date(dateStr).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+    return new Date(dateStr).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZone: event.timezone })
   }
 
   return (
@@ -695,7 +692,7 @@ function VenueAvailabilityEditor({
               )}
             >
               <div className="flex items-center gap-2 sm:gap-3 flex-wrap flex-1 min-w-0">
-                <div className="text-sm font-mono whitespace-nowrap">
+                <div className="text-sm whitespace-nowrap">
                   {formatTime(slot.start_time)} - {formatTime(slot.end_time)}
                 </div>
                 <Badge variant={slot.is_break ? 'secondary' : 'outline'} className="text-xs">
@@ -710,7 +707,7 @@ function VenueAvailabilityEditor({
                   size="icon"
                   variant="ghost"
                   className="h-9 w-9 flex-shrink-0 text-destructive hover:text-destructive"
-                  onClick={() => onDeleteSlot(slot.id)}
+                  onClick={() => onDeleteSlot(slot.id)} aria-label={`Remove ${formatTime(slot.start_time)} slot`}
                 >
                   <Trash2 className="h-4 w-4" />
                 </Button>
@@ -776,7 +773,7 @@ function VenueAvailabilityEditor({
                   <Button size="sm" variant="outline" onClick={() => setShowAddForm(false)} className="flex-1 sm:flex-none">
                     Cancel
                   </Button>
-                  <Button size="sm" onClick={handleAdd} className="flex-1 sm:flex-none">
+                  <Button size="sm" onClick={handleAdd} disabled={isAdding} className="flex-1 sm:flex-none">
                     <Plus className="h-4 w-4 mr-1" />
                     Add
                   </Button>

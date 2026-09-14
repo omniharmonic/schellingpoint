@@ -1,9 +1,10 @@
 'use client';
 
 import * as React from 'react';
+import { useAuth } from '@/hooks/useAuth';
 import type { Event, EventRoleName } from '@/types/event';
 import { canRolePerform, isAdminRole, type Permission } from '@/lib/permissions';
-import { hexToHslValues, isValidHexColor, getContrastingForeground } from '@/lib/utils/color';
+import { hexToHslValues, isValidHexColor, getContrastingForeground, accessiblePrimary } from '@/lib/utils/color';
 
 // Event context value
 interface EventContextValue {
@@ -48,15 +49,21 @@ interface EventProviderProps {
 }
 
 export function EventProvider({ event, children }: EventProviderProps) {
+  const { user, isLoading: authLoading } = useAuth();
   const [role, setRole] = React.useState<EventRoleName | null>(null);
   const [voteCredits, setVoteCredits] = React.useState<number>(event.voteCreditsPerUser);
   const [isLoading, setIsLoading] = React.useState(true);
 
   // Fetch user's role for this event, auto-join public events
   React.useEffect(() => {
+    let cancelled = false;
+    if (authLoading) return;
+    setRole(null);
+    setVoteCredits(event.voteCreditsPerUser);
+    setIsLoading(true);
     const fetchMembership = async () => {
       const token = getAccessToken();
-      if (!token) {
+      if (!token || !user) {
         setIsLoading(false);
         return;
       }
@@ -90,6 +97,7 @@ export function EventProvider({ event, children }: EventProviderProps) {
 
         if (memberResponse.ok) {
           const data = await memberResponse.json();
+          if (cancelled) return;
           if (data && data.length > 0) {
             // User is already a member
             setRole(data[0].role as EventRoleName);
@@ -116,6 +124,7 @@ export function EventProvider({ event, children }: EventProviderProps) {
 
             if (joinResponse.ok) {
               const joinData = await joinResponse.json();
+              if (cancelled) return;
               if (joinData && joinData.length > 0) {
                 setRole('attendee');
                 setVoteCredits(joinData[0].vote_credits ?? event.voteCreditsPerUser);
@@ -126,24 +135,39 @@ export function EventProvider({ event, children }: EventProviderProps) {
       } catch (err) {
         console.error('Error fetching event membership:', err);
       } finally {
-        setIsLoading(false);
+        if (!cancelled) setIsLoading(false);
       }
     };
 
     fetchMembership();
-  }, [event.id, event.voteCreditsPerUser, event.visibility]);
+    return () => { cancelled = true; };
+  }, [event.id, event.voteCreditsPerUser, event.visibility, user?.id, authLoading]);
 
   // Apply event theme colors as CSS custom properties
   React.useEffect(() => {
     const root = document.documentElement;
     const theme = event.theme;
     const appliedProperties: string[] = [];
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    const previousMode = root.classList.contains('dark') ? 'dark' : 'light';
+    const applyMode = () => {
+      const dark = theme?.mode === 'dark' || (theme?.mode === 'system' && media.matches);
+      root.classList.toggle('dark', dark);
+      root.classList.toggle('light', !dark);
+      if (theme?.colors?.primary && isValidHexColor(theme.colors.primary)) {
+        const color = accessiblePrimary(theme.colors.primary, dark);
+        for (const property of ['--primary', '--signal', '--ring']) root.style.setProperty(property, hexToHslValues(color));
+        root.style.setProperty('--primary-foreground', getContrastingForeground(color));
+      }
+    };
 
     // Apply primary color
     if (theme?.colors?.primary && isValidHexColor(theme.colors.primary)) {
       const primaryHsl = hexToHslValues(theme.colors.primary);
       root.style.setProperty('--primary', primaryHsl);
-      appliedProperties.push('--primary');
+      appliedProperties.push('--primary', '--signal', '--ring');
+      root.style.setProperty('--signal', primaryHsl);
+      root.style.setProperty('--ring', primaryHsl);
 
       // Auto-calculate primary foreground for contrast
       const primaryForeground = getContrastingForeground(theme.colors.primary);
@@ -173,8 +197,14 @@ export function EventProvider({ event, children }: EventProviderProps) {
       appliedProperties.push('--accent-foreground');
     }
 
+    applyMode();
+    media.addEventListener('change', applyMode);
+
     // Cleanup: remove applied properties when leaving event pages
     return () => {
+      media.removeEventListener('change', applyMode);
+      root.classList.toggle('dark', previousMode === 'dark');
+      root.classList.toggle('light', previousMode === 'light');
       appliedProperties.forEach((prop) => {
         root.style.removeProperty(prop);
       });

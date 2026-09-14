@@ -1,5 +1,6 @@
 'use client'
 
+import { requireSavedRows } from '@/lib/api/saved-rows'
 import * as React from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
@@ -22,16 +23,13 @@ interface Track {
 }
 
 // Get date key using local timezone (prevents duplicate days from UTC conversion)
-function getDateKey(isoString: string): string {
-  const date = new Date(isoString)
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
+function getDateKey(isoString: string, timeZone: string): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(isoString))
 }
 
-function formatTime(isoString: string): string {
+function formatTime(isoString: string, timeZone: string): string {
   return new Date(isoString).toLocaleTimeString([], {
+    timeZone,
     hour: 'numeric',
     minute: '2-digit',
   })
@@ -67,6 +65,8 @@ export default function MySchedulePage() {
 
   const [tracks, setTracks] = React.useState<Track[]>([])
   const [favorites, setFavorites] = React.useState<any[]>([])
+  const [saveError, setSaveError] = React.useState<string | null>(null)
+  const [removing, setRemoving] = React.useState<string | null>(null)
   const [isLoading, setIsLoading] = React.useState(true)
   const [selectedDay, setSelectedDay] = React.useState<string | null>(null)
   const [trackFilter, setTrackFilter] = React.useState<string>('all')
@@ -93,7 +93,8 @@ export default function MySchedulePage() {
           }
         )
 
-        if (response.ok) {
+        if (!response.ok) throw new Error('Could not load your saved sessions. Refresh the page to try again.')
+        {
           const data = await response.json()
           setTracks(data)
         }
@@ -111,7 +112,7 @@ export default function MySchedulePage() {
 
     const fetchFavorites = async () => {
       const token = getAccessToken()
-      if (!token) return
+      if (!token) { setSaveError('Sign in again to load your saved sessions.'); setIsLoading(false); return }
 
       try {
         const response = await fetch(
@@ -139,7 +140,7 @@ export default function MySchedulePage() {
           setFavorites(validFavorites)
         }
       } catch (err) {
-        console.error('Error fetching favorites:', err)
+        setSaveError(err instanceof Error ? err.message : 'Could not load your saved sessions.')
       } finally {
         setIsLoading(false)
       }
@@ -154,23 +155,19 @@ export default function MySchedulePage() {
     const token = getAccessToken()
     if (!token) return
 
-    // Optimistic update
-    setFavorites((prev) => prev.filter((s) => s.id !== sessionId))
-
+    if (removing) return
+    setRemoving(sessionId)
+    setSaveError(null)
     try {
-      await fetch(
-        `${SUPABASE_URL}/rest/v1/favorites?user_id=eq.${user.id}&session_id=eq.${sessionId}`,
-        {
-          method: 'DELETE',
-          headers: {
-            'apikey': SUPABASE_KEY,
-            'Authorization': `Bearer ${token}`,
-          },
-        }
+      const response = await fetch(
+        `${SUPABASE_URL}/rest/v1/favorites?user_id=eq.${user.id}&event_id=eq.${event.id}&session_id=eq.${sessionId}`,
+        { method: 'DELETE', headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${token}`, Prefer: 'return=representation' } }
       )
+      await requireSavedRows(response)
+      setFavorites(prev => prev.filter(session => session.id !== sessionId))
     } catch (err) {
-      console.error('Error removing favorite:', err)
-    }
+      setSaveError(err instanceof Error ? err.message : 'Could not remove this saved session.')
+    } finally { setRemoving(null) }
   }
 
   // Group by time slot (must be before any conditional returns to maintain hook order)
@@ -182,7 +179,7 @@ export default function MySchedulePage() {
     const daySet = new Map<string, Date>()
     scheduledSessions.forEach((session) => {
       if (session.time_slot?.start_time) {
-        const dateKey = getDateKey(session.time_slot.start_time)
+        const dateKey = getDateKey(session.time_slot.start_time, event.timezone)
         if (!daySet.has(dateKey)) {
           daySet.set(dateKey, new Date(session.time_slot.start_time))
         }
@@ -194,7 +191,7 @@ export default function MySchedulePage() {
         key,
         label: formatDayLabel(key),
       }))
-  }, [scheduledSessions])
+  }, [scheduledSessions, event.timezone])
 
   // Auto-select first day if none selected
   React.useEffect(() => {
@@ -207,11 +204,11 @@ export default function MySchedulePage() {
   const filteredScheduledSessions = React.useMemo(() => {
     return scheduledSessions.filter((session) => {
       if (!session.time_slot?.start_time) return false
-      if (selectedDay && getDateKey(session.time_slot.start_time) !== selectedDay) return false
+      if (selectedDay && getDateKey(session.time_slot.start_time, event.timezone) !== selectedDay) return false
       if (trackFilter !== 'all' && session.track?.id !== trackFilter) return false
       return true
     })
-  }, [scheduledSessions, selectedDay, trackFilter])
+  }, [scheduledSessions, selectedDay, trackFilter, event.timezone])
 
   // Filter unscheduled by track
   const filteredUnscheduledSessions = React.useMemo(() => {
@@ -223,14 +220,14 @@ export default function MySchedulePage() {
   const groupedByTime: Record<string, any[]> = React.useMemo(() => {
     const groups: Record<string, any[]> = {}
     filteredScheduledSessions.forEach((session) => {
-      const startTime = formatTime(session.time_slot.start_time)
+      const startTime = formatTime(session.time_slot.start_time, event.timezone)
       if (!groups[startTime]) {
         groups[startTime] = []
       }
       groups[startTime].push(session)
     })
     return groups
-  }, [filteredScheduledSessions])
+  }, [filteredScheduledSessions, event.timezone])
 
   // Group filtered sessions by venue
   const groupedByVenue = React.useMemo(() => {
@@ -277,6 +274,8 @@ export default function MySchedulePage() {
   return (
     <DashboardLayout>
       <div className="space-y-6">
+        {saveError && <div role="alert" className="rounded-xl border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">{saveError}</div>}
+
         <div>
           <h1 className="text-2xl font-bold">My Schedule</h1>
           <p className="text-muted-foreground mt-1">
@@ -308,9 +307,11 @@ export default function MySchedulePage() {
                       key={day.key}
                       variant={selectedDay === day.key ? 'default' : 'outline'}
                       onClick={() => setSelectedDay(day.key)}
-                      className="whitespace-nowrap"
+                    aria-label={day.label}
+                    aria-pressed={selectedDay === day.key}
+                      className="calendar-day whitespace-nowrap flex-col items-start gap-1 h-auto"
                     >
-                      {day.label}
+                      <span className="text-xs font-medium opacity-75">{day.label.split(',')[0]}</span><span className="text-lg font-semibold">{day.label.split(',').slice(1).join(',').trim() || day.label}</span>
                     </Button>
                   ))}
                 </div>
@@ -397,7 +398,7 @@ export default function MySchedulePage() {
                     const sessions = groupedByTime[timeLabel]
                     const firstSession = sessions[0]
                     const endTime = firstSession.time_slot.end_time
-                      ? formatTime(firstSession.time_slot.end_time)
+                      ? formatTime(firstSession.time_slot.end_time, event.timezone)
                       : null
 
                     return (
@@ -453,6 +454,8 @@ export default function MySchedulePage() {
                                   </Link>
                                   <button
                                     onClick={() => handleRemoveFavorite(session.id)}
+                                    aria-label={`Remove ${session.title} from your schedule`}
+                                    disabled={removing !== null}
                                     className="p-2.5 min-h-[44px] min-w-[44px] flex items-center justify-center rounded-full text-red-500 bg-red-500/10 hover:bg-red-500/20"
                                   >
                                     <Heart className="h-4 w-4 fill-current" />
@@ -505,7 +508,7 @@ export default function MySchedulePage() {
                                       {session.time_slot && (
                                         <span className="text-xs text-muted-foreground flex items-center gap-1">
                                           <Clock className="h-3 w-3" />
-                                          {formatTime(session.time_slot.start_time)}
+                                          {formatTime(session.time_slot.start_time, event.timezone)}
                                         </span>
                                       )}
                                       {session.track && (
@@ -529,6 +532,8 @@ export default function MySchedulePage() {
                                   </Link>
                                   <button
                                     onClick={() => handleRemoveFavorite(session.id)}
+                                    aria-label={`Remove ${session.title} from your schedule`}
+                                    disabled={removing !== null}
                                     className="p-2.5 min-h-[44px] min-w-[44px] flex items-center justify-center rounded-full text-red-500 bg-red-500/10 hover:bg-red-500/20"
                                   >
                                     <Heart className="h-4 w-4 fill-current" />
@@ -592,6 +597,8 @@ export default function MySchedulePage() {
                           </Link>
                           <button
                             onClick={() => handleRemoveFavorite(session.id)}
+                                    aria-label={`Remove ${session.title} from your schedule`}
+                                    disabled={removing !== null}
                             className="p-2.5 min-h-[44px] min-w-[44px] flex items-center justify-center rounded-full text-red-500 bg-red-500/10 hover:bg-red-500/20"
                           >
                             <Heart className="h-4 w-4 fill-current" />

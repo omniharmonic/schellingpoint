@@ -1,6 +1,8 @@
 'use client'
 
 import * as React from 'react'
+import { safeReturnPath } from '@/lib/auth-redirect'
+import { GatheringArtwork, NetworkMark } from '@/components/GatheringArtwork'
 import { Suspense } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { Mail, CheckCircle, ArrowLeft, ArrowRight, Loader2 } from 'lucide-react'
@@ -23,8 +25,8 @@ function LoginContent() {
   // Redirect if already logged in
   React.useEffect(() => {
     if (user && !authLoading) {
-      const redirect = searchParams.get('redirect')
-      router.push(redirect || '/')
+      const redirect = searchParams.get('returnTo') || searchParams.get('redirect')
+      router.push(safeReturnPath(redirect))
     }
   }, [user, authLoading, router, searchParams])
 
@@ -47,7 +49,7 @@ function LoginContent() {
     setIsLoading(true)
     setError(null)
 
-    const { error } = await signIn(email)
+    const { error } = await signIn(email.trim(), safeReturnPath(searchParams.get('returnTo') || searchParams.get('redirect')))
 
     if (error) {
       setError(error.message)
@@ -60,22 +62,23 @@ function LoginContent() {
 
   if (emailSent) {
     return (
-      <div className="min-h-screen flex items-start sm:items-center justify-center bg-background p-4 pt-16 sm:pt-4">
-        <Card className="w-full max-w-md" accent="top" accentColor="hsl(var(--signal))">
-          <CardHeader className="text-center">
+      <div className="min-h-screen grid lg:grid-cols-2 items-center gap-8 p-5 sm:p-12 lg:p-20">
+      <div className="hidden lg:block max-w-xl"><Link href="/" className="flex items-center gap-3 font-semibold text-xl mb-10"><NetworkMark className="w-8 h-8 text-primary" />Schelling Point</Link><GatheringArtwork compact /><p className="text-3xl font-semibold tracking-tight mt-8 max-w-md">The most interesting person in the room might be someone you haven’t met yet.</p></div>
+        <Card className="w-full max-w-md mx-auto border-0 bg-transparent shadow-none">
+          <CardHeader className="text-left">
             <div className="flex justify-center mb-4">
               <div className="node-indicator w-4 h-4" />
             </div>
-            <CardTitle className="text-2xl font-display">Handshake Initiated</CardTitle>
-            <CardDescription className="font-mono text-xs uppercase tracking-wider">
-              Verification signal sent to:
+            <h1 className="text-3xl font-display leading-tight font-semibold">Check your inbox</h1>
+            <CardDescription className="text-xs tracking-wider">
+              We sent a sign-in link to
             </CardDescription>
-            <p className="font-mono text-sm text-foreground mt-1">{email}</p>
+            <p className="text-sm text-foreground mt-1">{email}</p>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="protocol-box border-border text-sm text-center text-muted-foreground">
-              <p>Check your inbox to complete the connection.</p>
-              <p className="mt-2 text-xs">Signal expires in 1 hour.</p>
+              <p>Open the link in your email to pick up where you left off.</p>
+              <p className="mt-2 text-xs">Can’t find it? Check your spam folder, or try again.</p>
             </div>
             <Button
               variant="ghost"
@@ -94,12 +97,13 @@ function LoginContent() {
   }
 
   return (
-    <div className="min-h-screen flex items-start sm:items-center justify-center bg-background p-4 pt-16 sm:pt-4">
-      <Card className="w-full max-w-md" accent="top" accentColor="hsl(var(--signal))">
-        <CardHeader className="text-center">
+    <div className="min-h-screen grid lg:grid-cols-2 items-center gap-8 p-5 sm:p-12 lg:p-20">
+      <div className="hidden lg:block max-w-xl"><Link href="/" className="flex items-center gap-3 font-semibold text-xl mb-10"><NetworkMark className="w-8 h-8 text-primary" />Schelling Point</Link><GatheringArtwork compact /><p className="text-3xl font-semibold tracking-tight mt-8 max-w-md">The most interesting person in the room might be someone you haven’t met yet.</p></div>
+      <Card className="w-full max-w-md mx-auto border-0 bg-transparent shadow-none">
+        <CardHeader className="text-left">
           <Link
             href="/"
-            className="inline-flex items-center text-xs font-mono text-muted-foreground hover:text-foreground mb-4 uppercase tracking-wider"
+            className="inline-flex items-center text-xs text-muted-foreground hover:text-foreground mb-4 tracking-wider"
           >
             <ArrowLeft className="h-3.5 w-3.5 mr-1" strokeWidth={1.5} />
             Back
@@ -109,42 +113,47 @@ function LoginContent() {
               <Mail className="h-5 w-5 text-muted-foreground" strokeWidth={1.5} />
             </div>
           </div>
-          <CardTitle className="text-2xl font-display">Establish Connection</CardTitle>
+          <h1 className="text-3xl font-display leading-tight font-semibold">Welcome to the gathering.</h1>
           <CardDescription>
-            Enter your address to join the network
+            Sign in or create an account with your email.
           </CardDescription>
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-4">
             {loggedOutMessage && (
               <div className="protocol-box border-border text-sm text-center">
-                Connection terminated. Sign in to reconnect.
+                You’re signed out. Sign in whenever you’re ready.
               </div>
             )}
             {error && (
-              <div className="rounded-md bg-destructive/10 border border-destructive/20 p-3 text-sm text-destructive font-mono">
+              <div id="login-error" role="alert" className="rounded-md bg-destructive/10 border border-destructive/20 p-3 text-sm text-destructive font-mono">
                 {error}
               </div>
             )}
             <div className="space-y-2">
+              <label htmlFor="email" className="block text-sm font-medium">Email address</label>
               <Input
                 type="email"
-                placeholder="your@address.com"
+                id="email"
+                autoComplete="email"
+                name="email"
+                placeholder="you@example.com"
+                aria-describedby={error ? "login-error" : undefined}
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 disabled={isLoading}
                 required
-                className="font-mono"
+                className="text-base"
               />
             </div>
             <Button type="submit" className="w-full" loading={isLoading}>
-              Send Handshake <ArrowRight className="ml-2 h-4 w-4" />
+              Send sign-in link <ArrowRight className="ml-2 h-4 w-4" />
             </Button>
           </form>
           <p className="text-xs text-center text-muted-foreground mt-4 font-mono">
-            {'>'} password-free authentication via magic link
+            No password to remember.
             <br />
-            <span className="text-foreground/60">{'>'} no account? one will be initialized automatically</span>
+            <span className="text-foreground/60">New here? Your account is created when you sign in.</span>
           </p>
         </CardContent>
       </Card>

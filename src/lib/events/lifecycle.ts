@@ -236,3 +236,15 @@ export function getStatusesBetween(
 
   return STATUS_ORDER.slice(fromIndex + 1, toIndex);
 }
+
+/** Phase and optional deadlines must both allow an action. */
+export function isParticipationOpen(event: {
+  status: EventStatus;
+  votingOpensAt?: Date | null; votingClosesAt?: Date | null;
+  proposalsOpenAt?: Date | null; proposalsClosesAt?: Date | null;
+}, action: 'vote' | 'propose', now = new Date()): boolean {
+  const opens = action === 'vote' ? event.votingOpensAt : event.proposalsOpenAt;
+  const closes = action === 'vote' ? event.votingClosesAt : event.proposalsClosesAt;
+  return (action === 'vote' ? canVote(event.status) : canSubmitProposals(event.status))
+    && (!opens || now >= opens) && (!closes || now < closes);
+}

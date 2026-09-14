@@ -90,7 +90,7 @@ function NotificationRow({
       {/* Content */}
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 mb-1">
-          <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+          <span className="text-xs font-medium text-muted-foreground tracking-wide">
             {typeLabel}
           </span>
           {isUnread && (
@@ -134,7 +134,7 @@ export default function NotificationsPage() {
     <DashboardLayout>
       <div className="space-y-6">
         {/* Header */}
-        <div className="flex items-center justify-between">
+        <div className="page-heading">
           <div className="flex items-center gap-4">
             <Button variant="ghost" size="sm" asChild>
               <Link href={`/e/${event.slug}/dashboard`}>

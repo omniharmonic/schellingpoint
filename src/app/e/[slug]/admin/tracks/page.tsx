@@ -353,9 +353,9 @@ export default function AdminTracksPage() {
 
   return (
       <div className="max-w-4xl">
-        <div className="flex items-center justify-between mb-6">
+        <div className="page-heading mb-6">
           <div>
-            <h1 className="text-2xl font-display font-bold">Track Management</h1>
+            <h1 className="text-2xl font-display font-bold">Tracks</h1>
             <p className="text-muted-foreground">Organize sessions by topic or theme</p>
           </div>
           {!isCreating && !editingTrack && (

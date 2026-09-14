@@ -1,5 +1,6 @@
 'use client';
 
+import { validateWizardState } from '@/lib/events/validate-creation';
 import * as React from 'react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -91,8 +92,9 @@ const FORMAT_LABELS: Record<string, string> = {
 function formatDate(dateString: string): string {
   if (!dateString) return 'Not set';
   try {
-    const date = new Date(dateString);
+    const date = new Date(`${dateString}T00:00:00Z`);
     return date.toLocaleDateString('en-US', {
+      timeZone: 'UTC',
       weekday: 'long',
       year: 'numeric',
       month: 'long',
@@ -151,6 +153,7 @@ function Section({ title, icon, stepName, onEdit, children, isValid = true }: Se
             variant="ghost"
             size="sm"
             onClick={() => onEdit(stepNumber)}
+            aria-label={`Edit ${title.toLowerCase()}`}
             className="text-muted-foreground hover:text-foreground"
           >
             <Pencil className="h-4 w-4 mr-1" />
@@ -175,14 +178,10 @@ function DataRow({ label, value, mono = false }: { label: string; value: React.R
 function ValidationSummary({ state }: { state: WizardState }) {
   const allErrors: { step: WizardStepName; errors: string[] }[] = [];
 
-  // Check each step for validation errors
-  WIZARD_STEPS.forEach((stepName, index) => {
-    if (stepName === 'review') return; // Skip review step
-    const errors = getStepValidationErrors(state, index);
-    if (errors.length > 0) {
-      allErrors.push({ step: stepName, errors });
-    }
-  });
+  const validation = validateWizardState(state);
+  if (!validation.valid) {
+    allErrors.push({ step: WIZARD_STEPS[validation.step ?? 0], errors: [validation.error || 'Review your event details'] });
+  }
 
   if (allErrors.length === 0) {
     return (
@@ -240,12 +239,7 @@ export function ReviewStep({ state, dispatch, onSubmit, isSubmitting }: ReviewSt
   );
 
   // Check if all required steps are valid
-  const allStepsValid = React.useMemo(() => {
-    return WIZARD_STEPS.every((_, index) => {
-      if (index === WIZARD_STEPS.length - 1) return true; // Skip review step
-      return isStepValid(state, index);
-    });
-  }, [state]);
+  const allStepsValid = validateWizardState(state).valid;
 
   // Handle form submission
   const handleSubmit = async () => {
@@ -444,6 +438,7 @@ export function ReviewStep({ state, dispatch, onSubmit, isSubmitting }: ReviewSt
             No tracks configured. Tracks help categorize sessions by topic.
           </p>
         )}
+        {state.suggestedTopics.length > 0 && <div className="mt-5 pt-4 border-t"><p className="text-sm font-medium mb-2">Attendee topics</p><div className="flex flex-wrap gap-2">{state.suggestedTopics.map(topic => <span key={topic} className="rounded-full bg-secondary px-3 py-1 text-sm">{topic}</span>)}</div></div>}
       </Section>
 
       {/* Voting Section */}

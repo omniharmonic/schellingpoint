@@ -62,6 +62,7 @@ export function saveWizardDraft(state: WizardState): void {
         venues: state.venues,
         schedule: state.schedule,
         tracks: state.tracks,
+        suggestedTopics: state.suggestedTopics,
         voting: state.voting,
         branding: state.branding,
         // Don't persist validation errors
@@ -170,26 +171,6 @@ export function getWizardDraftTimestamp(): Date | null {
 }
 
 // ============================================================================
-// Debounce Utility
-// ============================================================================
-
-function debounce<T extends (...args: Parameters<T>) => void>(
-  func: T,
-  wait: number
-): (...args: Parameters<T>) => void {
-  let timeoutId: ReturnType<typeof setTimeout> | null = null;
-
-  return (...args: Parameters<T>) => {
-    if (timeoutId !== null) {
-      clearTimeout(timeoutId);
-    }
-    timeoutId = setTimeout(() => {
-      func(...args);
-    }, wait);
-  };
-}
-
-// ============================================================================
 // Hook
 // ============================================================================
 
@@ -198,7 +179,7 @@ function debounce<T extends (...args: Parameters<T>) => void>(
  *
  * Features:
  * - Loads saved draft from localStorage on mount
- * - Auto-saves state changes to localStorage (debounced 500ms)
+ * - Saves each state change immediately so navigation cannot lose the last edit
  * - Provides clearDraft() to remove saved state
  * - Handles SSR, private browsing, and storage errors gracefully
  */
@@ -212,13 +193,6 @@ export function useWizardStateWithPersistence() {
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   // Store previous state for comparison
   const prevStateRef = useRef<WizardState | null>(null);
-
-  // Create debounced save function (stable reference)
-  const debouncedSave = useRef(
-    debounce((stateToSave: WizardState) => {
-      saveWizardDraft(stateToSave);
-    }, 500)
-  ).current;
 
   // Load saved draft on mount
   useEffect(() => {
@@ -258,15 +232,16 @@ export function useWizardStateWithPersistence() {
         JSON.stringify(state.venues) !== JSON.stringify(prevState.venues) ||
         JSON.stringify(state.schedule) !== JSON.stringify(prevState.schedule) ||
         JSON.stringify(state.tracks) !== JSON.stringify(prevState.tracks) ||
+        JSON.stringify(state.suggestedTopics) !== JSON.stringify(prevState.suggestedTopics) ||
         JSON.stringify(state.voting) !== JSON.stringify(prevState.voting) ||
         JSON.stringify(state.branding) !== JSON.stringify(prevState.branding);
 
       if (hasChanged) {
         setHasUnsavedChanges(true);
-        debouncedSave(state);
+        saveWizardDraft(state);
       }
     }
-  }, [state, debouncedSave]);
+  }, [state]);
 
   // Clear draft and optionally reset state
   const clearDraft = useCallback((resetState = false) => {

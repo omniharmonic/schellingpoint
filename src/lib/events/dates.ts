@@ -7,13 +7,13 @@
 export function getEventDays(startDate: Date, endDate: Date): string[] {
   const days: string[] = [];
   const current = new Date(startDate);
-  current.setHours(0, 0, 0, 0);
+  current.setUTCHours(0, 0, 0, 0);
   const end = new Date(endDate);
-  end.setHours(0, 0, 0, 0);
+  end.setUTCHours(0, 0, 0, 0);
 
   while (current <= end) {
     days.push(current.toISOString().split('T')[0]);
-    current.setDate(current.getDate() + 1);
+    current.setUTCDate(current.getUTCDate() + 1);
   }
   return days;
 }
@@ -36,8 +36,7 @@ export function formatEventDate(
  * Get day label for an event date (e.g., "Fri Feb 27")
  */
 export function getEventDayLabel(dateStr: string, timezone: string): string {
-  const date = new Date(dateStr + 'T12:00:00'); // Noon to avoid timezone edge cases
-  return formatEventDate(date, timezone, {
+  return formatCalendarDate(dateStr, {
     weekday: 'short',
     month: 'short',
     day: 'numeric',
@@ -53,10 +52,16 @@ export function isDateInEvent(
   endDate: Date
 ): boolean {
   const d = new Date(date);
-  d.setHours(0, 0, 0, 0);
+  d.setUTCHours(0, 0, 0, 0);
   const start = new Date(startDate);
-  start.setHours(0, 0, 0, 0);
+  start.setUTCHours(0, 0, 0, 0);
   const end = new Date(endDate);
-  end.setHours(0, 0, 0, 0);
+  end.setUTCHours(0, 0, 0, 0);
   return d >= start && d <= end;
+}
+
+/** Event start/end columns are calendar dates, not timezone-specific instants. */
+export function formatCalendarDate(date: Date | string, options?: Intl.DateTimeFormatOptions): string {
+  const value = typeof date === 'string' ? new Date(`${date.slice(0, 10)}T00:00:00Z`) : date;
+  return new Intl.DateTimeFormat('en-US', { ...options, timeZone: 'UTC' }).format(value);
 }

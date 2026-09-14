@@ -187,7 +187,7 @@ export function ScheduleCalendar({
               key={date}
               className="px-2 py-2 text-xs font-medium text-muted-foreground border-l"
             >
-              <div className="uppercase tracking-wide opacity-70">
+              <div className="tracking-wide opacity-70">
                 {label.weekday}
               </div>
               <div className="text-sm text-foreground font-semibold">
@@ -215,7 +215,7 @@ export function ScheduleCalendar({
             return (
               <div
                 key={hour}
-                className="absolute left-0 right-0 border-t text-[10px] text-muted-foreground px-1"
+                className="absolute left-0 right-0 border-t text-xs text-muted-foreground px-1"
                 style={{ top: `${i * (60 / resolutionMinutes) * rowHeightPx}px` }}
               >
                 {formatHourLabel(hour)}
@@ -304,12 +304,12 @@ export function ScheduleCalendar({
                           {formatTimeRange(slot.startTime, slot.endTime)}
                         </div>
                         {slot.label && (
-                          <div className="text-[10px] opacity-70 truncate">
+                          <div className="text-xs opacity-70 truncate">
                             {slot.label}
                           </div>
                         )}
                         {venue && (
-                          <div className="text-[10px] opacity-60 truncate">
+                          <div className="text-xs opacity-60 truncate">
                             {venue.name}
                           </div>
                         )}

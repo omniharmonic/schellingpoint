@@ -398,7 +398,7 @@ export default function AdminAnalyticsPage() {
                           className="w-full bg-primary rounded-t transition-all"
                           style={{ height: `${height}%`, minHeight: bucket.count > 0 ? '4px' : '0' }}
                         />
-                        <span className="text-[10px] text-muted-foreground">{bucket.label}</span>
+                        <span className="text-xs text-muted-foreground">{bucket.label}</span>
                         <span className="text-xs font-medium">{bucket.count}</span>
                       </div>
                     )

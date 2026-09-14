@@ -47,3 +47,5 @@ playwright-report/
 
 # Local screenshots / scratch artifacts
 screenshots/
+
+.next-dev/

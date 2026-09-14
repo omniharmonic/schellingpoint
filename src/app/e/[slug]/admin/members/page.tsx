@@ -213,7 +213,7 @@ export default function AdminMembersPage() {
   return (
         <div className="space-y-6">
           {/* Header */}
-          <div className="flex items-center justify-between">
+          <div className="page-heading">
             <div>
               <h1 className="text-2xl font-display font-bold">Members</h1>
               <p className="text-sm text-muted-foreground">
@@ -288,7 +288,7 @@ export default function AdminMembersPage() {
                   <div className="space-y-2">
                     <Label>Invitation Link</Label>
                     <div className="flex gap-2">
-                      <Input value={generatedLink} readOnly className="font-mono text-sm" />
+                      <Input value={generatedLink} readOnly className="text-sm" />
                       <Button
                         variant="outline"
                         size="icon"

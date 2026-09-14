@@ -73,6 +73,7 @@ export default function TicketsPage() {
             },
           }
         )
+        if (!tiersRes.ok) throw new Error('Ticket information unavailable')
         const tiersData = await tiersRes.json()
         setTiers(tiersData || [])
 
@@ -89,6 +90,7 @@ export default function TicketsPage() {
                 },
               }
             )
+            if (!ticketsRes.ok) throw new Error('Your tickets could not be loaded')
             const ticketsData = await ticketsRes.json()
             setUserTickets(ticketsData || [])
           }
@@ -106,7 +108,7 @@ export default function TicketsPage() {
 
   const handlePurchase = async (tier: TicketTier) => {
     if (!user) {
-      router.push('/login')
+      router.push(`/login?redirect=${encodeURIComponent(`/e/${event.slug}/tickets`)}`)
       return
     }
 
@@ -116,7 +118,7 @@ export default function TicketsPage() {
     try {
       const token = getAccessToken()
       if (!token) {
-        router.push('/login')
+        router.push(`/login?redirect=${encodeURIComponent(`/e/${event.slug}/tickets`)}`)
         return
       }
 
@@ -191,7 +193,7 @@ export default function TicketsPage() {
         <Card>
           <CardContent className="py-12 text-center">
             <Ticket className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
-            <h2 className="text-xl font-semibold mb-2">Ticketing Not Available</h2>
+            <h1 className="text-xl font-semibold mb-2">Tickets aren’t available here</h1>
             <p className="text-muted-foreground">
               Ticket sales are not enabled for this event.
             </p>

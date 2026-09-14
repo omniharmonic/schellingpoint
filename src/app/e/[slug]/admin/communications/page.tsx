@@ -239,7 +239,7 @@ export default function AdminCommunicationsPage() {
         <div className="space-y-6">
           {/* Header */}
           <div>
-            <h1 className="text-2xl font-display font-bold">Communications</h1>
+            <h1 className="text-2xl font-display font-bold">Messages</h1>
             <p className="text-sm text-muted-foreground">
               Announcements and session emails for {event.name}
             </p>

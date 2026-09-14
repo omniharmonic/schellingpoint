@@ -34,6 +34,7 @@ interface ThemePreset {
 // Refined theme palettes — each has a clear identity and restrained color
 // usage, no neon saturation. Organizers can still customize with the picker.
 const THEME_PRESETS: ThemePreset[] = [
+  { name: 'Commons', category: 'Cool', primary: '#246653', secondary: '#E8F1EB', accent: '#DCD5ED', mode: 'light', description: 'Spruce, mineral white, and lilac. Space for people and ideas.' },
   // === Earth & grounded ===
   {
     name: 'Terra',
@@ -578,7 +579,7 @@ export function BrandingStep({ state, dispatch }: BrandingStepProps) {
 
               return (
                 <div key={category} className="space-y-2">
-                  <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  <p className="text-xs font-medium tracking-wide text-muted-foreground">
                     {category}
                   </p>
                   <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
@@ -619,7 +620,7 @@ export function BrandingStep({ state, dispatch }: BrandingStepProps) {
                               />
                             </div>
                             <span
-                              className="text-[10px] uppercase tracking-wide opacity-70"
+                              className="text-xs tracking-wide opacity-70"
                             >
                               {preset.mode === 'dark' ? 'Dark' : 'Light'}
                             </span>

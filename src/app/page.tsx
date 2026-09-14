@@ -1,5 +1,7 @@
 import Link from 'next/link';
-import { Calendar, MapPin, Users, ArrowRight, Sparkles, ChevronRight } from 'lucide-react';
+import { NetworkMark } from '@/components/GatheringArtwork';
+import { GatheringHero, GatheringStory } from '@/components/landing/GatheringStory';
+import { Calendar, MapPin, Users, ArrowRight, ChevronRight, Plus } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -21,26 +23,16 @@ const statusBadgeConfig: Record<string, { label: string; variant: 'default' | 's
   archived: { label: 'Archived', variant: 'outline' },
 };
 
-// Format date for display
-function formatEventDate(dateStr: string): string {
-  const date = new Date(dateStr);
-  return date.toLocaleDateString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-  });
-}
-
 // Format date range
 function formatDateRange(startDate: string, endDate: string): string {
   const start = new Date(startDate);
   const end = new Date(endDate);
 
-  const startMonth = start.toLocaleDateString('en-US', { month: 'short' });
-  const startDay = start.getDate();
-  const endMonth = end.toLocaleDateString('en-US', { month: 'short' });
-  const endDay = end.getDate();
-  const year = end.getFullYear();
+  const startMonth = start.toLocaleDateString('en-US', { month: 'short', timeZone: 'UTC' });
+  const startDay = start.getUTCDate();
+  const endMonth = end.toLocaleDateString('en-US', { month: 'short', timeZone: 'UTC' });
+  const endDay = end.getUTCDate();
+  const year = end.getUTCFullYear();
 
   if (startMonth === endMonth) {
     return `${startMonth} ${startDay}-${endDay}, ${year}`;
@@ -48,126 +40,32 @@ function formatDateRange(startDate: string, endDate: string): string {
   return `${startMonth} ${startDay} - ${endMonth} ${endDay}, ${year}`;
 }
 
-// Event card component
+// Event identity and calendar date lead each poster.
 function EventCard({ event, featured = false }: { event: EventRow & { attendee_count?: number }; featured?: boolean }) {
   const badge = statusBadgeConfig[event.status] || statusBadgeConfig.draft;
-
-  return (
-    <Link href={`/e/${event.slug}`} className="block group">
-      <Card className={`overflow-hidden card-hover h-full ${featured ? 'min-w-[320px] sm:min-w-[360px]' : ''}`}>
-        {/* Banner/Gradient Header */}
-        <div
-          className="h-24 sm:h-32 relative overflow-hidden"
-          style={{
-            background: event.banner_url
-              ? `url(${event.banner_url}) center/cover`
-              : 'linear-gradient(135deg, hsl(var(--primary) / 0.2) 0%, hsl(var(--muted)) 100%)',
-          }}
-        >
-          {event.logo_url && (
-            <div className="absolute bottom-0 left-4 translate-y-1/2">
-              <img
-                src={event.logo_url}
-                alt={event.name}
-                className="w-12 h-12 sm:w-14 sm:h-14 rounded-xl border-2 border-background shadow-lg bg-background"
-              />
-            </div>
-          )}
-          <Badge variant={badge.variant} className="absolute top-3 right-3">
-            {badge.label}
-          </Badge>
-        </div>
-
-        <CardContent className={`pt-${event.logo_url ? '8' : '4'} pb-4 px-4`}>
-          <h3 className="font-semibold text-lg line-clamp-1 group-hover:text-primary transition-colors mb-1">
-            {event.name}
-            <ChevronRight className="inline h-4 w-4 ml-1 opacity-0 group-hover:opacity-100 transition-opacity" />
-          </h3>
-
-          {event.tagline && (
-            <p className="text-sm text-muted-foreground line-clamp-2 mb-3">
-              {event.tagline}
-            </p>
-          )}
-
-          <div className="flex flex-wrap gap-3 text-sm text-muted-foreground">
-            <div className="flex items-center gap-1.5">
-              <Calendar className="h-4 w-4" />
-              <span>{formatDateRange(event.start_date, event.end_date)}</span>
-            </div>
-            {event.location_name && (
-              <div className="flex items-center gap-1.5">
-                <MapPin className="h-4 w-4" />
-                <span>{event.location_name}</span>
-              </div>
-            )}
-            {typeof event.attendee_count === 'number' && (
-              <div className="flex items-center gap-1.5">
-                <Users className="h-4 w-4" />
-                <span>{event.attendee_count} attendees</span>
-              </div>
-            )}
-          </div>
-        </CardContent>
-      </Card>
-    </Link>
-  );
-}
-
-// Hero Section — "Network Discovery"
-function HeroSection() {
-  return (
-    <section className="relative overflow-hidden">
-      {/* Warm radial glow from center — gives the hero atmosphere */}
-      <div
-        className="absolute inset-0 pointer-events-none"
-        style={{
-          background: 'radial-gradient(ellipse 80% 60% at 50% 30%, hsl(var(--signal) / 0.06) 0%, transparent 60%)',
-        }}
-      />
-
-      {/* Geodesic mesh overlay — Fuller-inspired triangulated texture */}
-      <div className="absolute inset-0 geodesic-mesh opacity-[0.06]" />
-
-      <div className="relative container mx-auto px-4 py-12 sm:py-20 lg:py-28">
-        <div className="max-w-3xl mx-auto text-center">
-          <h1 className="font-display text-4xl sm:text-5xl lg:text-6xl font-bold tracking-tight mb-6">
-            Find Your{' '}
-            <span className="text-primary">Schelling Point</span>
-          </h1>
-
-          <p className="text-xl text-muted-foreground mb-8 max-w-2xl mx-auto text-balance">
-            The coordination platform for participant-driven events.
-            Propose sessions, vote with quadratic voting, and let your community shape the agenda.
-          </p>
-
-          {/* Protocol descriptor block */}
-          <div className="protocol-box border-border/60 text-muted-foreground max-w-sm mx-auto mb-10 text-left">
-            <span className="text-primary font-bold">UNCONFERENCE PROTOCOL v2.0</span>
-            <br />
-            <span className="text-foreground/70">propose → vote → converge → meet</span>
-          </div>
-
-          <div className="flex flex-col sm:flex-row justify-center gap-3 sm:gap-4">
-            <Button asChild size="lg" className="w-full sm:w-auto">
-              <Link href="/create">
-                Join the Network
-                <ArrowRight className="ml-2 h-4 w-4" />
-              </Link>
-            </Button>
-            <Button asChild variant="outline" size="lg" className="w-full sm:w-auto">
-              <a href="#upcoming">
-                Explore Events
-              </a>
-            </Button>
-          </div>
+  const date = new Date(event.start_date);
+  return <Link href={`/e/${event.slug}`} aria-label={`${event.name}, ${formatDateRange(event.start_date, event.end_date)}`} className={`block group ${featured ? 'min-w-[300px] sm:min-w-[400px]' : ''}`}>
+    <article className="event-poster">
+      <div className={`event-poster-art ${event.banner_url ? 'event-poster-image' : ''}`}>
+        {event.banner_url ? <img src={event.banner_url} alt="" className="absolute inset-0 h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"/> : <NetworkMark/>}
+        <div className="event-poster-date" aria-hidden="true"><span>{date.toLocaleDateString('en-US', { month: 'long', timeZone: 'UTC' })}</span><strong>{date.getUTCDate()}</strong></div>
+        <Badge variant={badge.variant} className="absolute top-5 right-5 border bg-white text-[#203b30]">{badge.label}</Badge>
+        <span className="absolute bottom-4 right-4 rounded-full w-11 h-11 bg-white text-[#203b30] flex items-center justify-center"><ArrowRight className="h-5 w-5 -rotate-45 group-hover:rotate-0 transition-transform"/></span>
+      </div>
+      <div className="p-5 sm:p-6">
+        <div className="flex items-center gap-3 mb-3">{event.logo_url && <img src={event.logo_url} alt="" className="w-10 h-10 object-contain rounded-lg"/>}<h3 className="text-2xl sm:text-3xl font-semibold tracking-tight leading-tight break-words">{event.name}</h3></div>
+        {event.tagline && <p className="text-base text-muted-foreground mb-5 line-clamp-2">{event.tagline}</p>}
+        <div className="border-t pt-4 flex flex-wrap gap-x-5 gap-y-2 text-sm text-muted-foreground">
+          <span className="flex items-center gap-2"><Calendar className="h-4 w-4 shrink-0"/>{formatDateRange(event.start_date, event.end_date)}</span>
+          {event.location_name && <span className="flex items-center gap-2"><MapPin className="h-4 w-4 shrink-0"/>{event.location_name}</span>}
+          {typeof event.attendee_count === 'number' && <span className="flex items-center gap-2"><Users className="h-4 w-4 shrink-0"/>{event.attendee_count} attendees</span>}
         </div>
       </div>
-    </section>
-  );
+    </article>
+  </Link>
 }
 
-// Featured Events Carousel
+// Featured gatherings Carousel
 function FeaturedEventsCarousel({ events }: { events: (EventRow & { attendee_count?: number })[] }) {
   if (events.length === 0) return null;
 
@@ -175,7 +73,7 @@ function FeaturedEventsCarousel({ events }: { events: (EventRow & { attendee_cou
     <section className="py-12 sm:py-16 bg-muted/30">
       <div className="container mx-auto px-4">
         <div className="flex items-center justify-between mb-6">
-          <h2 className="text-2xl sm:text-3xl font-bold">Featured Events</h2>
+          <h2 className="text-2xl sm:text-3xl font-bold">Featured gatherings</h2>
         </div>
 
         <div className="flex gap-4 overflow-x-auto pb-4 scrollbar-hide -mx-4 px-4">
@@ -194,7 +92,7 @@ function UpcomingEventsGrid({ events, showViewAll }: { events: (EventRow & { att
     <section id="upcoming" className="py-12 sm:py-16">
       <div className="container mx-auto px-4">
         <div className="flex items-center justify-between mb-6">
-          <h2 className="text-2xl sm:text-3xl font-bold">Upcoming Events</h2>
+          <h2 className="text-4xl sm:text-5xl font-semibold tracking-tight">Find your next gathering</h2>
           {showViewAll && (
             <Button asChild variant="ghost">
               <Link href="/events">
@@ -213,10 +111,10 @@ function UpcomingEventsGrid({ events, showViewAll }: { events: (EventRow & { att
           </div>
         ) : (
           <Card className="p-8 text-center">
-            <p className="text-muted-foreground mb-4">No upcoming events yet.</p>
+            <p className="text-muted-foreground mb-4">The next gathering could start with you.</p>
             <Button asChild>
               <Link href="/create">
-                Be the first to create one
+                Create an event
                 <ArrowRight className="ml-2 h-4 w-4" />
               </Link>
             </Button>
@@ -229,29 +127,10 @@ function UpcomingEventsGrid({ events, showViewAll }: { events: (EventRow & { att
 
 // Create Event CTA
 function CreateEventCTA() {
-  return (
-    <section className="py-12 sm:py-16">
-      <div className="container mx-auto px-4">
-        <Card accent="top" accentColor="hsl(var(--signal))">
-          <CardContent className="py-12 text-center">
-            <h2 className="text-2xl sm:text-3xl font-display font-bold mb-3">
-              Ready to host your own event?
-            </h2>
-            <p className="text-muted-foreground mb-6 max-w-lg mx-auto">
-              Create an unconference, hackathon, or community gathering with
-              democratic session selection powered by quadratic voting.
-            </p>
-            <Button asChild size="lg">
-              <Link href="/create">
-                Get Started
-                <ArrowRight className="ml-2 h-4 w-4" />
-              </Link>
-            </Button>
-          </CardContent>
-        </Card>
-      </div>
-    </section>
-  );
+  return <section className="mx-5 md:mx-10 my-12 md:my-20 rounded-[2rem] bg-[#203b30] text-white p-8 md:p-16 flex flex-col lg:flex-row justify-between items-start lg:items-end gap-8">
+    <div><h2 className="text-4xl sm:text-6xl font-semibold tracking-tight max-w-xl leading-[1.03]">Your people.<br/>Your possibilities.</h2><p className="text-base text-white/75 mt-6 max-w-md leading-relaxed">A few good questions. A place to meet. A community ready to make something happen.</p></div>
+    <Link href="/create" className="bold-cta !bg-[#e8ef86] !text-[#203b30] shrink-0">Create your gathering <Plus className="h-5 w-5"/></Link>
+  </section>
 }
 
 // Server component to fetch events
@@ -268,7 +147,7 @@ async function fetchEvents() {
 
   if (error || !events) {
     console.error('Error fetching events:', error);
-    return { featuredEvents: [], upcomingEvents: [], allEvents: [] };
+    return { featuredEvents: [], upcomingEvents: [], allEvents: [], loadFailed: true };
   }
 
   // Get attendee counts for each event
@@ -294,9 +173,9 @@ async function fetchEvents() {
 
   const now = new Date();
   const featuredEvents = eventsWithCounts.filter(e => e.is_featured);
-  const upcomingEvents = eventsWithCounts.filter(e => new Date(e.start_date) >= now);
+  const upcomingEvents = eventsWithCounts.filter(e => new Date(`${e.end_date.slice(0, 10)}T23:59:59`) >= now && e.status !== 'completed');
 
-  return { featuredEvents, upcomingEvents, allEvents: eventsWithCounts };
+  return { featuredEvents, upcomingEvents, allEvents: eventsWithCounts, loadFailed: false };
 }
 
 /**
@@ -310,26 +189,29 @@ async function fetchEvents() {
  * - My Events section (for logged-in users)
  */
 export default async function HomePage() {
-  const { featuredEvents, upcomingEvents } = await fetchEvents();
+  const { featuredEvents, upcomingEvents, allEvents, loadFailed } = await fetchEvents();
+  const pastEvents = allEvents.filter(e => !upcomingEvents.some(upcoming => upcoming.id === e.id));
 
-  // Limit upcoming events to 6 for the grid
-  const displayedUpcoming = upcomingEvents.slice(0, 6);
-  const hasMoreUpcoming = upcomingEvents.length > 6;
+  const displayedUpcoming = upcomingEvents;
+  const hasMoreUpcoming = false;
 
   return (
     <div className="min-h-screen bg-background flex flex-col">
       <SiteHeader />
       <main className="flex-1">
-        <HeroSection />
+        <GatheringHero />
+        <GatheringStory />
 
         {featuredEvents.length > 0 && (
           <FeaturedEventsCarousel events={featuredEvents} />
         )}
 
-        <UpcomingEventsGrid
+        {loadFailed ? <section className="container mx-auto px-5 py-12" id="upcoming"><div role="alert" className="rounded-2xl border bg-card p-6"><h2 className="text-xl font-semibold mb-2">We couldn’t load the gatherings.</h2><p className="text-muted-foreground mb-4">Please refresh to try again.</p><Button asChild variant="outline"><a href="/">Try again</a></Button></div></section> : <UpcomingEventsGrid
           events={displayedUpcoming}
           showViewAll={hasMoreUpcoming}
-        />
+        />}
+
+        {pastEvents.length > 0 && <section className="container mx-auto px-5 py-10"><h2 className="text-4xl sm:text-5xl font-semibold tracking-tight mb-4">Previously, together.</h2><p className="text-muted-foreground mb-6">Revisit the ideas and people behind past gatherings.</p><div className="grid md:grid-cols-2 gap-6">{pastEvents.map(event => <EventCard key={event.id} event={event}/>)}</div></section>}
 
         <CreateEventCTA />
 

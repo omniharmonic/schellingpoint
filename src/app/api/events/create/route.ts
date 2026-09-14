@@ -1,7 +1,8 @@
+import { validateWizardState } from '@/lib/events/validate-creation';
 import { NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/server';
 import { getUserFromRequest } from '@/lib/api/getUser';
-import { isValidSlugFormat, suggestAlternativeSlugs } from '@/lib/utils/slug';
+import { suggestAlternativeSlugs } from '@/lib/utils/slug';
 import { parseTimeInTimezone } from '@/lib/events/timezone';
 import type { WizardState, WizardVenue, WizardTrack, WizardTimeSlot } from '@/app/create/useWizardState';
 import type { EventRow, EventTheme } from '@/types/event';
@@ -30,50 +31,6 @@ interface VenueIdMapping {
 // Validation
 // ============================================================================
 
-function validateWizardState(state: WizardState): { valid: boolean; error?: string } {
-  // Basics validation
-  if (!state.basics.name?.trim()) {
-    return { valid: false, error: 'Event name is required' };
-  }
-  if (!state.basics.slug?.trim()) {
-    return { valid: false, error: 'Event slug is required' };
-  }
-  const slugValidation = isValidSlugFormat(state.basics.slug);
-  if (!slugValidation.valid) {
-    return { valid: false, error: slugValidation.error };
-  }
-
-  // Dates validation
-  if (!state.dates.startDate) {
-    return { valid: false, error: 'Start date is required' };
-  }
-  if (!state.dates.endDate) {
-    return { valid: false, error: 'End date is required' };
-  }
-  if (new Date(state.dates.startDate) > new Date(state.dates.endDate)) {
-    return { valid: false, error: 'End date must be after start date' };
-  }
-  if (!state.dates.timezone) {
-    return { valid: false, error: 'Timezone is required' };
-  }
-
-  // Voting validation
-  if (state.voting.credits <= 0) {
-    return { valid: false, error: 'Vote credits must be greater than 0' };
-  }
-  if (state.voting.maxProposalsPerUser < 0) {
-    return { valid: false, error: 'Max proposals per user cannot be negative' };
-  }
-  if (!state.voting.allowedFormats?.length) {
-    return { valid: false, error: 'At least one session format must be allowed' };
-  }
-  if (!state.voting.allowedDurations?.length) {
-    return { valid: false, error: 'At least one session duration must be allowed' };
-  }
-
-  return { valid: true };
-}
-
 // ============================================================================
 // Data Transformations
 // ============================================================================
@@ -85,6 +42,14 @@ function transformToEventInsert(
   state: WizardState,
   userId: string
 ): Omit<EventRow, 'id' | 'created_at' | 'updated_at' | 'location_geo'> & { created_by: string } {
+  const deadline = (value: string | null) => {
+    if (!value) return null;
+    // datetime-local represents the event's clock, not the server's timezone.
+    if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value)) {
+      return parseTimeInTimezone(value.slice(11), value.slice(0, 10), state.dates.timezone).toISOString();
+    }
+    return new Date(value).toISOString();
+  };
   // Build theme JSON from branding
   const theme: EventTheme = {
     colors: {
@@ -117,10 +82,10 @@ function transformToEventInsert(
 
     vote_credits_per_user: state.voting.credits,
     voting_mechanism: state.voting.mechanism,
-    voting_opens_at: state.voting.votingOpensAt || null,
-    voting_closes_at: state.voting.votingClosesAt || null,
-    proposals_open_at: state.voting.proposalsOpenAt || null,
-    proposals_close_at: state.voting.proposalsCloseAt || null,
+    voting_opens_at: deadline(state.voting.votingOpensAt),
+    voting_closes_at: deadline(state.voting.votingClosesAt),
+    proposals_open_at: deadline(state.voting.proposalsOpenAt),
+    proposals_close_at: deadline(state.voting.proposalsCloseAt),
 
     allowed_formats: state.voting.allowedFormats,
     allowed_durations: state.voting.allowedDurations,
@@ -269,7 +234,7 @@ export async function POST(request: Request): Promise<NextResponse<CreateEventRe
       );
     }
 
-    const { wizardState } = body;
+    const wizardState = body?.wizardState;
     if (!wizardState) {
       return NextResponse.json(
         { success: false, error: 'wizardState is required' },
@@ -323,101 +288,40 @@ export async function POST(request: Request): Promise<NextResponse<CreateEventRe
       );
     }
 
-    // 5. Create the event
+    // Prepare every child before writing. UUIDs preserve room identity without
+    // relying on the database returning rows in the same order as the input.
     const eventInsert = transformToEventInsert(wizardState, user.id);
-    const { data: createdEvent, error: eventError } = await supabase
-      .from('events')
-      .insert(eventInsert)
-      .select('id, slug, name')
-      .single();
-
-    if (eventError || !createdEvent) {
-      console.error('Error creating event:', eventError);
-      return NextResponse.json(
-        { success: false, error: 'Failed to create event' },
-        { status: 500 }
-      );
-    }
-
-    const eventId = createdEvent.id;
-
-    // 6. Create venues (if any)
-    let venueIdMapping: VenueIdMapping = {};
-    if (wizardState.venues.length > 0) {
-      const venueInserts = transformVenuesToInsert(wizardState.venues, eventId);
-      const { data: createdVenues, error: venuesError } = await supabase
-        .from('venues')
-        .insert(venueInserts)
-        .select('id, slug');
-
-      if (venuesError) {
-        console.error('Error creating venues:', venuesError);
-        // Event was created but venues failed - log but continue
-        // The event creator can add venues later
-      } else if (createdVenues) {
-        // Create mapping from client-side venue IDs to database IDs
-        // We match by index since we inserted in the same order
-        wizardState.venues.forEach((clientVenue, index) => {
-          if (createdVenues[index]) {
-            venueIdMapping[clientVenue.id] = createdVenues[index].id;
-          }
-        });
-      }
-    }
-
-    // 7. Create tracks (if any)
-    if (wizardState.tracks.length > 0) {
-      const trackInserts = transformTracksToInsert(wizardState.tracks, eventId);
-      const { error: tracksError } = await supabase
-        .from('tracks')
-        .insert(trackInserts);
-
-      if (tracksError) {
-        console.error('Error creating tracks:', tracksError);
-        // Event was created but tracks failed - log but continue
-      }
-    }
-
-    // 8. Create time slots (if any)
-    if (wizardState.schedule.timeSlots.length > 0) {
-      const timeSlotInserts = transformTimeSlotsToInsert(
-        wizardState.schedule.timeSlots,
-        eventId,
-        venueIdMapping,
-        wizardState.dates.timezone
-      );
-      const { error: slotsError } = await supabase
-        .from('time_slots')
-        .insert(timeSlotInserts);
-
-      if (slotsError) {
-        console.error('Error creating time slots:', slotsError);
-        // Event was created but time slots failed - log but continue
-      }
-    }
-
-    // 9. Add creator as event owner
-    const { error: memberError } = await supabase
-      .from('event_members')
-      .insert({
-        event_id: eventId,
-        user_id: user.id,
-        role: 'owner',
-        vote_credits: wizardState.voting.credits,
-      });
-
-    if (memberError) {
-      console.error('Error adding event owner:', memberError);
-      // This is more critical - but event was created
-      // The user will still be able to access via created_by
-    }
-
-    // 10. Return success
-    return NextResponse.json({
-      success: true,
-      event: createdEvent,
-      eventSlug: createdEvent.slug,
+    const venueIdMapping: VenueIdMapping = {};
+    const venueInserts = transformVenuesToInsert(wizardState.venues, '').map((venue, index) => {
+      const id = crypto.randomUUID();
+      venueIdMapping[wizardState.venues[index].id] = id;
+      return { ...venue, id, slug: `${venue.slug}-${index + 1}` };
     });
+    const trackInserts = transformTracksToInsert(wizardState.tracks, '').map((track, index) => ({
+      ...track, slug: `${track.slug}-${index + 1}`,
+    }));
+    const timeSlotInserts = transformTimeSlotsToInsert(
+      wizardState.schedule.timeSlots, '', venueIdMapping, wizardState.dates.timezone
+    );
+    // event_id is assigned inside the transaction, never trusted from the request.
+    const withoutEventId = <T extends { event_id: string }>(row: T) => {
+      const { event_id, ...rest } = row;
+      return rest;
+    };
+    const { data: createdEvent, error: createError } = await supabase.rpc('create_event_with_program', {
+      p_event: eventInsert,
+      p_venues: venueInserts.map(withoutEventId),
+      p_tracks: trackInserts.map(withoutEventId),
+      p_time_slots: timeSlotInserts.map(withoutEventId),
+    });
+    if (createError || !createdEvent) {
+      console.error('Event creation transaction failed:', createError);
+      if (createError?.code === '23505') {
+        return NextResponse.json({ success: false, error: 'This event URL was just taken. Choose another URL and try again.', suggestions: suggestAlternativeSlugs(wizardState.basics.slug) }, { status: 409 });
+      }
+      return NextResponse.json({ success: false, error: 'Your event could not be saved. Nothing was created; your draft is safe. Please try again.' }, { status: 500 });
+    }
+    return NextResponse.json({ success: true, event: createdEvent, eventSlug: createdEvent.slug });
 
   } catch (error) {
     console.error('Error in event creation:', error);

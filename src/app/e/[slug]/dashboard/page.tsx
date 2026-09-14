@@ -1,5 +1,6 @@
 'use client'
 
+import { isParticipationOpen } from '@/lib/events/lifecycle'
 import * as React from 'react'
 import Link from 'next/link'
 import {
@@ -66,6 +67,7 @@ interface SessionRow {
 export default function DashboardPage() {
   const { user, profile } = useAuth()
   const event = useEvent()
+  const eventIsOver = event.status === 'completed' || event.status === 'archived'
   const { voteCredits, isMember, isAdmin } = useEventRole()
 
   const [stats, setStats] = React.useState<DashboardStats | null>(null)
@@ -90,7 +92,7 @@ export default function DashboardPage() {
   const topSessions = React.useMemo(() => {
     return [...allSessions]
       .sort((a, b) => (b.total_votes || 0) - (a.total_votes || 0))
-      .slice(0, 15)
+      .slice(0, 6)
   }, [allSessions])
 
   const userProposedSessions = React.useMemo(() => {
@@ -252,27 +254,27 @@ export default function DashboardPage() {
     <DashboardLayout>
       <div className="space-y-6">
         {/* Header */}
-        <div>
+        <div className="dashboard-welcome">
           <h1 className="text-2xl font-display font-bold">
             {user
               ? `Welcome back, ${profile?.display_name || user.email?.split('@')[0] || 'friend'}`
-              : 'Dashboard'}
+              : 'Your gathering'}
           </h1>
           <p className="text-muted-foreground mt-1">
-            Overview of {event.name}
+            Find your people. Follow your curiosity. Make {event.name} your own.
           </p>
         </div>
 
         {/* Stats Grid — System Gauges */}
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+        <div className="dashboard-stats grid grid-cols-2 gap-3 lg:grid-cols-4">
           <Card className="stats-card" accent="top" accentColor="hsl(var(--signal))">
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-xs font-mono uppercase tracking-wider text-muted-foreground">Total Sessions</CardTitle>
+              <CardTitle className="text-xs text-muted-foreground">Total Sessions</CardTitle>
               <Presentation className="h-4 w-4 text-muted-foreground" strokeWidth={1.5} />
             </CardHeader>
             <CardContent>
-              <div className="text-3xl font-mono font-bold tabular-nums">{stats?.totalSessions || 0}</div>
-              <p className="text-xs font-mono text-muted-foreground mt-1">
+              <div className="text-3xl font-bold tabular-nums">{stats?.totalSessions || 0}</div>
+              <p className="text-xs text-muted-foreground mt-1">
                 {stats?.scheduledSessions || 0} scheduled
               </p>
             </CardContent>
@@ -280,12 +282,12 @@ export default function DashboardPage() {
 
           <Card className="stats-card" accent="top" accentColor="hsl(var(--signal-amber))">
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-xs font-mono uppercase tracking-wider text-muted-foreground">Total Votes</CardTitle>
+              <CardTitle className="text-xs text-muted-foreground">Total Votes</CardTitle>
               <TrendingUp className="h-4 w-4 text-muted-foreground" strokeWidth={1.5} />
             </CardHeader>
             <CardContent>
-              <div className="text-3xl font-mono font-bold tabular-nums">{stats?.totalVotes || 0}</div>
-              <p className="text-xs font-mono text-muted-foreground mt-1">
+              <div className="text-3xl font-bold tabular-nums">{stats?.totalVotes || 0}</div>
+              <p className="text-xs text-muted-foreground mt-1">
                 across all sessions
               </p>
             </CardContent>
@@ -293,13 +295,13 @@ export default function DashboardPage() {
 
           <Card className="stats-card" accent="top" accentColor="hsl(var(--signal-cyan))">
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-xs font-mono uppercase tracking-wider text-muted-foreground">Participants</CardTitle>
+              <CardTitle className="text-xs text-muted-foreground">Participants</CardTitle>
               <Users className="h-4 w-4 text-muted-foreground" strokeWidth={1.5} />
             </CardHeader>
             <CardContent>
-              <div className="text-3xl font-mono font-bold tabular-nums">{stats?.totalParticipants || 0}</div>
-              <p className="text-xs font-mono text-muted-foreground mt-1">
-                registered nodes
+              <div className="text-3xl font-bold tabular-nums">{stats?.totalParticipants || 0}</div>
+              <p className="text-xs text-muted-foreground mt-1">
+                people shaping the gathering
               </p>
             </CardContent>
           </Card>
@@ -307,12 +309,12 @@ export default function DashboardPage() {
           {user && (
             <Card className="stats-card" accent="top" accentColor="hsl(var(--signal))">
               <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-xs font-mono uppercase tracking-wider text-muted-foreground">Your Credits</CardTitle>
+                <CardTitle className="text-xs text-muted-foreground">{eventIsOver ? 'Your contribution' : 'Your credits'}</CardTitle>
                 <Vote className="h-4 w-4 text-primary" strokeWidth={1.5} />
               </CardHeader>
               <CardContent>
-                <div className="text-3xl font-mono font-bold tabular-nums text-primary">{creditsRemaining}</div>
-                <p className="text-xs font-mono text-muted-foreground mt-1">
+                <div className="text-3xl font-bold tabular-nums text-primary">{eventIsOver ? creditsSpent : creditsRemaining}</div>
+                <p className="text-xs text-muted-foreground mt-1">
                   {creditsSpent} of {voteCredits} allocated
                 </p>
               </CardContent>
@@ -331,9 +333,9 @@ export default function DashboardPage() {
                       <Vote className="h-6 w-6 text-primary" />
                     </div>
                     <div>
-                      <h3 className="font-semibold">Vote on Sessions</h3>
+                      <h3 className="font-semibold">{isParticipationOpen(event, 'vote') ? 'Vote on sessions' : 'Explore sessions'}</h3>
                       <p className="text-sm text-muted-foreground">
-                        {creditsRemaining} credits remaining
+                        {isParticipationOpen(event, 'vote') ? `${creditsRemaining} credits remaining` : 'Discover the ideas taking shape'}
                       </p>
                     </div>
                   </div>
@@ -351,7 +353,7 @@ export default function DashboardPage() {
                     <div>
                       <h3 className="font-semibold">My Schedule</h3>
                       <p className="text-sm text-muted-foreground">
-                        {userFavorites} sessions saved
+                        {userFavorites} session{userFavorites === 1 ? '' : 's'} saved
                       </p>
                     </div>
                   </div>
@@ -360,16 +362,16 @@ export default function DashboardPage() {
             </Card>
 
             <Card className="hover:bg-muted/50 transition-colors">
-              <Link href={`/e/${event.slug}/propose`}>
+              <Link href={`/e/${event.slug}/${isParticipationOpen(event, 'propose') ? 'propose' : 'participants'}`}>
                 <CardContent className="pt-6">
                   <div className="flex items-center gap-4">
                     <div className="p-3 rounded-lg bg-primary/10">
                       <Presentation className="h-6 w-6 text-primary" />
                     </div>
                     <div>
-                      <h3 className="font-semibold">Propose Session</h3>
+                      <h3 className="font-semibold">{isParticipationOpen(event, 'propose') ? 'Propose a session' : 'Find your people'}</h3>
                       <p className="text-sm text-muted-foreground">
-                        Share your knowledge
+                        {isParticipationOpen(event, 'propose') ? 'Share your knowledge' : 'Connect with the community'}
                       </p>
                     </div>
                   </div>
@@ -394,29 +396,29 @@ export default function DashboardPage() {
               </div>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <div>
-                  <p className="text-2xl sm:text-3xl font-mono font-bold tabular-nums text-primary">
+                  <p className="text-2xl sm:text-3xl font-bold tabular-nums text-primary">
                     {Object.keys(userVotes).length}
                   </p>
-                  <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">Sessions voted</p>
+                  <p className="text-xs text-muted-foreground">Sessions voted</p>
                 </div>
                 <div>
-                  <p className="text-2xl sm:text-3xl font-mono font-bold tabular-nums">{totalVotesCast}</p>
-                  <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">Votes cast</p>
+                  <p className="text-2xl sm:text-3xl font-bold tabular-nums">{totalVotesCast}</p>
+                  <p className="text-xs text-muted-foreground">Votes cast</p>
                 </div>
                 <div>
-                  <p className="text-2xl sm:text-3xl font-mono font-bold tabular-nums">{creditsSpent}</p>
-                  <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">Credits used</p>
+                  <p className="text-2xl sm:text-3xl font-bold tabular-nums">{creditsSpent}</p>
+                  <p className="text-xs text-muted-foreground">Credits used</p>
                 </div>
                 <div>
-                  <p className="text-2xl sm:text-3xl font-mono font-bold tabular-nums text-primary">
+                  <p className="text-2xl sm:text-3xl font-bold tabular-nums text-primary">
                     {Math.max(creditsRemaining, 0)}
                   </p>
-                  <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">Credits remaining</p>
+                  <p className="text-xs text-muted-foreground">Credits remaining</p>
                 </div>
               </div>
               <div className="mt-4">
-                <div className="flex justify-between text-xs font-mono mb-1">
-                  <span className="text-muted-foreground uppercase tracking-wider">Credit usage</span>
+                <div className="flex justify-between text-xs mb-1">
+                  <span className="text-muted-foreground tracking-wider">Credit usage</span>
                   <span className="font-medium tabular-nums">
                     {creditsSpent}/{voteCredits}
                   </span>
@@ -553,7 +555,7 @@ export default function DashboardPage() {
               </CardHeader>
               <CardContent className="pt-0">
                 <div className="space-y-2 max-h-[400px] overflow-y-auto pr-1">
-                  {allSessions.slice(0, 15).map((session) => (
+                  {allSessions.slice(0, 6).map((session) => (
                     <Link
                       key={session.id}
                       href={`/e/${event.slug}/sessions/${session.id}`}

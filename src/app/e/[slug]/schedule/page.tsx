@@ -379,7 +379,7 @@ export default function SchedulePage() {
   return (
     <DashboardLayout>
       <div className="space-y-6">
-        <div className="flex items-start justify-between gap-4">
+        <div className="page-heading">
           <div>
             <h1 className="text-2xl font-bold">Schedule</h1>
             <p className="text-muted-foreground mt-1">
@@ -417,12 +417,14 @@ export default function SchedulePage() {
                     key={day.key}
                     variant={selectedDay === day.key ? 'default' : 'outline'}
                     onClick={() => setSelectedDay(day.key)}
+                    aria-label={day.label}
+                    aria-pressed={selectedDay === day.key}
                     className={cn(
-                      'whitespace-nowrap',
+                      'calendar-day whitespace-nowrap flex-col items-start gap-1 h-auto',
                       selectedDay === day.key && 'btn-primary-glow'
                     )}
                   >
-                    {day.label}
+                    <span className="text-xs font-medium opacity-75">{day.label.split(',')[0]}</span><span className="text-lg font-semibold">{day.label.split(',').slice(1).join(',').trim() || day.label}</span>
                   </Button>
                 ))}
               </div>
@@ -431,7 +433,8 @@ export default function SchedulePage() {
               <div className="relative">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                 <Input
-                  placeholder="Search sessions..."
+                  aria-label="Search the schedule"
+                  placeholder="Search the schedule"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                   className="pl-10"
@@ -540,7 +543,7 @@ export default function SchedulePage() {
                         {/* Time header - more compact */}
                         <div className="sticky top-[104px] z-10 bg-background/95 backdrop-blur-sm py-1.5 -mx-4 px-4 sm:mx-0 sm:px-0 mb-2">
                           <div className="flex items-center gap-2">
-                            <div className="flex items-center gap-1.5 text-primary font-semibold text-sm">
+                            <div className="flex items-center gap-1.5 text-foreground font-semibold text-lg">
                               <Clock className="h-3.5 w-3.5" />
                               <span>{startTime} - {endTime}</span>
                             </div>
@@ -551,7 +554,7 @@ export default function SchedulePage() {
                         {/* Session cards - compact layout */}
                         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
                           {slotSessions.map((session) => (
-                            <Card key={session.id} className="h-full card-hover border-border/50 hover:border-primary/30">
+                            <Card key={session.id} className="schedule-session h-full card-hover hover:border-primary/50" style={{ '--session-color': session.track?.color || 'hsl(var(--primary))' } as React.CSSProperties}>
                               <CardContent className="p-3">
                                 <div className="space-y-1.5">
                                   {/* Title row with favorite button */}
@@ -560,7 +563,7 @@ export default function SchedulePage() {
                                       <h3 className="font-semibold text-sm leading-snug line-clamp-2">{session.title}</h3>
                                     </Link>
                                     <div className="flex items-center gap-1.5 flex-shrink-0">
-                                      <Badge variant="secondary" className="capitalize text-[10px]">
+                                      <Badge variant="secondary" className="capitalize text-xs">
                                         {session.format}
                                       </Badge>
                                       {user && (
@@ -641,7 +644,7 @@ export default function SchedulePage() {
                                     <h3 className="font-semibold text-sm leading-snug line-clamp-2">{session.title}</h3>
                                   </Link>
                                   <div className="flex items-center gap-1.5 flex-shrink-0">
-                                    <Badge variant="secondary" className="text-[10px] bg-orange-500/10 text-orange-700 dark:text-orange-400 border-orange-500/30">
+                                    <Badge variant="secondary" className="text-xs bg-orange-500/10 text-orange-700 dark:text-orange-400 border-orange-500/30">
                                       Self-Hosted
                                     </Badge>
                                     {user && (
@@ -701,7 +704,7 @@ export default function SchedulePage() {
                         {/* Venue header */}
                         <div className="sticky top-[104px] z-10 bg-background/95 backdrop-blur-sm py-1.5 -mx-4 px-4 sm:mx-0 sm:px-0 mb-2">
                           <div className="flex items-center gap-2">
-                            <div className="flex items-center gap-1.5 text-primary font-semibold text-sm">
+                            <div className="flex items-center gap-1.5 text-foreground font-semibold text-lg">
                               <MapPin className="h-3.5 w-3.5" />
                               <span>{venueName}</span>
                             </div>
@@ -713,7 +716,7 @@ export default function SchedulePage() {
                         {/* Session cards - compact layout */}
                         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
                           {venueSessions.map((session) => (
-                            <Card key={session.id} className="h-full card-hover border-border/50 hover:border-primary/30">
+                            <Card key={session.id} className="schedule-session h-full card-hover hover:border-primary/50" style={{ '--session-color': session.track?.color || 'hsl(var(--primary))' } as React.CSSProperties}>
                               <CardContent className="p-3">
                                 <div className="space-y-1.5">
                                   {/* Title row with favorite button */}
@@ -722,7 +725,7 @@ export default function SchedulePage() {
                                       <h3 className="font-semibold text-sm leading-snug line-clamp-2">{session.title}</h3>
                                     </Link>
                                     <div className="flex items-center gap-1.5 flex-shrink-0">
-                                      <Badge variant="secondary" className="capitalize text-[10px]">
+                                      <Badge variant="secondary" className="capitalize text-xs">
                                         {session.format}
                                       </Badge>
                                       {user && (

@@ -116,7 +116,7 @@ export function AdminNav({ eventSlug, canManageSchedule, canManageVenues }: Admi
             <span className="hidden sm:inline">Back to event</span>
           </Link>
           <div className="h-4 w-px bg-border" />
-          <span className="font-semibold text-sm tracking-wide uppercase text-muted-foreground">
+          <span className="font-semibold text-sm tracking-wide text-muted-foreground">
             Admin
           </span>
         </div>

@@ -1,6 +1,7 @@
 'use client'
 
 import * as React from 'react'
+import { safeReturnPath } from '@/lib/auth-redirect'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useAuth } from '@/hooks/useAuth'
 
@@ -22,7 +23,7 @@ function AuthCallback() {
     if (isLoading) return
     if (user) {
       const next = searchParams.get('next') || searchParams.get('redirect') || '/'
-      router.replace(next)
+      router.replace(safeReturnPath(next))
     } else {
       // Hash was missing/invalid or the link expired.
       router.replace('/login?error=auth')

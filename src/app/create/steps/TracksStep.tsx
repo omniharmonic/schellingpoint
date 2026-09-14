@@ -177,7 +177,7 @@ function ColorPicker({ value, onChange }: ColorPickerProps) {
             onChange={handleCustomInputChange}
             onBlur={handleCustomInputBlur}
             placeholder="#RRGGBB"
-            className="font-mono w-28"
+            className="w-28"
             maxLength={7}
           />
         </div>
@@ -517,6 +517,7 @@ export function TracksStep({ state, dispatch }: TracksStepProps) {
           {/* Add topic */}
           <div className="flex gap-2">
             <Input
+              aria-label="New attendee topic"
               placeholder="Add a topic (e.g., Governance, Climate, DeFi)"
               value={topicInput}
               onChange={(e) => setTopicInput(e.target.value)}

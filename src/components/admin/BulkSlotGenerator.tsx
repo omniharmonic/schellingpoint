@@ -12,6 +12,7 @@ interface BulkSlotGeneratorProps {
   eventDays: { date: string; label: string }[]
   onGenerate: (slots: GeneratedSlot[]) => void
   onCancel: () => void
+  isSaving?: boolean
 }
 
 export interface GeneratedSlot {
@@ -56,6 +57,7 @@ export function BulkSlotGenerator({
   eventDays,
   onGenerate,
   onCancel,
+  isSaving = false,
 }: BulkSlotGeneratorProps) {
   const [venueId, setVenueId] = React.useState(venues[0]?.id || '')
   const [dayDate, setDayDate] = React.useState(eventDays[0]?.date || '')
@@ -266,7 +268,7 @@ export function BulkSlotGenerator({
       <div className="flex gap-3 pt-2">
         <Button
           onClick={() => onGenerate(preview)}
-          disabled={preview.length === 0}
+          disabled={isSaving || preview.length === 0}
         >
           <Zap className="h-4 w-4 mr-2" />
           Generate {preview.filter(s => !s.isBreak).length} Slots

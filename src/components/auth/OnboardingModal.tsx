@@ -1,6 +1,7 @@
 'use client'
 
 import * as React from 'react'
+import * as Dialog from '@radix-ui/react-dialog'
 import {
   User,
   Building2,
@@ -35,6 +36,9 @@ interface OnboardingModalProps {
   onComplete: () => void
   /** Event-specific suggested topics (optional, falls back to defaults) */
   suggestedTopics?: string[]
+  voteCredits?: number
+  votingMechanism?: string
+  requireProposalApproval?: boolean
 }
 
 // Empty fallback — topics are organizer-defined per event. When not set,
@@ -61,15 +65,15 @@ const introSlides = [
     icon: Sparkles,
     iconBg: 'bg-primary/20',
     iconColor: 'text-primary',
-    title: 'Welcome to Schelling Point!',
-    description: 'A community-driven unconference where YOU help shape the schedule. Let\'s show you how it works.',
+    title: 'You belong in the conversation.',
+    description: 'A gathering where everyone helps shape the program. Let\'s show you how it works.',
   },
   {
     icon: Vote,
     iconBg: 'bg-blue-500/20',
     iconColor: 'text-blue-500',
     title: 'Vote on Sessions',
-    description: 'Use quadratic voting to support sessions you want to attend. You have 100 credits to spend - each additional vote on the same session costs more credits (1, 3, 6, 10...).',
+    description: 'Use your event credits to support the sessions you want to attend.',
     tip: 'Votes save automatically - no submit button needed!',
   },
   {
@@ -88,17 +92,19 @@ const introSlides = [
     description: 'Have something to share? Propose your own session! Choose a format (talk, workshop, discussion, panel, or demo) and submit for review.',
     tip: 'Sessions are reviewed by admins before appearing for voting.',
   },
-  {
-    icon: Brain,
-    iconColor: 'text-amber-500',
-    iconBg: 'bg-amber-500/10',
-    title: 'Knowledge Commons',
-    description: 'Events may choose to record sessions to share with the community. Hosts must ask for verbal consent from all participants before recording. It\'s completely fine if a group decides not to record, and no one should feel pressured to consent.',
-    tip: 'Be aware of active consent at all times. Check with event organizers for recording policies.',
-  },
+
 ]
 
-export function OnboardingModal({ userId, email, onComplete, suggestedTopics }: OnboardingModalProps) {
+export function OnboardingModal({ userId, email, onComplete, suggestedTopics, voteCredits = 100, votingMechanism = 'quadratic', requireProposalApproval = true }: OnboardingModalProps) {
+  const slides = introSlides.map((slide, index) => index === 1 ? {
+    ...slide,
+    description: votingMechanism === 'quadratic'
+      ? `You have ${voteCredits} credits to support the sessions you care about. One vote costs 1 credit, two votes cost 4, and three cost 9. Spread them around or back a favorite.`
+      : votingMechanism === 'linear'
+      ? `You have ${voteCredits} credits. Each vote costs one credit. Support the sessions you want to see.`
+      : `You have ${voteCredits} credits. Give one vote to each session you want to support.`,
+  } : index === 3 ? { ...slide, tip: requireProposalApproval ? 'Organizers review proposals before opening them for voting.' : 'Your proposal will be available for the community to discover and support.' } : slide)
+
   const suggestedInterests = suggestedTopics && suggestedTopics.length > 0 ? suggestedTopics : DEFAULT_INTERESTS
   const [step, setStep] = React.useState(1)
   const [isSubmitting, setIsSubmitting] = React.useState(false)
@@ -116,7 +122,7 @@ export function OnboardingModal({ userId, email, onComplete, suggestedTopics }: 
   const [customInterest, setCustomInterest] = React.useState('')
 
   // Total steps: 4 intro slides + 3 profile steps = 7
-  const introStepCount = introSlides.length
+  const introStepCount = slides.length
   const profileStepCount = 3
   const totalSteps = introStepCount + profileStepCount
 
@@ -238,7 +244,7 @@ export function OnboardingModal({ userId, email, onComplete, suggestedTopics }: 
 
   // Render intro slide
   const renderIntroSlide = () => {
-    const slide = introSlides[step - 1]
+    const slide = slides[step - 1]
     const IconComponent = slide.icon
 
     return (
@@ -297,12 +303,13 @@ export function OnboardingModal({ userId, email, onComplete, suggestedTopics }: 
             </div>
 
             <div className="space-y-2">
-              <label className="text-sm font-medium flex items-center gap-2">
+              <label htmlFor="onboarding-display-name" className="text-sm font-medium flex items-center gap-2">
                 <User className="h-4 w-4" />
                 Display Name <span className="text-destructive">*</span>
               </label>
               <Input
-                placeholder="How should we call you?"
+                id="onboarding-display-name"
+                placeholder="What should people call you?"
                 value={displayName}
                 onChange={(e) => setDisplayName(e.target.value)}
                 autoFocus
@@ -310,11 +317,12 @@ export function OnboardingModal({ userId, email, onComplete, suggestedTopics }: 
             </div>
 
             <div className="space-y-2">
-              <label className="text-sm font-medium flex items-center gap-2">
+              <label htmlFor="onboarding-affiliation" className="text-sm font-medium flex items-center gap-2">
                 <Building2 className="h-4 w-4" />
                 Affiliation <span className="text-muted-foreground font-normal">(optional)</span>
               </label>
               <Input
+                id="onboarding-affiliation"
                 placeholder="Company, DAO, or project"
                 value={affiliation}
                 onChange={(e) => setAffiliation(e.target.value)}
@@ -322,10 +330,11 @@ export function OnboardingModal({ userId, email, onComplete, suggestedTopics }: 
             </div>
 
             <div className="space-y-2">
-              <label className="text-sm font-medium">
+              <label htmlFor="onboarding-bio" className="text-sm font-medium">
                 Short Bio <span className="text-muted-foreground font-normal">(optional)</span>
               </label>
               <Input
+                id="onboarding-bio"
                 placeholder="One line about yourself"
                 value={bio}
                 onChange={(e) => setBio(e.target.value)}
@@ -338,11 +347,12 @@ export function OnboardingModal({ userId, email, onComplete, suggestedTopics }: 
         return (
           <div className="space-y-4">
             <div className="space-y-2">
-              <label className="text-sm font-medium flex items-center gap-2">
+              <label htmlFor="onboarding-building" className="text-sm font-medium flex items-center gap-2">
                 <Rocket className="h-4 w-4" />
                 What are you building? <span className="text-muted-foreground font-normal">(optional)</span>
               </label>
               <Input
+                id="onboarding-building"
                 placeholder="Describe your project or work"
                 value={building}
                 onChange={(e) => setBuilding(e.target.value)}
@@ -353,11 +363,12 @@ export function OnboardingModal({ userId, email, onComplete, suggestedTopics }: 
             </div>
 
             <div className="space-y-2">
-              <label className="text-sm font-medium flex items-center gap-2">
+              <label htmlFor="onboarding-telegram" className="text-sm font-medium flex items-center gap-2">
                 <Send className="h-4 w-4" />
                 Telegram <span className="text-muted-foreground font-normal">(optional)</span>
               </label>
               <Input
+                id="onboarding-telegram"
                 placeholder="@username"
                 value={telegram}
                 onChange={(e) => setTelegram(e.target.value)}
@@ -365,11 +376,12 @@ export function OnboardingModal({ userId, email, onComplete, suggestedTopics }: 
             </div>
 
             <div className="space-y-2">
-              <label className="text-sm font-medium flex items-center gap-2">
+              <label htmlFor="onboarding-ens" className="text-sm font-medium flex items-center gap-2">
                 <Hexagon className="h-4 w-4" />
                 ENS Name <span className="text-muted-foreground font-normal">(optional)</span>
               </label>
               <Input
+                id="onboarding-ens"
                 placeholder="yourname.eth"
                 value={ens}
                 onChange={(e) => setEns(e.target.value)}
@@ -471,10 +483,10 @@ export function OnboardingModal({ userId, email, onComplete, suggestedTopics }: 
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-background/80 backdrop-blur-sm overflow-y-auto">
+    <Dialog.Root open><Dialog.Portal><Dialog.Overlay className="fixed inset-0 z-50 bg-foreground/20 backdrop-blur-sm"/><Dialog.Content aria-describedby="onboarding-description" onEscapeKeyDown={e => e.preventDefault()} onPointerDownOutside={e => e.preventDefault()} className="fixed inset-0 z-50 flex items-end sm:items-center justify-center overflow-y-auto outline-none">
       <div className="w-full max-w-lg sm:mx-4 bg-card border rounded-t-xl sm:rounded-xl shadow-xl overflow-hidden max-h-[100dvh] sm:max-h-[90dvh] flex flex-col">
         {/* Header */}
-        <div className="p-4 sm:p-6 border-b bg-gradient-to-br from-primary/10 to-transparent flex-shrink-0">
+        <div className="p-4 sm:p-6 border-b bg-secondary/60 flex-shrink-0">
           <div className="flex items-center gap-3 mb-2">
             <div className="p-2 rounded-lg bg-primary/20">
               {isIntroStep ? (
@@ -483,14 +495,14 @@ export function OnboardingModal({ userId, email, onComplete, suggestedTopics }: 
                 <Sparkles className="h-5 w-5 text-primary" />
               )}
             </div>
-            <h2 className="text-lg sm:text-xl font-bold">{getStepTitle()}</h2>
+            <Dialog.Title className="text-lg sm:text-xl font-semibold">{getStepTitle()}</Dialog.Title>
           </div>
-          <p className="text-muted-foreground text-sm">
+          <Dialog.Description id="onboarding-description" className="text-muted-foreground text-sm">
             {isIntroStep
               ? 'Quick overview of how Schelling Point works'
               : 'Set up your profile so others can find and connect with you'
             }
-          </p>
+          </Dialog.Description>
           {/* Progress */}
           <div className="flex gap-1 mt-4">
             {Array.from({ length: totalSteps }).map((_, i) => (
@@ -539,7 +551,7 @@ export function OnboardingModal({ userId, email, onComplete, suggestedTopics }: 
                 disabled={isSubmitting}
                 className="btn-primary-glow min-h-[44px]"
               >
-                {isSubmitting ? 'Saving...' : 'Get Started'}
+                {isSubmitting ? 'Saving...' : 'Join the gathering'}
                 <Sparkles className="h-4 w-4 ml-2" />
               </Button>
             )}
@@ -552,12 +564,12 @@ export function OnboardingModal({ userId, email, onComplete, suggestedTopics }: 
                 onClick={() => setStep(introStepCount + 1)}
                 className="text-xs text-muted-foreground hover:text-foreground transition-colors"
               >
-                Skip intro, go to profile setup →
+                Skip to your profile
               </button>
             </div>
           )}
         </div>
       </div>
-    </div>
+    </Dialog.Content></Dialog.Portal></Dialog.Root>
   )
 }

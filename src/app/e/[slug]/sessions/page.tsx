@@ -1,5 +1,6 @@
 'use client'
 
+import { isParticipationOpen } from '@/lib/events/lifecycle'
 import * as React from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
@@ -10,6 +11,7 @@ import { SessionCard } from '@/components/SessionCard'
 import { DashboardLayout } from '@/components/DashboardLayout'
 import { useAuth } from '@/hooks/useAuth'
 import { useEvent, useEventRole } from '@/contexts/EventContext'
+import { getEventDays, formatCalendarDate } from '@/lib/events/dates'
 import { votesToCredits, cn } from '@/lib/utils'
 
 // Helper to format date in timezone as yyyy-MM-dd
@@ -19,17 +21,6 @@ function formatDateInTimezone(date: Date, timezone: string): string {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
-  })
-  return formatter.format(date)
-}
-
-// Helper to format date in timezone as readable day label
-function formatDayLabel(date: Date, timezone: string): string {
-  const formatter = new Intl.DateTimeFormat('en-US', {
-    timeZone: timezone,
-    weekday: 'short',
-    month: 'short',
-    day: 'numeric',
   })
   return formatter.format(date)
 }
@@ -74,11 +65,14 @@ export default function EventSessionsPage() {
   const router = useRouter()
   const { user } = useAuth()
   const event = useEvent()
+  const votingClosed = !isParticipationOpen(event, 'vote')
   const { voteCredits } = useEventRole()
 
   // Use event's vote credits per user
   const totalCredits = voteCredits
 
+  const [actionError, setActionError] = React.useState<string | null>(null)
+  const [loadError, setLoadError] = React.useState(false)
   const [tracks, setTracks] = React.useState<Track[]>([])
   const [sessions, setSessions] = React.useState<any[]>([])
   const [userVotes, setUserVotes] = React.useState<Record<string, number>>({})
@@ -93,20 +87,17 @@ export default function EventSessionsPage() {
   const [day, setDay] = React.useState<string>('all')
   const [showFavoritesOnly, setShowFavoritesOnly] = React.useState(false)
 
+  React.useEffect(() => {
+    const requestedSort = new URLSearchParams(window.location.search).get('sort')
+    if (sortOptions.some(option => option.value === requestedSort)) setSort(requestedSort!)
+  }, [])
+
   // Generate list of event days
   const eventDays = React.useMemo(() => {
-    const days: { date: string; label: string }[] = []
-    const start = new Date(event.startDate)
-    const end = new Date(event.endDate)
-    const current = new Date(start)
-
-    while (current <= end) {
-      const dateStr = formatDateInTimezone(current, event.timezone)
-      const label = formatDayLabel(current, event.timezone)
-      days.push({ date: dateStr, label })
-      current.setDate(current.getDate() + 1)
-    }
-    return days
+    return getEventDays(event.startDate, event.endDate).map(date => ({
+      date,
+      label: formatCalendarDate(date, { weekday: 'short', month: 'short', day: 'numeric' }),
+    }))
   }, [event.startDate, event.endDate, event.timezone])
 
   // Stable sort positions — captures server order on load, prevents jumps during voting
@@ -159,6 +150,7 @@ export default function EventSessionsPage() {
     let mounted = true
 
     const fetchSessions = async () => {
+      setLoadError(false)
       try {
         const response = await fetch(
           `${SUPABASE_URL}/rest/v1/sessions?event_id=eq.${event.id}&status=in.(approved,scheduled)&select=*,venue:venues(name),time_slot:time_slots(label,start_time),track:tracks(id,name,color),cohosts:session_cohosts(profile:profiles(display_name))&order=total_votes.desc`,
@@ -170,7 +162,8 @@ export default function EventSessionsPage() {
           }
         )
 
-        if (response.ok && mounted) {
+        if (!response.ok) throw new Error('Sessions unavailable')
+        if (mounted) {
           const data = await response.json()
           const order: Record<string, number> = {}
           data.forEach((s: any, i: number) => { order[s.id] = i })
@@ -178,6 +171,7 @@ export default function EventSessionsPage() {
           setSessions(data)
         }
       } catch (err) {
+        if (mounted) setLoadError(true)
         console.error('Error fetching sessions:', err)
       } finally {
         if (mounted) {
@@ -251,14 +245,15 @@ export default function EventSessionsPage() {
 
   // Handle vote change
   const handleVote = async (sessionId: string, newVoteCount: number) => {
+    if (votingClosed) return
     if (!user) {
-      router.push('/login')
+      router.push(`/login?returnTo=${encodeURIComponent(`/e/${event.slug}/sessions`)}`)
       return
     }
 
     const token = getAccessToken()
     if (!token) {
-      router.push('/login')
+      router.push(`/login?returnTo=${encodeURIComponent(`/e/${event.slug}/sessions`)}`)
       return
     }
 
@@ -273,9 +268,11 @@ export default function EventSessionsPage() {
       return
     }
 
+    setActionError(null)
     // Optimistic update for user votes
     setUserVotes((prev) => ({ ...prev, [sessionId]: newVoteCount }))
 
+    setActionError(null)
     // Optimistic update for session total_votes (in-place, no re-sort)
     setSessions((prev) =>
       prev.map((s) =>
@@ -326,9 +323,11 @@ export default function EventSessionsPage() {
           throw new Error('Upsert failed')
         }
       }
+      window.dispatchEvent(new CustomEvent('schelling:votes-changed', { detail: { eventId: event.id } }))
       // Note: We no longer call refreshSessions() here to avoid re-sorting
       // Sessions will refresh on page load or manual refresh
     } catch (err) {
+      setActionError('Your vote could not be saved. Please try again.')
       console.error('Error voting:', err)
       // Revert both on error
       setUserVotes((prev) => ({ ...prev, [sessionId]: oldVotes }))
@@ -345,18 +344,19 @@ export default function EventSessionsPage() {
   // Handle favorite toggle
   const handleToggleFavorite = async (sessionId: string) => {
     if (!user) {
-      router.push('/login')
+      router.push(`/login?returnTo=${encodeURIComponent(`/e/${event.slug}/sessions`)}`)
       return
     }
 
     const token = getAccessToken()
     if (!token) {
-      router.push('/login')
+      router.push(`/login?returnTo=${encodeURIComponent(`/e/${event.slug}/sessions`)}`)
       return
     }
 
     const isFavorited = favorites.has(sessionId)
 
+    setActionError(null)
     // Optimistic update
     setFavorites((prev) => {
       const next = new Set(prev)
@@ -371,7 +371,7 @@ export default function EventSessionsPage() {
     try {
       if (isFavorited) {
         // Delete favorite
-        await fetch(
+        const response = await fetch(
           `${SUPABASE_URL}/rest/v1/favorites?user_id=eq.${user.id}&session_id=eq.${sessionId}`,
           {
             method: 'DELETE',
@@ -381,9 +381,10 @@ export default function EventSessionsPage() {
             },
           }
         )
+        if (!response.ok) throw new Error('Save failed')
       } else {
         // Add favorite
-        await fetch(
+        const response = await fetch(
           `${SUPABASE_URL}/rest/v1/favorites`,
           {
             method: 'POST',
@@ -399,8 +400,10 @@ export default function EventSessionsPage() {
             }),
           }
         )
+        if (!response.ok) throw new Error('Save failed')
       }
     } catch (err) {
+      setActionError('Your saved schedule could not be updated. Please try again.')
       console.error('Error toggling favorite:', err)
       // Revert on error
       setFavorites((prev) => {
@@ -506,17 +509,20 @@ export default function EventSessionsPage() {
         <div>
           <h1 className="text-2xl font-display font-bold">Sessions</h1>
           <p className="text-muted-foreground mt-1">
-            Vote on sessions to help determine the schedule
+            {votingClosed ? 'Explore the ideas and people that shaped this gathering. Voting is not open right now.' : 'Find something that sparks your curiosity. Your votes help shape what happens.'}
           </p>
         </div>
 
+        {actionError && <p role="alert" className="sticky top-20 z-10 rounded-xl border bg-card p-4 text-sm text-destructive">{actionError}</p>}
+        {loadError && <div role="alert" className="rounded-xl border p-5"><p>Sessions couldn’t load. Please try again.</p><Button className="mt-3" variant="outline" onClick={() => window.location.reload()}>Try again</Button></div>}
         {/* Search and Filters */}
         <div className="space-y-4">
           <div className="flex gap-3">
             <div className="relative flex-1">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
               <Input
-                placeholder="Search sessions..."
+                aria-label="Search sessions"
+                placeholder="Search ideas, hosts, or topics"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 className="pl-10"
@@ -524,6 +530,7 @@ export default function EventSessionsPage() {
             </div>
             <Button
               variant="outline"
+              aria-expanded={showFilters}
               onClick={() => setShowFilters(!showFilters)}
               className={cn(showFilters && 'bg-accent')}
             >
@@ -705,17 +712,19 @@ export default function EventSessionsPage() {
               remainingCredits={creditsRemaining}
               onVote={handleVote}
               onToggleFavorite={handleToggleFavorite}
-              showVoting={true}
+              showVoting={!votingClosed}
               isLoggedIn={!!user}
               votingMechanism={event.votingMechanism}
             />
           ))}
         </div>
 
-        {filteredSessions.length === 0 && (
+        {!loadError && filteredSessions.length === 0 && (
           <div className="text-center py-12">
-            <p className="text-muted-foreground">No sessions found.</p>
-            {user && (
+            <h2 className="text-xl font-semibold mb-2">{sessions.length ? 'No sessions match just yet.' : 'What could we explore together?'}</h2>
+            <p className="text-muted-foreground">{sessions.length ? 'Try another search or clear your filters.' : isParticipationOpen(event, 'propose') ? 'Be the first to bring an idea to the gathering.' : 'Sessions will appear here as the community shapes the program.'}</p>
+            {sessions.length > 0 && <Button variant="outline" className="mt-4 mr-3" onClick={() => { setSearch(''); setFormat('all'); setTrack('all'); setStatus('all'); setDay('all'); setShowFavoritesOnly(false) }}>Clear filters</Button>}
+            {user && isParticipationOpen(event, 'propose') && (
               <Button asChild className="mt-4">
                 <Link href={`/e/${event.slug}/propose`}>Propose a Session</Link>
               </Button>

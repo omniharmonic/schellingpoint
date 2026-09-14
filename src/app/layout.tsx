@@ -1,10 +1,7 @@
 import type { Metadata } from 'next'
-import { Inter, Space_Mono } from 'next/font/google'
 import './globals.css'
 import { AuthProvider } from '@/hooks/useAuth'
 
-const inter = Inter({ subsets: ['latin'], variable: '--font-inter' })
-const spaceMono = Space_Mono({ weight: ['400', '700'], subsets: ['latin'], variable: '--font-mono' })
 
 export const metadata: Metadata = {
   metadataBase: new URL(
@@ -14,27 +11,17 @@ export const metadata: Metadata = {
   title: 'Schelling Point',
   description: 'Create and manage unconferences, hackathons, and community events. Propose sessions, vote with quadratic voting, and shape the schedule together.',
   icons: {
-    icon: '/favicon.png',
-    apple: '/apple-touch-icon.png',
+    icon: '/icon.svg',
   },
   openGraph: {
     title: 'Schelling Point',
     description: 'Create and manage unconferences, hackathons, and community events. Propose sessions, vote with quadratic voting, and shape the schedule together.',
-    images: [
-      {
-        url: '/og-image.png',
-        width: 1200,
-        height: 630,
-        alt: 'Schelling Point - Unconference Platform',
-      },
-    ],
     type: 'website',
   },
   twitter: {
-    card: 'summary_large_image',
+    card: 'summary',
     title: 'Schelling Point',
     description: 'Create and manage unconferences, hackathons, and community events.',
-    images: ['/og-image.png'],
   },
 }
 
@@ -44,8 +31,8 @@ export default function RootLayout({
   children: React.ReactNode
 }) {
   return (
-    <html lang="en" className="dark overflow-x-hidden">
-      <body className={`${inter.variable} ${spaceMono.variable} ${inter.className} min-h-screen bg-background antialiased overflow-x-hidden`}>
+    <html lang="en" className="light">
+      <body className="min-h-screen bg-background antialiased">
         <AuthProvider>
           {children}
         </AuthProvider>

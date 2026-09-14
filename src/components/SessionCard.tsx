@@ -2,6 +2,7 @@
 
 import * as React from 'react'
 import Link from 'next/link'
+import { useEvent } from '@/contexts/EventContext'
 import { Heart, Mic, Wrench, MessageSquare, Users, Monitor, Plus, Minus, MapPin, Clock, ChevronRight } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -16,9 +17,10 @@ const formatIcons: Record<string, React.ReactNode> = {
   demo: <Monitor className="h-3.5 w-3.5" strokeWidth={1.5} />,
 }
 
-function formatTime(isoString: string): string {
+function formatTime(isoString: string, timeZone: string): string {
   const date = new Date(isoString)
   return date.toLocaleTimeString('en-US', {
+    timeZone,
     hour: 'numeric',
     minute: '2-digit',
     hour12: true,
@@ -72,6 +74,8 @@ export function SessionCard({
   userRsvpStatus,
   votingMechanism = 'quadratic',
 }: SessionCardProps) {
+  const event = useEvent()
+  const eventIsOver = event.status === 'completed' || event.status === 'archived'
   const currentCredits = votesToCredits(userVotes, votingMechanism)
   const costToAdd = nextVoteCost(userVotes, votingMechanism)
   const canAddVote = remainingCredits >= costToAdd
@@ -94,12 +98,12 @@ export function SessionCard({
 
   return (
     <Card
-      accent="left"
+      accent="top"
       accentColor={trackColor}
       className={cn(
-        'overflow-hidden group transition-all duration-200',
+        'overflow-hidden group border-t-4 transition-all duration-200',
         'hover:border-[hsl(var(--signal)_/_0.3)]',
-        'hover:shadow-[inset_3px_0_0_var(--tw-shadow-color)]',
+        'hover:shadow-[0_6px_0_hsl(var(--foreground)/.06)]',
       )}
       style={{ '--tw-shadow-color': trackColor } as React.CSSProperties}
     >
@@ -108,12 +112,12 @@ export function SessionCard({
           {/* Header: format label + duration (monospace system layer) */}
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 text-muted-foreground">
-              <span className="flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-wider">
+              <span className="flex items-center gap-1.5 text-[11px] tracking-wider">
                 {formatIcons[session.format] || <Mic className="h-3.5 w-3.5" strokeWidth={1.5} />}
                 {session.format}
               </span>
               <span className="text-border">·</span>
-              <span className="font-mono text-[11px] tracking-wider">{session.duration}M</span>
+              <span className="text-[11px] tracking-wider">{session.duration} min</span>
               {session.track && (
                 <>
                   <span className="text-border hidden sm:inline">·</span>
@@ -131,6 +135,8 @@ export function SessionCard({
             {/* Favorite */}
             {onToggleFavorite && isLoggedIn && (
               <button
+                aria-label={isFavorited ? `Unsave ${session.title}` : `Save ${session.title}`}
+                aria-pressed={isFavorited}
                 onClick={() => onToggleFavorite(session.id)}
                 title={isFavorited ? 'Remove from My Schedule' : 'Save to My Schedule'}
                 className={cn(
@@ -147,7 +153,7 @@ export function SessionCard({
 
           {/* Title (human layer — display font) */}
           <Link href={`/e/${eventSlug}/sessions/${session.id}`} className="block">
-            <h3 className="font-display font-semibold text-[15px] leading-snug line-clamp-2 group-hover:text-primary transition-colors">
+            <h3 className="font-display font-semibold text-lg leading-snug line-clamp-2 group-hover:text-primary transition-colors">
               {session.title}
               <ChevronRight className="inline h-3.5 w-3.5 ml-1 opacity-0 group-hover:opacity-100 transition-opacity" />
             </h3>
@@ -183,7 +189,7 @@ export function SessionCard({
               {session.topic_tags.slice(0, 3).map((tag) => (
                 <span
                   key={tag}
-                  className="inline-flex items-center rounded-sm border border-border bg-surface-2 px-2 py-0.5 text-[10px] font-mono uppercase tracking-wider text-muted-foreground"
+                  className="inline-flex items-center rounded-sm border border-border bg-surface-2 px-2 py-0.5 text-xs text-muted-foreground"
                 >
                   {tag}
                 </span>
@@ -193,7 +199,7 @@ export function SessionCard({
 
           {/* Scheduled info */}
           {(session.venue || session.is_self_hosted || session.self_hosted_start_time) && (
-            <div className="flex items-center gap-3 text-xs font-mono text-muted-foreground bg-surface-2 rounded-md p-2.5">
+            <div className="flex items-center gap-3 text-xs text-muted-foreground bg-surface-2 rounded-md p-2.5">
               <span className="flex items-center gap-1.5">
                 <MapPin className="h-3.5 w-3.5" strokeWidth={1.5} />
                 {session.is_self_hosted ? (
@@ -205,7 +211,7 @@ export function SessionCard({
               {(session.time_slot?.start_time || session.self_hosted_start_time) && (
                 <span className="flex items-center gap-1.5">
                   <Clock className="h-3.5 w-3.5" strokeWidth={1.5} />
-                  {formatTime(session.time_slot?.start_time || session.self_hosted_start_time!)}
+                  {formatTime(session.time_slot?.start_time || session.self_hosted_start_time!, event.timezone)}
                 </span>
               )}
             </div>
@@ -216,10 +222,10 @@ export function SessionCard({
             <div className="flex items-center gap-3">
               {/* Signal strength — vote count as monospace readout */}
               <div className="flex items-baseline gap-1.5">
-                <span className="font-mono text-lg font-bold text-primary tabular-nums">
+                <span className="text-lg font-bold text-primary tabular-nums">
                   {session.total_votes}
                 </span>
-                <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+                <span className="text-xs text-muted-foreground">
                   votes
                 </span>
               </div>
@@ -234,32 +240,34 @@ export function SessionCard({
             </div>
 
             {/* Voting controls — precise instrument buttons */}
-            {showVoting && isLoggedIn && onVote && (
+            {showVoting && !eventIsOver && isLoggedIn && onVote && (
               <div className="flex items-center gap-1.5">
                 <Button
                   size="icon-sm"
                   variant="outline"
+                  aria-label={`Remove a vote from ${session.title}`}
                   onClick={handleRemoveVote}
                   disabled={userVotes === 0}
-                  className="rounded-md"
+                  className="rounded-lg"
                 >
                   <Minus className="h-3.5 w-3.5" strokeWidth={1.5} />
                 </Button>
 
                 <div className="min-w-[52px] text-center">
-                  <div className="font-mono font-bold text-sm tabular-nums">{userVotes}</div>
-                  <div className="font-mono text-[9px] text-muted-foreground uppercase tracking-wider">
-                    → {currentCredits} cr
+                  <div className="font-bold text-sm tabular-nums">{userVotes}</div>
+                  <div className="text-xs text-muted-foreground tracking-wider">
+                    {currentCredits} credits
                   </div>
                 </div>
 
                 <Button
                   size="icon-sm"
                   variant="outline"
+                  aria-label={`Add a vote to ${session.title} for ${costToAdd} credits`}
                   onClick={handleAddVote}
                   disabled={!canAddVote || !showAddControl}
                   title={isApproval && userVotes > 0 ? 'Already approved' : undefined}
-                  className="rounded-md"
+                  className="rounded-lg"
                 >
                   <Plus className="h-3.5 w-3.5" strokeWidth={1.5} />
                 </Button>

@@ -87,7 +87,7 @@ export default function TicketDetailPage() {
       try {
         const token = getAccessToken()
         if (!token) {
-          router.push('/login')
+          router.push(`/login?redirect=${encodeURIComponent(`/e/${event.slug}/tickets/${ticketId}`)}`)
           return
         }
 
@@ -145,7 +145,7 @@ export default function TicketDetailPage() {
             <p className="text-muted-foreground mb-4">
               You need to be logged in to view your ticket.
             </p>
-            <Button onClick={() => router.push('/login')}>Log In</Button>
+            <Button onClick={() => router.push(`/login?redirect=${encodeURIComponent(`/e/${event.slug}/tickets/${ticketId}`)}`)}>Log In</Button>
           </CardContent>
         </Card>
       </div>
@@ -211,6 +211,7 @@ export default function TicketDetailPage() {
                 <Calendar className="h-4 w-4 text-muted-foreground" />
                 <span>
                   {new Date(event.startDate).toLocaleDateString('en-US', {
+                    timeZone: 'UTC',
                     weekday: 'long',
                     year: 'numeric',
                     month: 'long',
