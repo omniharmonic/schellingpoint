@@ -8,6 +8,10 @@ import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 import { useTracks } from '@/hooks/useTracks'
+import { useEvent } from '@/contexts/EventContext'
+import { getEventDays, formatCalendarDate } from '@/lib/events/dates'
+import { parseTimeInTimezone } from '@/lib/events/timezone'
+import type { Event } from '@/types/event'
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!
 const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
@@ -25,11 +29,18 @@ const suggestedTags = [
   'community', 'education', 'tooling', 'research', 'design'
 ]
 
-const EVENT_DAYS = [
-  { value: '2026-02-13', label: 'Friday, Feb 13' },
-  { value: '2026-02-14', label: 'Saturday, Feb 14' },
-  { value: '2026-02-15', label: 'Sunday, Feb 15' },
-]
+/**
+ * The modal is normally rendered inside an event's layout (EventProvider).
+ * If it is ever mounted outside one, degrade gracefully instead of throwing:
+ * the self-hosted day picker is simply unavailable.
+ */
+function useOptionalEvent(): Event | null {
+  try {
+    return useEvent()
+  } catch {
+    return null
+  }
+}
 
 const TIME_OPTIONS: { value: string; label: string }[] = []
 for (let h = 9; h <= 22; h++) {
@@ -42,19 +53,26 @@ for (let h = 9; h <= 22; h++) {
   }
 }
 
-function buildTimestamp(day: string, time: string): string {
-  return `${day}T${time}:00-07:00`
+/** Build a UTC ISO timestamp for a wall-clock day/time in the event's timezone. */
+function buildTimestamp(day: string, time: string, timezone: string): string {
+  return parseTimeInTimezone(time, day, timezone).toISOString()
 }
 
-function parseTimestamp(iso: string | null | undefined): { day: string; time: string } {
+/** Split a stored timestamp into the event-timezone calendar day and HH:MM. */
+function parseTimestamp(iso: string | null | undefined, timezone: string | null): { day: string; time: string } {
   if (!iso) return { day: '', time: '' }
   const d = new Date(iso)
-  const year = d.getFullYear()
-  const month = String(d.getMonth() + 1).padStart(2, '0')
-  const dayNum = String(d.getDate()).padStart(2, '0')
-  const hh = String(d.getHours()).padStart(2, '0')
-  const mm = String(d.getMinutes()).padStart(2, '0')
-  return { day: `${year}-${month}-${dayNum}`, time: `${hh}:${mm}` }
+  if (Number.isNaN(d.getTime())) return { day: '', time: '' }
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone || undefined,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(d)
+  const part = (type: string) => parts.find((x) => x.type === type)?.value ?? ''
+  return {
+    day: `${part('year')}-${part('month')}-${part('day')}`,
+    time: `${part('hour')}:${part('minute')}`,
+  }
 }
 
 function getAccessToken(): string | null {
@@ -224,6 +242,18 @@ export function EditSessionModal({
   isAdmin, hostId, hostName, host, cohosts,
 }: EditSessionModalProps) {
   const { tracks } = useTracks()
+  const event = useOptionalEvent()
+  const eventTimezone = event?.timezone ?? null
+
+  // Event days (inclusive, event-timezone calendar dates) for the self-hosted day picker
+  const eventDays = React.useMemo(() => {
+    if (!event) return []
+    return getEventDays(event.startDate, event.endDate).map((date) => ({
+      value: date,
+      label: formatCalendarDate(date, { weekday: 'short', month: 'short', day: 'numeric' }),
+    }))
+  }, [event])
+
   const [title, setTitle] = React.useState(session.title)
   const [description, setDescription] = React.useState(session.description || '')
   const [format, setFormat] = React.useState(session.format)
@@ -238,9 +268,9 @@ export function EditSessionModal({
   // Self-hosted state
   const [isSelfHosted, setIsSelfHosted] = React.useState(session.is_self_hosted || false)
   const [customLocation, setCustomLocation] = React.useState(session.custom_location || '')
-  const [selfHostedDay, setSelfHostedDay] = React.useState(() => parseTimestamp(session.self_hosted_start_time).day)
-  const [selfHostedStartTime, setSelfHostedStartTime] = React.useState(() => parseTimestamp(session.self_hosted_start_time).time)
-  const [selfHostedEndTime, setSelfHostedEndTime] = React.useState(() => parseTimestamp(session.self_hosted_end_time).time)
+  const [selfHostedDay, setSelfHostedDay] = React.useState(() => parseTimestamp(session.self_hosted_start_time, eventTimezone).day)
+  const [selfHostedStartTime, setSelfHostedStartTime] = React.useState(() => parseTimestamp(session.self_hosted_start_time, eventTimezone).time)
+  const [selfHostedEndTime, setSelfHostedEndTime] = React.useState(() => parseTimestamp(session.self_hosted_end_time, eventTimezone).time)
 
   // Admin host editing state
   const [selectedHost, setSelectedHost] = React.useState<ProfileResult | null>(host || null)
@@ -257,13 +287,13 @@ export function EditSessionModal({
     setTelegramGroupUrl(session?.telegram_group_url || '')
     setIsSelfHosted(session.is_self_hosted || false)
     setCustomLocation(session.custom_location || '')
-    setSelfHostedDay(parseTimestamp(session.self_hosted_start_time).day)
-    setSelfHostedStartTime(parseTimestamp(session.self_hosted_start_time).time)
-    setSelfHostedEndTime(parseTimestamp(session.self_hosted_end_time).time)
+    setSelfHostedDay(parseTimestamp(session.self_hosted_start_time, eventTimezone).day)
+    setSelfHostedStartTime(parseTimestamp(session.self_hosted_start_time, eventTimezone).time)
+    setSelfHostedEndTime(parseTimestamp(session.self_hosted_end_time, eventTimezone).time)
     setSelectedHost(host || null)
     setHostNameText(hostName || '')
     setEditCohosts(cohosts || [])
-  }, [session, host, hostName, cohosts])
+  }, [session, host, hostName, cohosts, eventTimezone])
 
   const handleAddTag = (tag: string) => {
     const normalizedTag = tag.toLowerCase().trim()
@@ -312,10 +342,20 @@ export function EditSessionModal({
       return
     }
 
+    if (isSelfHosted && selfHostedDay && (selfHostedStartTime || selfHostedEndTime) && !eventTimezone) {
+      setError('Event timezone is unavailable, so the self-hosted time cannot be saved.')
+      return
+    }
+    if (isSelfHosted && selfHostedDay && selfHostedStartTime && selfHostedEndTime && selfHostedEndTime <= selfHostedStartTime) {
+      setError('The end time must be after the start time.')
+      return
+    }
+
     setIsSaving(true)
     setError(null)
 
     try {
+      const canBuildTimes = isSelfHosted && !!selfHostedDay && !!eventTimezone
       // Build session PATCH body
       const patchBody: Record<string, any> = {
         title: title.trim(),
@@ -325,25 +365,31 @@ export function EditSessionModal({
         track_id: trackId,
         is_self_hosted: isSelfHosted,
         custom_location: isSelfHosted ? customLocation.trim() || null : null,
-        self_hosted_start_time: isSelfHosted && selfHostedDay && selfHostedStartTime
-          ? buildTimestamp(selfHostedDay, selfHostedStartTime) : null,
-        self_hosted_end_time: isSelfHosted && selfHostedDay && selfHostedEndTime
-          ? buildTimestamp(selfHostedDay, selfHostedEndTime) : null,
+        self_hosted_start_time: canBuildTimes && selfHostedStartTime
+          ? buildTimestamp(selfHostedDay, selfHostedStartTime, eventTimezone!) : null,
+        self_hosted_end_time: canBuildTimes && selfHostedEndTime
+          ? buildTimestamp(selfHostedDay, selfHostedEndTime, eventTimezone!) : null,
         telegram_group_url: telegramGroupUrl.trim() || null,
       }
 
-      if (isSelfHosted) {
-        patchBody.venue_id = null
-        patchBody.time_slot_id = null
-      }
-
+      // Organizer-only columns. A DB guard rejects (42501) any user-JWT update that
+      // touches status, venue_id, time_slot_id, host_id, session_type, etc. unless the
+      // caller is an event owner/admin/moderator, so hosts/co-hosts must never send
+      // them, not even unchanged. Non-organizers switching to self-hosted only send the
+      // self_hosted_* fields; organizers additionally clear the official slot.
       if (isAdmin) {
+        if (isSelfHosted) {
+          patchBody.venue_id = null
+          patchBody.time_slot_id = null
+        }
         patchBody.host_id = selectedHost?.id || null
         patchBody.host_name = hostNameText.trim() || null
       }
 
+      // Scope the update to this event so a row can never be edited across tenants
+      const eventScope = event ? `&event_id=eq.${event.id}` : ''
       const response = await fetch(
-        `${SUPABASE_URL}/rest/v1/sessions?id=eq.${session.id}`,
+        `${SUPABASE_URL}/rest/v1/sessions?id=eq.${session.id}${eventScope}`,
         {
           method: 'PATCH',
           headers: {
@@ -378,10 +424,10 @@ export function EditSessionModal({
           'Prefer': 'return=minimal',
         }
 
-        await Promise.all([
+        const cohostResults = await Promise.allSettled([
           ...removed.map((userId) =>
             fetch(
-              `${SUPABASE_URL}/rest/v1/session_cohosts?session_id=eq.${session.id}&user_id=eq.${userId}`,
+              `${SUPABASE_URL}/rest/v1/session_cohosts?session_id=eq.${session.id}&user_id=eq.${userId}${eventScope}`,
               { method: 'DELETE', headers }
             )
           ),
@@ -391,11 +437,21 @@ export function EditSessionModal({
               {
                 method: 'POST',
                 headers,
-                body: JSON.stringify({ session_id: session.id, user_id: userId }),
+                body: JSON.stringify({ session_id: session.id, user_id: userId, ...(event ? { event_id: event.id } : {}) }),
               }
             )
           ),
         ])
+        // fetch() resolves on HTTP errors, so a rejected RLS write would otherwise
+        // close the modal as if the roster had changed.
+        const failedCohostWrites = cohostResults.filter(
+          (r) => r.status === 'rejected' || !r.value.ok
+        ).length
+        if (failedCohostWrites > 0) {
+          throw new Error(
+            `Session saved, but ${failedCohostWrites} co-host change${failedCohostWrites === 1 ? '' : 's'} could not be applied. Reopen the session to retry.`
+          )
+        }
       }
 
       onSave()
@@ -644,8 +700,11 @@ export function EditSessionModal({
                 {/* Day Picker */}
                 <div className="space-y-1.5">
                   <label className="text-xs font-medium text-muted-foreground">Day</label>
+                  {eventDays.length === 0 && (
+                    <p className="text-xs text-muted-foreground">Event dates are unavailable.</p>
+                  )}
                   <div className="flex flex-wrap gap-1.5">
-                    {EVENT_DAYS.map((day) => (
+                    {eventDays.map((day) => (
                       <button
                         key={day.value}
                         type="button"

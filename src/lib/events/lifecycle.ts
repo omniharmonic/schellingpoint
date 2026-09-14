@@ -23,14 +23,52 @@ import { EventStatus } from '@/types/event';
  */
 export const STATUS_TRANSITIONS: Record<EventStatus, EventStatus[]> = {
   draft: ['published'],
-  published: ['proposals_open', 'draft'],
-  proposals_open: ['voting_open', 'published'],
-  voting_open: ['scheduling', 'proposals_open'],
-  scheduling: ['live', 'voting_open'],
+  published: ['proposals_open', 'draft', 'completed'],
+  proposals_open: ['voting_open', 'published', 'completed'],
+  voting_open: ['scheduling', 'proposals_open', 'completed'],
+  scheduling: ['live', 'voting_open', 'completed'],
   live: ['completed'], // No going back from live
   completed: ['archived'],
   archived: [], // Terminal state
 };
+
+/** Short action labels for moving from one status to another (organizer UI). */
+export function getTransitionLabel(from: EventStatus, to: EventStatus): string {
+  if (to === 'archived') return 'Archive gathering';
+  if (to === 'completed') return from === 'live' ? 'Mark as completed' : 'End early and mark completed';
+  if (isStatusBefore(to, from)) {
+    const back: Partial<Record<EventStatus, string>> = {
+      draft: 'Unpublish (back to draft)',
+      published: 'Close proposals',
+      proposals_open: 'Reopen proposals (pause voting)',
+      voting_open: 'Reopen voting',
+    };
+    return back[to] || `Back to ${STATUS_INFO[to].label.toLowerCase()}`;
+  }
+  const forward: Partial<Record<EventStatus, string>> = {
+    published: 'Publish gathering',
+    proposals_open: 'Open proposals',
+    voting_open: 'Open voting',
+    scheduling: 'Start scheduling',
+    live: 'Go live',
+  };
+  return forward[to] || `Move to ${STATUS_INFO[to].label.toLowerCase()}`;
+}
+
+/** Archiving is only offered once a gathering has completed. */
+export function canArchive(status: EventStatus): boolean {
+  return isValidTransition(status, 'archived');
+}
+
+/** Hard deletion is only allowed for drafts; everything else is archived instead. */
+export function canDelete(status: EventStatus): boolean {
+  return status === 'draft';
+}
+
+/** Transitions that cannot be reversed from the settings page. */
+export function isIrreversibleTransition(to: EventStatus): boolean {
+  return to === 'live' || to === 'completed' || to === 'archived';
+}
 
 /**
  * Ordered list of statuses in the lifecycle (forward direction only)

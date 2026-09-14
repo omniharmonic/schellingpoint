@@ -43,14 +43,22 @@ export async function POST(
     return NextResponse.json({ error: 'Invite has expired' }, { status: 400 })
   }
 
-  // Check if user is already the primary host
+  // Load the session (and its event) so we can scope the co-host row and
+  // return a routable event slug to the client.
   const { data: session } = await admin
     .from('sessions')
-    .select('host_id')
+    .select('id, host_id, event_id, event:events(slug)')
     .eq('id', invite.session_id)
     .single()
 
-  if (session?.host_id === user.id) {
+  if (!session) {
+    return NextResponse.json({ error: 'Session not found' }, { status: 404 })
+  }
+
+  const eventSlug: string | null = (session as any).event?.slug ?? null
+
+  // Check if user is already the primary host
+  if (session.host_id === user.id) {
     return NextResponse.json({ error: 'You are already the primary host of this session' }, { status: 400 })
   }
 
@@ -66,23 +74,14 @@ export async function POST(
     return NextResponse.json({
       error: 'You are already a co-host of this session',
       session_id: invite.session_id,
+      event_slug: eventSlug,
     }, { status: 409 })
   }
 
-  // Add as co-host
-  const { error: insertError } = await admin
-    .from('session_cohosts')
-    .insert({
-      session_id: invite.session_id,
-      user_id: user.id,
-    })
-
-  if (insertError) {
-    return NextResponse.json({ error: insertError.message }, { status: 500 })
-  }
-
-  // Mark invite as accepted
-  await admin
+  // Claim the invite first. The status guard makes this atomic against a
+  // concurrent accept, and checking the error means a failed transition can
+  // never leave a silently reusable "pending" invite behind.
+  const { data: claimed, error: claimError } = await admin
     .from('cohost_invites')
     .update({
       status: 'accepted',
@@ -90,6 +89,35 @@ export async function POST(
       accepted_at: new Date().toISOString(),
     })
     .eq('id', invite.id)
+    .eq('status', 'pending')
+    .select('id')
+    .maybeSingle()
 
-  return NextResponse.json({ session_id: invite.session_id })
+  if (claimError) {
+    console.error('[invite/accept] failed to mark invite accepted:', claimError.message)
+    return NextResponse.json({ error: claimError.message }, { status: 500 })
+  }
+  if (!claimed) {
+    return NextResponse.json({ error: 'Invite is no longer pending' }, { status: 409 })
+  }
+
+  // Add as co-host (event-scoped)
+  const { error: insertError } = await admin
+    .from('session_cohosts')
+    .insert({
+      session_id: invite.session_id,
+      user_id: user.id,
+      event_id: session.event_id,
+    })
+
+  if (insertError) {
+    // Best-effort rollback so the invite can be retried
+    await admin
+      .from('cohost_invites')
+      .update({ status: 'pending', accepted_by: null, accepted_at: null })
+      .eq('id', invite.id)
+    return NextResponse.json({ error: insertError.message }, { status: 500 })
+  }
+
+  return NextResponse.json({ session_id: invite.session_id, event_slug: eventSlug })
 }

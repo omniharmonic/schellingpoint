@@ -1,5 +1,5 @@
 import { createAdminClient } from '@/lib/supabase/server'
-import { validateApiKey } from '@/lib/api/auth'
+import { validateApiKey, resolvePartnerEvent } from '@/lib/api/auth'
 import { apiSuccess, unauthorized, badRequest, methodNotAllowed } from '@/lib/api/response'
 
 const TRACK_FIELDS = 'id,name,slug,description,color,lead_name,is_active,created_at'
@@ -8,9 +8,14 @@ export async function GET(request: Request) {
   if (!validateApiKey(request)) return unauthorized()
 
   const supabase = await createAdminClient()
+
+  const resolved = await resolvePartnerEvent(request, supabase)
+  if ('error' in resolved) return resolved.error
+
   const { data, error } = await supabase
     .from('tracks')
     .select(TRACK_FIELDS)
+    .eq('event_id', resolved.event.id)
     .order('name')
 
   if (error) {

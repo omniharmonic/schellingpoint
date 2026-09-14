@@ -20,11 +20,11 @@ Canonical repo (owner: omniharmonic): `https://github.com/omniharmonic/schelling
 
 ## Tech Stack
 
-- **Framework**: Next.js 14 (App Router)
+- **Framework**: Next.js 15 (App Router)
 - **Database**: Supabase (PostgreSQL + Auth + Storage)
 - **Styling**: Tailwind CSS + shadcn/ui
 - **Email**: Resend
-- **Payments**: Stripe (planned)
+- **Payments**: Stripe Checkout + Connect Express
 
 ## Key Architectural Decisions
 
@@ -112,9 +112,10 @@ npx supabase db push
 
 ## Current Bugs/Limitations
 
-- Private events can't receive members (no invitation system yet)
-- Email templates still have hardcoded "EthBoulder" references
-- No notification system yet (Phase 4)
+- Push notifications are not implemented (toggle disabled in notification settings)
+- `tests/e2e.spec.ts` and `tests/new-features.spec.ts` are stale; `npm test` runs the maintained suites
+- Notification emails depend on the Vercel cron in `vercel.json` and a `CRON_SECRET` env var
+- Paid ticketing needs `STRIPE_SECRET_KEY`; Stripe Connect onboarding degrades to 503 without it
 
 ## Don't
 

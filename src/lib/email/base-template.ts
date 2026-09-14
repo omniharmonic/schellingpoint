@@ -3,6 +3,15 @@
  * Used by all notification emails for consistent styling
  */
 
+/**
+ * Public origin of the app, used for absolute links and assets in emails.
+ * Falls back to the production domain when NEXT_PUBLIC_APP_URL is unset.
+ */
+export function appUrl(): string {
+  const configured = process.env.NEXT_PUBLIC_APP_URL?.trim()
+  return (configured || 'https://schellingpoint.app').replace(/\/+$/, '')
+}
+
 export interface BaseEmailParams {
   eventName: string
   eventLogoUrl?: string
@@ -167,7 +176,7 @@ export function buildBaseEmail(params: BaseEmailParams): string {
           <tr>
             <td align="center" style="padding: 24px 20px;">
               <p style="margin: 0; font-size: 11px; color: #484f58;">
-                Powered by <a href="https://schellingpoint.city" style="color: #6e7681; text-decoration: none;">Schelling Point</a>
+                Powered by <a href="${appUrl()}" style="color: #6e7681; text-decoration: none;">Schelling Point</a>
               </p>
             </td>
           </tr>

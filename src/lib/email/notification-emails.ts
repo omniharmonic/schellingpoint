@@ -3,7 +3,7 @@
  * Uses the base template for consistent styling
  */
 
-import { buildBaseEmail, type BaseEmailParams } from './base-template'
+import { buildBaseEmail, appUrl as getAppUrl, type BaseEmailParams } from './base-template'
 
 // Common event info interface
 interface EventInfo {
@@ -14,8 +14,8 @@ interface EventInfo {
   location?: string
 }
 
-// Build app URL for links
-const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://schellingpoint.city'
+// Build app URL for links (shared helper: NEXT_PUBLIC_APP_URL, else production domain)
+const appUrl = getAppUrl()
 
 // =============================================================================
 // SESSION STATUS EMAILS

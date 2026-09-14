@@ -198,6 +198,15 @@ export default function AdminSchedulePage() {
   } | null>(null)
   const [selectedAssignments, setSelectedAssignments] = React.useState<Set<string>>(new Set())
 
+  // Inline notice for auto-schedule results: successes clear themselves, errors persist.
+  const [notice, setNotice] = React.useState<{ kind: 'success' | 'error'; message: string } | null>(null)
+
+  React.useEffect(() => {
+    if (notice?.kind !== 'success') return
+    const timer = window.setTimeout(() => setNotice(null), 5000)
+    return () => window.clearTimeout(timer)
+  }, [notice])
+
   // Publish workflow state
   const [showPublishModal, setShowPublishModal] = React.useState(false)
   const [publishStatus, setPublishStatus] = React.useState<{
@@ -676,7 +685,7 @@ export default function AdminSchedulePage() {
 
       if (!response.ok) {
         const data = await response.json()
-        alert(data.error || 'Failed to generate auto-schedule')
+        setNotice({ kind: 'error', message: data.error || 'Failed to generate auto-schedule' })
         setShowAutoSchedule(false)
         return
       }
@@ -687,7 +696,7 @@ export default function AdminSchedulePage() {
       setSelectedAssignments(new Set(result.assignments.map((a: { sessionId: string }) => a.sessionId)))
     } catch (err) {
       console.error('Auto-schedule error:', err)
-      alert('Failed to generate auto-schedule')
+      setNotice({ kind: 'error', message: 'Failed to generate auto-schedule' })
       setShowAutoSchedule(false)
     } finally {
       setAutoScheduleLoading(false)
@@ -707,12 +716,9 @@ export default function AdminSchedulePage() {
     )
 
     if (assignmentsToApply.length === 0) {
-      alert('No assignments selected')
+      setNotice({ kind: 'error', message: 'No assignments selected' })
       return
     }
-
-    console.log('[Auto-schedule] Applying assignments:', assignmentsToApply.length)
-    console.log('[Auto-schedule] Sessions before apply:', sessions.length)
 
     setAutoScheduleLoading(true)
 
@@ -731,20 +737,19 @@ export default function AdminSchedulePage() {
       if (!response.ok) {
         const data = await response.json()
         console.error('[Auto-schedule] Apply failed:', data)
-        alert(data.error || 'Failed to apply auto-schedule')
+        setNotice({ kind: 'error', message: data.error || 'Failed to apply auto-schedule' })
         return
       }
 
       const data = await response.json()
-      console.log('[Auto-schedule] Server response:', data)
 
       // Update local state with only the applied assignments
       const assignmentMap = new Map(
         assignmentsToApply.map((a) => [a.sessionId, { slotId: a.slotId, venueId: a.venueId }])
       )
 
-      setSessions((prev) => {
-        const updated = prev.map((s) => {
+      setSessions((prev) =>
+        prev.map((s) => {
           const assignment = assignmentMap.get(s.id)
           if (assignment) {
             return {
@@ -756,10 +761,7 @@ export default function AdminSchedulePage() {
           }
           return s
         })
-        console.log('[Auto-schedule] Sessions after apply:', updated.length)
-        console.log('[Auto-schedule] Unscheduled after apply:', updated.filter(s => (s.status === 'approved' || s.status === 'scheduled') && !s.time_slot_id).length)
-        return updated
-      })
+      )
 
       // Clear history after auto-schedule
       setHistory([])
@@ -769,10 +771,13 @@ export default function AdminSchedulePage() {
       setAutoScheduleResult(null)
       setSelectedAssignments(new Set())
 
-      alert(`Applied ${data.applied} of ${assignmentsToApply.length} assignments successfully!`)
+      setNotice({
+        kind: 'success',
+        message: `Applied ${data.applied} of ${assignmentsToApply.length} assignment${assignmentsToApply.length === 1 ? '' : 's'}.`,
+      })
     } catch (err) {
       console.error('Apply auto-schedule error:', err)
-      alert('Failed to apply auto-schedule')
+      setNotice({ kind: 'error', message: 'Failed to apply auto-schedule' })
     } finally {
       setAutoScheduleLoading(false)
     }
@@ -860,6 +865,17 @@ export default function AdminSchedulePage() {
   return (
     <>
     <div className="mb-6"><h1 className="font-semibold">Schedule builder</h1><p className="text-muted-foreground mt-2">Bring ideas into the room. Arrange sessions, resolve conflicts, and publish when you’re ready.</p></div>
+    {notice && (
+      <p
+        role={notice.kind === 'error' ? 'alert' : 'status'}
+        className={cn(
+          'mb-4 rounded-xl border bg-card p-4 text-sm',
+          notice.kind === 'error' ? 'border-destructive/30 text-destructive' : 'border-primary/30'
+        )}
+      >
+        {notice.message}
+      </p>
+    )}
     <div className="relative flex min-h-[600px] h-[calc(100dvh-220px)] calendar-workspace overflow-hidden bg-card">
         {/* Session Tray - Left Sidebar */}
         <div className={cn(

@@ -1,5 +1,5 @@
 import { EventAccessGate } from '@/components/EventAccessGate';
-import { getEventBySlug } from '@/lib/events';
+import { getEventBySlug, getEventAccessReason } from '@/lib/events';
 import { EventProvider } from '@/contexts/EventContext';
 
 interface EventLayoutProps {
@@ -12,7 +12,7 @@ export default async function EventLayout({ params, children }: EventLayoutProps
   const event = await getEventBySlug(slug);
 
   if (!event) {
-    return <EventAccessGate />;
+    return <EventAccessGate reason={await getEventAccessReason(slug)} />;
   }
 
   return <EventProvider event={event}>{children}</EventProvider>;
@@ -24,8 +24,10 @@ export async function generateMetadata({ params }: { params: Promise<{ slug: str
   const event = await getEventBySlug(slug);
 
   if (!event) {
+    const reason = await getEventAccessReason(slug);
     return {
-      title: 'Event Not Found',
+      title: reason === 'unknown' ? 'Event Not Found' : 'Gathering not available',
+      robots: { index: false },
     };
   }
 

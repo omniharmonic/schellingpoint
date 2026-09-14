@@ -63,7 +63,7 @@ export async function POST(
   const inviterName = inviterProfile?.display_name || inviterProfile?.email || 'An event organizer'
 
   // Parse request
-  let body: { emails?: string[]; role?: string; expiresInDays?: number }
+  let body: { emails?: string[]; role?: string; expiresInDays?: number; max_uses?: unknown }
   try {
     body = await request.json()
   } catch {
@@ -75,15 +75,35 @@ export async function POST(
     return NextResponse.json({ error: 'Invalid role' }, { status: 400 })
   }
 
+  const isLinkInvite = !body.emails || body.emails.length === 0
+
+  // max_uses: positive integer, or null/undefined for unlimited (link invites only)
+  let maxUses: number | null = null
+  if (body.max_uses !== undefined && body.max_uses !== null && body.max_uses !== '') {
+    const n = typeof body.max_uses === 'string' ? Number(body.max_uses) : body.max_uses
+    if (typeof n !== 'number' || !Number.isInteger(n) || n < 1) {
+      return NextResponse.json({ error: 'max_uses must be a positive integer or null' }, { status: 400 })
+    }
+    maxUses = n
+  }
+
+  // Shareable links that grant elevated access must be bounded
+  if (isLinkInvite && ['admin', 'owner'].includes(role) && maxUses === null) {
+    return NextResponse.json(
+      { error: 'Shareable links for the admin role must set a finite max_uses (for example 1)' },
+      { status: 400 }
+    )
+  }
+
   const expiresAt = new Date()
   expiresAt.setDate(expiresAt.getDate() + (body.expiresInDays || 7))
 
   // Create invitations
   const invitations = []
 
-  if (body.emails && body.emails.length > 0) {
-    // Email invitations
-    for (const email of body.emails) {
+  if (!isLinkInvite) {
+    // Email invitations (single-use via accepted_at; max_uses not applicable)
+    for (const email of body.emails!) {
       invitations.push({
         event_id: event.id,
         email: email.toLowerCase().trim(),
@@ -100,13 +120,14 @@ export async function POST(
       role,
       expires_at: expiresAt.toISOString(),
       created_by: user.id,
+      max_uses: maxUses,
     })
   }
 
   const { data: created, error: insertError } = await supabase
     .from('event_invitations')
     .insert(invitations)
-    .select('id, token, email, role, expires_at')
+    .select('id, token, email, role, expires_at, max_uses, use_count')
 
   if (insertError) {
     console.error('Error creating invitations:', insertError)
@@ -225,7 +246,7 @@ export async function GET(
   // Fetch pending invitations
   const { data: invitations, error: fetchError } = await supabase
     .from('event_invitations')
-    .select('id, token, email, role, expires_at, accepted_at, revoked_at, created_at')
+    .select('id, token, email, role, expires_at, accepted_at, revoked_at, created_at, max_uses, use_count')
     .eq('event_id', event.id)
     .is('revoked_at', null)
     .order('created_at', { ascending: false })

@@ -1,5 +1,5 @@
 import { createAdminClient } from '@/lib/supabase/server'
-import { validateApiKey } from '@/lib/api/auth'
+import { validateApiKey, partnerEventForRow } from '@/lib/api/auth'
 import {
   apiSuccess,
   unauthorized,
@@ -30,7 +30,7 @@ export async function GET(
   const supabase = await createAdminClient()
   const { data, error } = await supabase
     .from('venues')
-    .select(VENUE_FIELDS)
+    .select(`event_id,${VENUE_FIELDS}`)
     .eq('id', id)
     .single()
 
@@ -38,17 +38,23 @@ export async function GET(
     return notFound('Venue')
   }
 
+  // Hide rows whose event is private/draft (or does not match ?event=)
+  const { event_id, ...venue } = data
+  const event = await partnerEventForRow(request, supabase, event_id)
+  if (!event) return notFound('Venue')
+
   if (result.includes.includes('timeslots')) {
     const { data: timeslots } = await supabase
       .from('time_slots')
       .select('id,start_time,end_time,label,is_break,day_date,slot_type,created_at')
       .eq('venue_id', id)
+      .eq('event_id', event.id)
       .order('start_time')
 
-    return apiSuccess({ ...data, timeslots: timeslots ?? [] })
+    return apiSuccess({ ...venue, timeslots: timeslots ?? [] })
   }
 
-  return apiSuccess(data)
+  return apiSuccess(venue)
 }
 
 export async function POST() { return methodNotAllowed() }

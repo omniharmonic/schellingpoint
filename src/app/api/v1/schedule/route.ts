@@ -1,5 +1,5 @@
 import { createAdminClient } from '@/lib/supabase/server'
-import { validateApiKey } from '@/lib/api/auth'
+import { validateApiKey, resolvePartnerEvent } from '@/lib/api/auth'
 import { apiSuccess, unauthorized, badRequest, methodNotAllowed } from '@/lib/api/response'
 
 const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/
@@ -20,10 +20,15 @@ export async function GET(request: Request) {
 
   const supabase = await createAdminClient()
 
+  const resolved = await resolvePartnerEvent(request, supabase)
+  if ('error' in resolved) return resolved.error
+  const eventId = resolved.event.id
+
   // Fetch time slots with venue
   let slotsQuery = supabase
     .from('time_slots')
     .select('id,start_time,end_time,label,is_break,day_date,slot_type,venue:venues(id,name,slug)')
+    .eq('event_id', eventId)
     .order('start_time')
 
   if (dayParam) {
@@ -31,9 +36,10 @@ export async function GET(request: Request) {
   }
 
   // Fetch scheduled sessions with track
-  let sessionsQuery = supabase
+  const sessionsQuery = supabase
     .from('sessions')
     .select('id,title,description,format,duration,host_name,status,session_type,total_votes,time_slot_id,track:tracks(id,name,color)')
+    .eq('event_id', eventId)
     .eq('status', 'scheduled')
     .not('time_slot_id', 'is', null)
 

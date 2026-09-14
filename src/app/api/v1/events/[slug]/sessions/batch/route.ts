@@ -112,7 +112,7 @@ export async function PATCH(
     case 'approve': {
       const { error, count } = await supabase
         .from('sessions')
-        .update({ status: 'approved' })
+        .update({ status: 'approved', rejection_reason: null })
         .eq('event_id', event.id)
         .in('id', session_ids)
         .select()
@@ -127,11 +127,12 @@ export async function PATCH(
     }
 
     case 'reject': {
-      // Store rejection reason in session if we add that field later
-      // For now, just update status
+      // Persist the reason on the session; the status-change trigger includes
+      // it in the host's notification.
+      const rejectionReason = typeof reason === 'string' && reason.trim() ? reason.trim() : null
       const { error, count } = await supabase
         .from('sessions')
-        .update({ status: 'rejected' })
+        .update({ status: 'rejected', rejection_reason: rejectionReason })
         .eq('event_id', event.id)
         .in('id', session_ids)
         .select()
@@ -139,15 +140,6 @@ export async function PATCH(
       if (error) {
         console.error('Batch reject error:', error)
         return NextResponse.json({ error: 'Failed to reject sessions' }, { status: 500 })
-      }
-
-      // Create notifications for rejection (with reason if provided)
-      // This will be handled by database triggers if they exist
-      // Or we can create them explicitly here
-      if (reason) {
-        // Store reason in notifications created by trigger
-        // The trigger creates notifications on status change
-        console.log('Rejection reason:', reason, 'for sessions:', session_ids)
       }
 
       result = { affected: count || session_ids.length }

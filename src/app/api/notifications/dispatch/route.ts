@@ -32,17 +32,27 @@ function getResend() {
   return _resend
 }
 
-// Verify cron/webhook secret
-function verifyAuth(request: NextRequest): boolean {
+// Verify cron/webhook secret.
+// Vercel Cron sends `Authorization: Bearer $CRON_SECRET` on every invocation.
+// Returns an error response when the request must be rejected, or null to proceed.
+function verifyAuth(request: NextRequest): NextResponse | null {
   const authHeader = request.headers.get('authorization')
   const cronSecret = process.env.CRON_SECRET
 
   if (!cronSecret) {
-    console.warn('CRON_SECRET not set, allowing request in development')
-    return process.env.NODE_ENV === 'development'
+    if (process.env.NODE_ENV === 'development') {
+      console.warn('CRON_SECRET not set, allowing request in development')
+      return null
+    }
+    console.error('CRON_SECRET not configured; refusing to dispatch notifications')
+    return NextResponse.json({ error: 'CRON_SECRET not configured' }, { status: 503 })
   }
 
-  return authHeader === `Bearer ${cronSecret}`
+  if (authHeader !== `Bearer ${cronSecret}`) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  return null
 }
 
 interface NotificationRow {
@@ -74,11 +84,19 @@ interface ProfileRow {
   display_name: string | null
 }
 
+// Vercel Cron invokes this endpoint with GET; webhooks and manual triggers use POST.
+export async function GET(request: NextRequest) {
+  return dispatchNotifications(request)
+}
+
 export async function POST(request: NextRequest) {
+  return dispatchNotifications(request)
+}
+
+async function dispatchNotifications(request: NextRequest) {
   // Verify authentication
-  if (!verifyAuth(request)) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  }
+  const authError = verifyAuth(request)
+  if (authError) return authError
 
   const supabase = await createAdminClient()
   const results = { processed: 0, sent: 0, skipped: 0, errors: [] as string[] }
@@ -356,9 +374,4 @@ function formatEventDateRange(startDate: string | null, endDate: string | null):
   } else {
     return `${startMonth} ${startDay} - ${endMonth} ${endDay}, ${year}`
   }
-}
-
-// Also support GET for cron job verification
-export async function GET() {
-  return NextResponse.json({ status: 'ok', endpoint: 'notification-dispatch' })
 }

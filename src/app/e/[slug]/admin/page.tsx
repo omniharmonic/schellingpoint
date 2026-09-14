@@ -72,6 +72,14 @@ export default function AdminPage() {
 
   const [loadError, setLoadError] = React.useState<string | null>(null)
   const [actionError, setActionError] = React.useState<string | null>(null)
+  // Success notices clear themselves; errors persist until the next action.
+  const [actionStatus, setActionStatus] = React.useState<string | null>(null)
+
+  React.useEffect(() => {
+    if (!actionStatus) return
+    const timer = window.setTimeout(() => setActionStatus(null), 5000)
+    return () => window.clearTimeout(timer)
+  }, [actionStatus])
 
   // Selection state
   const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set())
@@ -579,7 +587,21 @@ export default function AdminPage() {
     }
 
     setIsBulkNotifying(false)
-    alert(`Sent ${sentCount} notification(s).`)
+    setActionError(null)
+    setActionStatus(`Sent ${sentCount} notification${sentCount === 1 ? '' : 's'}.`)
+  }
+
+  // Re-fetch the session list (same query as the initial load) after bulk test-data changes
+  const refreshSessions = async () => {
+    const token = getAccessToken()
+    const authHeader = token ? `Bearer ${token}` : `Bearer ${SUPABASE_KEY}`
+    const response = await fetch(
+      `${SUPABASE_URL}/rest/v1/sessions?event_id=eq.${event.id}&select=*,venue:venues(id,name),time_slot:time_slots(id,label,start_time),track:tracks(id,name,color),cohosts:session_cohosts(user_id)&order=total_votes.desc`,
+      { headers: { 'apikey': SUPABASE_KEY, 'Authorization': authHeader } }
+    )
+    if (response.ok) {
+      setSessions(await response.json())
+    }
   }
 
   // Test data operations
@@ -602,12 +624,12 @@ export default function AdminPage() {
 
       if (response.ok) {
         const data = await response.json()
-        alert(data.message)
-        // Refresh the page to show new sessions
-        window.location.reload()
+        await refreshSessions()
+        setActionError(null)
+        setActionStatus(data.message || 'Test sessions created.')
       } else {
         const data = await response.json()
-        alert(data.error || 'Failed to create test sessions')
+        setActionError(data.error || 'Failed to create test sessions')
       }
     } catch (err) {
       console.error('Error seeding test sessions:', err)
@@ -636,12 +658,13 @@ export default function AdminPage() {
 
       if (response.ok) {
         const data = await response.json()
-        alert(data.message)
         // Remove test sessions from local state
         setSessions((prev) => prev.filter((s) => !s.title.startsWith('[TEST]')))
+        setActionError(null)
+        setActionStatus(data.message || 'Test sessions removed.')
       } else {
         const data = await response.json()
-        alert(data.error || 'Failed to delete test sessions')
+        setActionError(data.error || 'Failed to delete test sessions')
       }
     } catch (err) {
       console.error('Error clearing test sessions:', err)
@@ -704,6 +727,8 @@ export default function AdminPage() {
           {loadError && <div role="alert" className="rounded-xl border border-destructive/30 bg-destructive/5 p-4 flex flex-wrap items-center justify-between gap-3"><p className="text-sm text-destructive">{loadError}</p><Button variant="outline" size="sm" onClick={() => window.location.reload()}>Try again</Button></div>}
 
           {actionError && <p role="alert" className="sticky top-20 z-10 rounded-xl border border-destructive/30 bg-card p-4 text-sm text-destructive">{actionError}</p>}
+
+          {actionStatus && <p role="status" className="sticky top-20 z-10 rounded-xl border border-primary/30 bg-card p-4 text-sm">{actionStatus}</p>}
 
           {event.status === 'draft' && can('editEventSettings') && <Card className="border-primary/25 bg-secondary"><CardContent className="p-6 flex flex-wrap items-center justify-between gap-5"><div><h2 className="text-xl font-semibold">Ready to invite your people?</h2><p className="mt-2 text-sm text-muted-foreground max-w-xl">Your event is a draft. Review the invitation, publish it, then open proposals when you’re ready to hear from the community.</p></div><Button asChild><Link href={`/e/${event.slug}/admin/settings`}>Review & publish</Link></Button></CardContent></Card>}
 

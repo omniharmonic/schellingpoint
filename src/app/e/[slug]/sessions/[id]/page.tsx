@@ -1,5 +1,5 @@
 import type { Metadata } from 'next'
-import { getEventBySlug } from '@/lib/events'
+import { getEventBySlug, getEventAccessReason } from '@/lib/events'
 import { EventAccessGate } from '@/components/EventAccessGate'
 import { createAccessClient } from '@/lib/supabase/server'
 import { SessionDetailClient } from './SessionDetailClient'
@@ -104,7 +104,7 @@ export default async function SessionDetailPage({ params }: SessionPageProps) {
   const event = await getEventBySlug(slug)
 
   if (!event) {
-    return <EventAccessGate />
+    return <EventAccessGate reason={await getEventAccessReason(slug)} />
   }
 
   // Fetch session data server-side for initial render

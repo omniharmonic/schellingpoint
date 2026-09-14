@@ -18,18 +18,25 @@ GRANT EXECUTE ON FUNCTION public.can_read_event(uuid) TO anon, authenticated, se
 
 -- Restrictive policies AND with all existing permissive policies, including
 -- the legacy "approved sessions are public" rule.
+DROP POLICY IF EXISTS "Event visibility boundary" ON public.events;
 CREATE POLICY "Event visibility boundary" ON public.events AS RESTRICTIVE
   FOR SELECT TO anon, authenticated USING (public.can_read_event(id));
+DROP POLICY IF EXISTS "Members can read their event" ON public.events;
 CREATE POLICY "Members can read their event" ON public.events
   FOR SELECT TO authenticated USING (public.can_read_event(id));
+DROP POLICY IF EXISTS "Session event visibility boundary" ON public.sessions;
 CREATE POLICY "Session event visibility boundary" ON public.sessions AS RESTRICTIVE
   FOR SELECT TO anon, authenticated USING (public.can_read_event(event_id));
+DROP POLICY IF EXISTS "Venue event visibility boundary" ON public.venues;
 CREATE POLICY "Venue event visibility boundary" ON public.venues AS RESTRICTIVE
   FOR SELECT TO anon, authenticated USING (public.can_read_event(event_id));
+DROP POLICY IF EXISTS "Time slot event visibility boundary" ON public.time_slots;
 CREATE POLICY "Time slot event visibility boundary" ON public.time_slots AS RESTRICTIVE
   FOR SELECT TO anon, authenticated USING (public.can_read_event(event_id));
+DROP POLICY IF EXISTS "Track event visibility boundary" ON public.tracks;
 CREATE POLICY "Track event visibility boundary" ON public.tracks AS RESTRICTIVE
   FOR SELECT TO anon, authenticated USING (public.can_read_event(event_id));
+DROP POLICY IF EXISTS "Roster event visibility boundary" ON public.event_members;
 CREATE POLICY "Roster event visibility boundary" ON public.event_members AS RESTRICTIVE
   FOR SELECT TO anon, authenticated USING (public.can_read_event(event_id));
 -- A definer predicate prevents cycles with the sessions cohost policy.
@@ -39,5 +46,6 @@ RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS
 $$;
 REVOKE ALL ON FUNCTION public.can_read_session_event(uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.can_read_session_event(uuid) TO anon, authenticated, service_role;
+DROP POLICY IF EXISTS "Cohost event visibility boundary" ON public.session_cohosts;
 CREATE POLICY "Cohost event visibility boundary" ON public.session_cohosts AS RESTRICTIVE
   FOR SELECT TO anon, authenticated USING (public.can_read_session_event(session_id));

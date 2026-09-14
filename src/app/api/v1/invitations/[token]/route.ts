@@ -18,10 +18,13 @@ export async function GET(
   const { data: invitation, error } = await supabase
     .from('event_invitations')
     .select(`
+      email,
       role,
       expires_at,
       accepted_at,
       revoked_at,
+      max_uses,
+      use_count,
       events (
         name,
         slug,
@@ -44,6 +47,14 @@ export async function GET(
     return NextResponse.json({ error: 'Event not found' }, { status: 404 })
   }
 
+  // Email-bound invitations are single-use (accepted_at); shareable links are
+  // bounded by max_uses (null = unlimited).
+  const isEmailInvite = !!invitation.email
+  const exhausted =
+    !isEmailInvite &&
+    invitation.max_uses !== null &&
+    invitation.use_count >= invitation.max_uses
+
   return NextResponse.json({
     event: {
       name: event.name,
@@ -55,7 +66,10 @@ export async function GET(
     role: invitation.role,
     expires_at: invitation.expires_at,
     is_expired: new Date(invitation.expires_at) < new Date(),
-    is_used: !!invitation.accepted_at,
+    is_used: isEmailInvite && !!invitation.accepted_at,
     is_revoked: !!invitation.revoked_at,
+    max_uses: invitation.max_uses,
+    use_count: invitation.use_count,
+    exhausted,
   })
 }

@@ -12,6 +12,9 @@ import {
   Check,
   Trash2,
   Clock,
+  AlertCircle,
+  CheckCircle2,
+  UserMinus,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -46,21 +49,45 @@ interface Invitation {
   expires_at: string
   accepted_at: string | null
   created_at: string
+  max_uses: number | null
+  use_count: number
+}
+
+interface EmailResult {
+  email: string
+  sent: boolean
+  error?: string
 }
 
 const ROLE_COLORS: Record<string, string> = {
   owner: 'bg-purple-500',
   admin: 'bg-blue-500',
   moderator: 'bg-green-500',
+  track_lead: 'bg-teal-500',
   volunteer: 'bg-amber-500',
   attendee: 'bg-gray-500',
+}
+
+// Order matches src/lib/permissions.ts hierarchy (highest first)
+const ASSIGNABLE_ROLES: { value: string; label: string }[] = [
+  { value: 'owner', label: 'Owner' },
+  { value: 'admin', label: 'Admin' },
+  { value: 'moderator', label: 'Moderator' },
+  { value: 'track_lead', label: 'Track Lead' },
+  { value: 'volunteer', label: 'Volunteer' },
+  { value: 'attendee', label: 'Attendee' },
+]
+
+/** Elevated link invites default to a single use; attendee links default to unlimited. */
+function defaultMaxUsesFor(role: string): string {
+  return role === 'admin' || role === 'moderator' ? '1' : ''
 }
 
 export default function AdminMembersPage() {
   const router = useRouter()
   const { user, isLoading: authLoading } = useAuth()
   const event = useEvent()
-  const { isAdmin, isOwner, isLoading: roleLoading, can } = useEventRole()
+  const { isAdmin, isOwner, isLoading: roleLoading } = useEventRole()
 
   const [members, setMembers] = React.useState<Member[]>([])
   const [invitations, setInvitations] = React.useState<Invitation[]>([])
@@ -70,9 +97,19 @@ export default function AdminMembersPage() {
   const [inviteEmails, setInviteEmails] = React.useState('')
   const [inviteRole, setInviteRole] = React.useState('attendee')
   const [inviteType, setInviteType] = React.useState<'email' | 'link'>('link')
+  const [inviteMaxUses, setInviteMaxUses] = React.useState<string>(defaultMaxUsesFor('attendee'))
   const [inviting, setInviting] = React.useState(false)
+  const [inviteError, setInviteError] = React.useState<string | null>(null)
+  const [emailResults, setEmailResults] = React.useState<EmailResult[] | null>(null)
   const [generatedLink, setGeneratedLink] = React.useState<string | null>(null)
   const [copied, setCopied] = React.useState(false)
+
+  // Per-member role editing / removal state
+  const [savingMemberId, setSavingMemberId] = React.useState<string | null>(null)
+  const [memberFeedback, setMemberFeedback] = React.useState<
+    Record<string, { kind: 'success' | 'error'; message: string }>
+  >({})
+  const [confirmRemoveId, setConfirmRemoveId] = React.useState<string | null>(null)
 
   // Redirect if not admin
   React.useEffect(() => {
@@ -80,6 +117,16 @@ export default function AdminMembersPage() {
       router.push(`/e/${event.slug}/sessions`)
     }
   }, [user, isAdmin, authLoading, roleLoading, router, event.slug])
+
+  const fetchInvitations = React.useCallback(async (token: string) => {
+    const invitationsRes = await fetch(`/api/v1/events/${event.slug}/invitations`, {
+      headers: { 'Authorization': `Bearer ${token}` },
+    })
+    if (invitationsRes.ok) {
+      const data = await invitationsRes.json()
+      setInvitations(data.invitations || [])
+    }
+  }, [event.slug])
 
   // Fetch members and invitations
   React.useEffect(() => {
@@ -103,16 +150,7 @@ export default function AdminMembersPage() {
           setMembers(await membersRes.json())
         }
 
-        // Fetch invitations
-        const invitationsRes = await fetch(`/api/v1/events/${event.slug}/invitations`, {
-          headers: {
-            'Authorization': `Bearer ${token}`,
-          },
-        })
-        if (invitationsRes.ok) {
-          const data = await invitationsRes.json()
-          setInvitations(data.invitations || [])
-        }
+        await fetchInvitations(token)
       } catch (err) {
         console.error('Error fetching data:', err)
       } finally {
@@ -121,7 +159,100 @@ export default function AdminMembersPage() {
     }
 
     fetchData()
-  }, [event.id, event.slug])
+  }, [event.id, fetchInvitations])
+
+  const setFeedback = (memberId: string, kind: 'success' | 'error', message: string) => {
+    setMemberFeedback(prev => ({ ...prev, [memberId]: { kind, message } }))
+    if (kind === 'success') {
+      setTimeout(() => {
+        setMemberFeedback(prev => {
+          const next = { ...prev }
+          delete next[memberId]
+          return next
+        })
+      }, 2500)
+    }
+  }
+
+  const handleRoleChange = async (member: Member, newRole: string) => {
+    const token = getAccessToken()
+    if (!token || newRole === member.role) return
+
+    const previousRole = member.role
+    setSavingMemberId(member.id)
+    // Optimistic update
+    setMembers(prev => prev.map(m => (m.id === member.id ? { ...m, role: newRole } : m)))
+
+    try {
+      const response = await fetch(`/api/v1/events/${event.slug}/members/${member.user_id}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({ role: newRole }),
+      })
+      const data = await response.json().catch(() => ({}))
+
+      if (!response.ok) {
+        // Roll back
+        setMembers(prev => prev.map(m => (m.id === member.id ? { ...m, role: previousRole } : m)))
+        setFeedback(member.id, 'error', data.error || 'Failed to update role')
+        return
+      }
+
+      setMembers(prev =>
+        prev.map(m => (m.id === member.id ? { ...m, role: data.member?.role ?? newRole } : m))
+      )
+      setFeedback(member.id, 'success', 'Role updated')
+    } catch (err) {
+      console.error('Error updating role:', err)
+      setMembers(prev => prev.map(m => (m.id === member.id ? { ...m, role: previousRole } : m)))
+      setFeedback(member.id, 'error', 'Network error while updating role')
+    } finally {
+      setSavingMemberId(null)
+    }
+  }
+
+  const handleRemoveMember = async (member: Member) => {
+    const token = getAccessToken()
+    if (!token) return
+
+    setSavingMemberId(member.id)
+    try {
+      const response = await fetch(`/api/v1/events/${event.slug}/members/${member.user_id}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` },
+      })
+      const data = await response.json().catch(() => ({}))
+
+      if (!response.ok) {
+        setFeedback(member.id, 'error', data.error || 'Failed to remove member')
+        return
+      }
+
+      setMembers(prev => prev.filter(m => m.id !== member.id))
+    } catch (err) {
+      console.error('Error removing member:', err)
+      setFeedback(member.id, 'error', 'Network error while removing member')
+    } finally {
+      setSavingMemberId(null)
+      setConfirmRemoveId(null)
+    }
+  }
+
+  const handleInviteRoleChange = (role: string) => {
+    setInviteRole(role)
+    setInviteMaxUses(defaultMaxUsesFor(role))
+  }
+
+  const resetInviteModal = () => {
+    setShowInviteModal(false)
+    setGeneratedLink(null)
+    setInviteEmails('')
+    setEmailResults(null)
+    setInviteError(null)
+  }
 
   const handleCreateInvite = async () => {
     const token = getAccessToken()
@@ -129,12 +260,26 @@ export default function AdminMembersPage() {
 
     setInviting(true)
     setGeneratedLink(null)
+    setEmailResults(null)
+    setInviteError(null)
 
     try {
-      const body: { emails?: string[]; role: string } = { role: inviteRole }
+      const body: { emails?: string[]; role: string; max_uses?: number | null } = { role: inviteRole }
 
       if (inviteType === 'email' && inviteEmails.trim()) {
         body.emails = inviteEmails.split(',').map(e => e.trim()).filter(e => e)
+      } else {
+        const trimmed = inviteMaxUses.trim()
+        if (trimmed !== '') {
+          const n = Number(trimmed)
+          if (!Number.isInteger(n) || n < 1) {
+            setInviteError('Max uses must be a whole number of 1 or more, or left blank for unlimited')
+            return
+          }
+          body.max_uses = n
+        } else {
+          body.max_uses = null
+        }
       }
 
       const response = await fetch(`/api/v1/events/${event.slug}/invitations`, {
@@ -146,29 +291,30 @@ export default function AdminMembersPage() {
         body: JSON.stringify(body),
       })
 
-      const data = await response.json()
+      const data = await response.json().catch(() => ({}))
 
-      if (response.ok) {
-        if (data.inviteUrl) {
-          setGeneratedLink(data.inviteUrl)
-        }
-
-        // Refresh invitations list
-        const invitationsRes = await fetch(`/api/v1/events/${event.slug}/invitations`, {
-          headers: { 'Authorization': `Bearer ${token}` },
-        })
-        if (invitationsRes.ok) {
-          const invData = await invitationsRes.json()
-          setInvitations(invData.invitations || [])
-        }
-
-        if (inviteType === 'email') {
-          setShowInviteModal(false)
-          setInviteEmails('')
-        }
+      if (!response.ok) {
+        setInviteError(data.error || 'Failed to create invitation')
+        return
       }
+
+      if (data.inviteUrl) {
+        setGeneratedLink(data.inviteUrl)
+      }
+
+      if (inviteType === 'email') {
+        // Surface per-address delivery results instead of silently closing
+        const results: EmailResult[] = Array.isArray(data.emailResults)
+          ? data.emailResults
+          : (body.emails || []).map(email => ({ email, sent: true }))
+        setEmailResults(results)
+        setInviteEmails('')
+      }
+
+      await fetchInvitations(token)
     } catch (err) {
       console.error('Error creating invitation:', err)
+      setInviteError('Network error while creating invitation')
     } finally {
       setInviting(false)
     }
@@ -209,6 +355,7 @@ export default function AdminMembersPage() {
   if (!isAdmin) return null
 
   const pendingInvitations = invitations.filter(i => !i.accepted_at)
+  const inviteFinished = !!generatedLink || !!emailResults
 
   return (
         <div className="space-y-6">
@@ -242,6 +389,7 @@ export default function AdminMembersPage() {
                     variant={inviteType === 'link' ? 'default' : 'outline'}
                     size="sm"
                     onClick={() => setInviteType('link')}
+                    disabled={inviteFinished}
                   >
                     <LinkIcon className="h-4 w-4 mr-1" />
                     Shareable Link
@@ -250,13 +398,14 @@ export default function AdminMembersPage() {
                     variant={inviteType === 'email' ? 'default' : 'outline'}
                     size="sm"
                     onClick={() => setInviteType('email')}
+                    disabled={inviteFinished}
                   >
                     <Mail className="h-4 w-4 mr-1" />
                     Email Invites
                   </Button>
                 </div>
 
-                {inviteType === 'email' && (
+                {inviteType === 'email' && !emailResults && (
                   <div className="space-y-2">
                     <Label>Email Addresses</Label>
                     <Input
@@ -270,19 +419,75 @@ export default function AdminMembersPage() {
                   </div>
                 )}
 
-                <div className="space-y-2">
-                  <Label>Role</Label>
-                  <select
-                    value={inviteRole}
-                    onChange={(e) => setInviteRole(e.target.value)}
-                    className="w-full h-10 rounded-md border bg-background px-3 text-sm"
-                  >
-                    <option value="attendee">Attendee</option>
-                    <option value="volunteer">Volunteer</option>
-                    <option value="moderator">Moderator</option>
-                    {isOwner && <option value="admin">Admin</option>}
-                  </select>
-                </div>
+                {!inviteFinished && (
+                  <div className="space-y-2">
+                    <Label>Role</Label>
+                    <select
+                      value={inviteRole}
+                      onChange={(e) => handleInviteRoleChange(e.target.value)}
+                      className="w-full h-10 rounded-md border bg-background px-3 text-sm"
+                    >
+                      <option value="attendee">Attendee</option>
+                      <option value="volunteer">Volunteer</option>
+                      <option value="moderator">Moderator</option>
+                      {isOwner && <option value="admin">Admin</option>}
+                    </select>
+                  </div>
+                )}
+
+                {inviteType === 'link' && !inviteFinished && (
+                  <div className="space-y-2">
+                    <Label htmlFor="invite-max-uses">Max uses</Label>
+                    <Input
+                      id="invite-max-uses"
+                      type="number"
+                      min={1}
+                      step={1}
+                      inputMode="numeric"
+                      placeholder="Unlimited"
+                      value={inviteMaxUses}
+                      onChange={(e) => setInviteMaxUses(e.target.value)}
+                      className="w-40"
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      How many people can join with this link. Leave blank for unlimited.
+                      {inviteRole === 'admin' && ' Admin links must have a limit.'}
+                    </p>
+                  </div>
+                )}
+
+                {inviteError && (
+                  <div className="flex items-start gap-2 rounded-lg bg-destructive/10 border border-destructive/20 p-3 text-sm text-destructive">
+                    <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+                    <span>{inviteError}</span>
+                  </div>
+                )}
+
+                {emailResults && (
+                  <div className="space-y-2">
+                    <Label>Delivery results</Label>
+                    <ul className="space-y-1 rounded-lg border p-3 text-sm">
+                      {emailResults.map((r) => (
+                        <li key={r.email} className="flex items-start gap-2">
+                          {r.sent ? (
+                            <CheckCircle2 className="h-4 w-4 mt-0.5 text-green-600 shrink-0" />
+                          ) : (
+                            <AlertCircle className="h-4 w-4 mt-0.5 text-destructive shrink-0" />
+                          )}
+                          <span className="break-all">
+                            <span className="font-medium">{r.email}</span>
+                            {' — '}
+                            {r.sent ? 'sent' : `failed${r.error ? `: ${r.error}` : ''}`}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                    <p className="text-xs text-muted-foreground">
+                      {emailResults.filter(r => r.sent).length} of {emailResults.length} invitations sent.
+                      Failed addresses still have a pending invitation you can revoke below.
+                    </p>
+                  </div>
+                )}
 
                 {generatedLink && (
                   <div className="space-y-2">
@@ -298,21 +503,22 @@ export default function AdminMembersPage() {
                       </Button>
                     </div>
                     <p className="text-xs text-muted-foreground">
-                      Anyone with this link can join as {inviteRole}. Expires in 7 days.
+                      Anyone with this link can join as {inviteRole}.{' '}
+                      {inviteMaxUses.trim() ? `Up to ${inviteMaxUses.trim()} use${inviteMaxUses.trim() === '1' ? '' : 's'}.` : 'Unlimited uses.'}{' '}
+                      Expires in 7 days.
                     </p>
                   </div>
                 )}
 
                 <div className="flex gap-2 justify-end">
-                  <Button variant="outline" onClick={() => {
-                    setShowInviteModal(false)
-                    setGeneratedLink(null)
-                    setInviteEmails('')
-                  }}>
-                    {generatedLink ? 'Done' : 'Cancel'}
+                  <Button variant="outline" onClick={resetInviteModal}>
+                    {inviteFinished ? 'Done' : 'Cancel'}
                   </Button>
-                  {!generatedLink && (
-                    <Button onClick={handleCreateInvite} disabled={inviting}>
+                  {!inviteFinished && (
+                    <Button
+                      onClick={handleCreateInvite}
+                      disabled={inviting || (inviteType === 'email' && !inviteEmails.trim())}
+                    >
                       {inviting ? (
                         <>
                           <Loader2 className="h-4 w-4 mr-2 animate-spin" />
@@ -341,13 +547,15 @@ export default function AdminMembersPage() {
               </CardHeader>
               <CardContent>
                 <div className="space-y-2">
-                  {pendingInvitations.map((invite) => (
+                  {pendingInvitations.map((invite) => {
+                    const exhausted = !invite.email && invite.max_uses !== null && invite.use_count >= invite.max_uses
+                    return (
                     <div
                       key={invite.id}
                       className="flex items-center justify-between p-3 rounded-lg border bg-muted/30"
                     >
                       <div className="space-y-1">
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 flex-wrap">
                           {invite.email ? (
                             <span className="font-medium">{invite.email}</span>
                           ) : (
@@ -357,8 +565,13 @@ export default function AdminMembersPage() {
                             </span>
                           )}
                           <Badge variant="secondary" className="capitalize">
-                            {invite.role}
+                            {invite.role.replace('_', ' ')}
                           </Badge>
+                          {!invite.email && (
+                            <Badge variant={exhausted ? 'destructive' : 'outline'} title="Uses / max uses">
+                              {invite.use_count}/{invite.max_uses ?? '∞'} used
+                            </Badge>
+                          )}
                         </div>
                         <p className="text-xs text-muted-foreground">
                           Created {formatDistanceToNow(new Date(invite.created_at), { addSuffix: true })}
@@ -386,7 +599,8 @@ export default function AdminMembersPage() {
                         </Button>
                       </div>
                     </div>
-                  ))}
+                    )
+                  })}
                 </div>
               </CardContent>
             </Card>
@@ -402,27 +616,119 @@ export default function AdminMembersPage() {
             </CardHeader>
             <CardContent>
               <div className="space-y-2">
-                {members.map((member) => (
-                  <div
-                    key={member.id}
-                    className="flex items-center justify-between p-3 rounded-lg border"
-                  >
-                    <div className="flex items-center gap-3">
-                      <div className={`w-2 h-2 rounded-full ${ROLE_COLORS[member.role] || 'bg-gray-500'}`} />
-                      <div>
-                        <p className="font-medium">
-                          {member.user_data?.display_name || member.user_data?.email || 'Unknown User'}
-                        </p>
-                        {member.user_data?.email && member.user_data?.display_name && (
-                          <p className="text-xs text-muted-foreground">{member.user_data.email}</p>
-                        )}
+                {members.map((member) => {
+                  const isSelf = member.user_id === user?.id
+                  const targetIsOwner = member.role === 'owner'
+                  // Own row is locked; owner rows are locked for non-owners
+                  const locked = isSelf || (targetIsOwner && !isOwner)
+                  const saving = savingMemberId === member.id
+                  const feedback = memberFeedback[member.id]
+                  const confirming = confirmRemoveId === member.id
+                  const roleOptions = ASSIGNABLE_ROLES.filter(r => isOwner || r.value !== 'owner')
+
+                  return (
+                    <div
+                      key={member.id}
+                      className="p-3 rounded-lg border space-y-2"
+                    >
+                      <div className="flex items-center justify-between gap-3 flex-wrap">
+                        <div className="flex items-center gap-3 min-w-0">
+                          <div className={`w-2 h-2 rounded-full shrink-0 ${ROLE_COLORS[member.role] || 'bg-gray-500'}`} />
+                          <div className="min-w-0">
+                            <p className="font-medium truncate">
+                              {member.user_data?.display_name || member.user_data?.email || 'Unknown User'}
+                              {isSelf && <span className="ml-2 text-xs text-muted-foreground">(you)</span>}
+                            </p>
+                            {member.user_data?.email && member.user_data?.display_name && (
+                              <p className="text-xs text-muted-foreground truncate">{member.user_data.email}</p>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          {locked ? (
+                            <Badge variant="outline" className="capitalize">
+                              {member.role.replace('_', ' ')}
+                            </Badge>
+                          ) : (
+                            <select
+                              aria-label={`Role for ${member.user_data?.display_name || member.user_data?.email || 'member'}`}
+                              value={member.role}
+                              disabled={saving}
+                              onChange={(e) => handleRoleChange(member, e.target.value)}
+                              className="h-9 rounded-md border bg-background px-2 text-sm disabled:opacity-60"
+                            >
+                              {roleOptions.map(r => (
+                                <option key={r.value} value={r.value}>{r.label}</option>
+                              ))}
+                            </select>
+                          )}
+
+                          {saving && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
+
+                          {!locked && !confirming && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              title="Remove from event"
+                              className="text-destructive hover:text-destructive"
+                              disabled={saving}
+                              onClick={() => setConfirmRemoveId(member.id)}
+                            >
+                              <UserMinus className="h-4 w-4" />
+                            </Button>
+                          )}
+                        </div>
                       </div>
+
+                      {confirming && (
+                        <div className="flex items-center justify-between gap-2 rounded-md bg-destructive/10 border border-destructive/20 p-2 text-sm flex-wrap">
+                          <span>
+                            Remove{' '}
+                            <span className="font-medium">
+                              {member.user_data?.display_name || member.user_data?.email || 'this member'}
+                            </span>{' '}
+                            from {event.name}? Their votes and sessions are kept.
+                          </span>
+                          <div className="flex gap-2">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              disabled={saving}
+                              onClick={() => setConfirmRemoveId(null)}
+                            >
+                              Cancel
+                            </Button>
+                            <Button
+                              variant="destructive"
+                              size="sm"
+                              disabled={saving}
+                              onClick={() => handleRemoveMember(member)}
+                            >
+                              {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Remove'}
+                            </Button>
+                          </div>
+                        </div>
+                      )}
+
+                      {feedback && (
+                        <p
+                          role="status"
+                          className={`flex items-center gap-1 text-xs ${
+                            feedback.kind === 'error' ? 'text-destructive' : 'text-green-600'
+                          }`}
+                        >
+                          {feedback.kind === 'error' ? (
+                            <AlertCircle className="h-3.5 w-3.5" />
+                          ) : (
+                            <CheckCircle2 className="h-3.5 w-3.5" />
+                          )}
+                          {feedback.message}
+                        </p>
+                      )}
                     </div>
-                    <Badge variant="outline" className="capitalize">
-                      {member.role}
-                    </Badge>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
             </CardContent>
           </Card>

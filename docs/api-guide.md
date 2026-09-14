@@ -9,10 +9,23 @@ Read-only REST API for accessing Schelling Point event data.
 All requests require an API key passed via the `x-api-key` header.
 
 ```bash
-curl -H "x-api-key: YOUR_API_KEY" https://schellingpoint.app/api/v1/sessions
+curl -H "x-api-key: YOUR_API_KEY" "https://schellingpoint.app/api/v1/sessions?event=EVENT_SLUG"
 ```
 
 Missing or invalid keys return `401 Unauthorized`.
+
+## Event Scoping
+
+Schelling Point hosts many events. Every list endpoint is scoped to a single event and **requires** the `event` query parameter (the event's slug, e.g. the `ethboulder-2026` in `https://schellingpoint.app/e/ethboulder-2026`).
+
+| Param | Example | Description |
+|-------|---------|-------------|
+| `event` | `ethboulder-2026` | **Required on list endpoints.** Slug of the event to read. |
+
+- Omitting `event` on a list endpoint returns `400` with the message `event query parameter (event slug) is required`.
+- An unknown slug returns `404`.
+- Only events that are **public or unlisted** and **not in draft** are available through this API. Private and draft events return `404` even with a valid key.
+- Detail endpoints (`/sessions/:id`, `/tracks/:id`, `/venues/:id`, `/profiles/:id`) do not require `event`, but return `404` if the resource belongs to an event that is not available. If you do pass `event` on a detail endpoint, it must match the resource's event.
 
 ## Response Format
 
@@ -55,20 +68,21 @@ Sessions are proposals, talks, workshops, and other scheduled activities.
 
 **List sessions**
 ```
-GET /api/v1/sessions
+GET /api/v1/sessions?event=EVENT_SLUG
 ```
 
-Returns approved and scheduled sessions by default, ordered by vote count (descending).
+Returns the event's approved and scheduled sessions by default, ordered by vote count (descending).
 
 | Param | Example | Description |
 |-------|---------|-------------|
+| `event` | `ethboulder-2026` | **Required.** Event slug |
 | `include` | `host,track,venue,timeslot` | Embed related objects (comma-separated) |
 | `status` | `approved,scheduled` | Filter by status (comma-separated). Valid: `pending`, `approved`, `rejected`, `scheduled` |
 
 **Example — sessions with all relationships:**
 ```bash
 curl -H "x-api-key: YOUR_API_KEY" \
-  "https://schellingpoint.app/api/v1/sessions?include=host,track,venue,timeslot"
+  "https://schellingpoint.app/api/v1/sessions?event=ethboulder-2026&include=host,track,venue,timeslot"
 ```
 
 ```json
@@ -103,8 +117,6 @@ curl -H "x-api-key: YOUR_API_KEY" \
 
         "affiliation": "EFF",
         "building": "Privacy Tech",
-        "telegram": "@alice",
-        "ens": "alice.eth",
         "interests": ["privacy", "cryptography"]
       },
       "track": {
@@ -157,19 +169,25 @@ curl -H "x-api-key: YOUR_API_KEY" \
 
 Participants and speakers.
 
+Contact and permission fields (`email`, `telegram`, `ens`, `is_admin`) are **not** exposed by the profile endpoints, nor by the `host`/`cohosts` embeds on session endpoints.
+
 **List profiles**
 ```
-GET /api/v1/profiles
+GET /api/v1/profiles?event=EVENT_SLUG
 ```
 
-Returns all profiles ordered by display name.
+Returns the members of the given event, ordered by display name.
+
+| Param | Example | Description |
+|-------|---------|-------------|
+| `event` | `ethboulder-2026` | **Required.** Event slug — only members of this event are returned |
 
 **Fields returned:**
-`id`, `display_name`, `bio`, `affiliation`, `building`, `telegram`, `ens`, `interests`, `is_admin`, `created_at`
+`id`, `display_name`, `bio`, `avatar_url`, `affiliation`, `building`, `interests`, `created_at`
 
 ```bash
 curl -H "x-api-key: YOUR_API_KEY" \
-  "https://schellingpoint.app/api/v1/profiles"
+  "https://schellingpoint.app/api/v1/profiles?event=ethboulder-2026"
 ```
 
 ---
@@ -181,7 +199,11 @@ GET /api/v1/profiles/:id
 
 | Param | Example | Description |
 |-------|---------|-------------|
-| `include` | `sessions` | Embed the sessions this person is hosting |
+| `include` | `sessions` | Embed the sessions this person is hosting (only sessions in available events) |
+| `event` | `ethboulder-2026` | Optional. Require membership in this event and limit embedded sessions to it |
+
+**Fields returned:**
+`id`, `display_name`, `bio`, `affiliation`, `building`, `interests`, `created_at`
 
 ```bash
 curl -H "x-api-key: YOUR_API_KEY" \
@@ -196,7 +218,6 @@ curl -H "x-api-key: YOUR_API_KEY" \
     "bio": "Cryptography researcher...",
     "affiliation": "EFF",
     "interests": ["privacy", "cryptography"],
-    "is_admin": false,
     "sessions": [
       {
         "id": "...",
@@ -218,8 +239,12 @@ Thematic categories that group sessions (e.g., Privacy, DeSci, Public Goods Fund
 
 **List tracks**
 ```
-GET /api/v1/tracks
+GET /api/v1/tracks?event=EVENT_SLUG
 ```
+
+| Param | Example | Description |
+|-------|---------|-------------|
+| `event` | `ethboulder-2026` | **Required.** Event slug |
 
 **Fields returned:**
 `id`, `name`, `slug`, `description`, `color`, `lead_name`, `is_active`, `created_at`
@@ -248,8 +273,12 @@ Physical locations where sessions take place.
 
 **List venues**
 ```
-GET /api/v1/venues
+GET /api/v1/venues?event=EVENT_SLUG
 ```
+
+| Param | Example | Description |
+|-------|---------|-------------|
+| `event` | `ethboulder-2026` | **Required.** Event slug |
 
 **Fields returned:**
 `id`, `name`, `slug`, `capacity`, `features`, `style`, `address`, `notes`, `is_primary`, `created_at`
@@ -278,11 +307,12 @@ Schedule blocks that sessions are assigned to. Each time slot belongs to a venue
 
 **List time slots**
 ```
-GET /api/v1/timeslots
+GET /api/v1/timeslots?event=EVENT_SLUG
 ```
 
 | Param | Example | Description |
 |-------|---------|-------------|
+| `event` | `ethboulder-2026` | **Required.** Event slug |
 | `day` | `2026-02-13` | Filter to a specific day (YYYY-MM-DD) |
 | `include` | `venue` | Embed the venue object |
 
@@ -293,7 +323,7 @@ GET /api/v1/timeslots
 
 ```bash
 curl -H "x-api-key: YOUR_API_KEY" \
-  "https://schellingpoint.app/api/v1/timeslots?day=2026-02-13&include=venue"
+  "https://schellingpoint.app/api/v1/timeslots?event=ethboulder-2026&day=2026-02-13&include=venue"
 ```
 
 ---
@@ -304,16 +334,17 @@ Pre-joined composite view — time slots grouped by day with their venues and se
 
 **Get schedule**
 ```
-GET /api/v1/schedule
+GET /api/v1/schedule?event=EVENT_SLUG
 ```
 
 | Param | Example | Description |
 |-------|---------|-------------|
+| `event` | `ethboulder-2026` | **Required.** Event slug |
 | `day` | `2026-02-13` | Filter to a specific day (YYYY-MM-DD) |
 
 ```bash
 curl -H "x-api-key: YOUR_API_KEY" \
-  "https://schellingpoint.app/api/v1/schedule?day=2026-02-13"
+  "https://schellingpoint.app/api/v1/schedule?event=ethboulder-2026&day=2026-02-13"
 ```
 
 ```json
@@ -397,7 +428,7 @@ Venue   --has----> Time Slot --assigned--> Session
 
 For building a knowledge graph, we recommend:
 
-1. **Initial sync:** Call each list endpoint once to pull all data. Use `?include=` on sessions to get relationships in one pass.
+1. **Initial sync:** Call each list endpoint once per event (`?event=<slug>`) to pull all data. Use `?include=` on sessions to get relationships in one pass.
 2. **Incremental refresh:** Poll the sessions endpoint periodically (e.g., every 5 minutes) to pick up new proposals, status changes, and vote count updates.
 3. **Schedule is read-only:** The schedule changes infrequently (only when organizers assign sessions to time slots), so polling less often is fine.
 

@@ -70,6 +70,27 @@ interface TimeSlot {
   slot_type: string | null
 }
 
+// Form-level slot values: wall-clock times ("HH:mm") on an event day, in the event timezone.
+type SlotInput = GeneratedSlot & { slotType?: string }
+
+const SLOT_TYPE_OPTIONS = [
+  { value: 'session', label: 'Session' },
+  { value: 'unconference', label: 'Unconference' },
+  { value: 'track', label: 'Track' },
+  { value: 'break', label: 'Break' },
+  { value: 'checkin', label: 'Check-in' },
+]
+
+// Wall-clock parts of a UTC instant in the event timezone; the inverse of parseTimeInTimezone.
+function toEventLocalParts(iso: string, timezone: string): { date: string; time: string } {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(new Date(iso))
+  const part = (type: string) => parts.find((p) => p.type === type)?.value ?? '00'
+  return { date: `${part('year')}-${part('month')}-${part('day')}`, time: `${part('hour')}:${part('minute')}` }
+}
+
 export default function AdminSetupPage() {
   const router = useRouter()
   const { user, isLoading: authLoading } = useAuth()
@@ -269,21 +290,29 @@ export default function AdminSetupPage() {
   }
 
   // Time Slot CRUD operations
-  const handleSaveTimeSlots = async (slots: (GeneratedSlot & {slotType?: string})[]) => {
+  // Validate form input and convert it to a time_slots row (times in the event timezone).
+  const buildTimeSlotRow = (slot: SlotInput) => {
+    if (!venues.some(v => v.id === slot.venueId) || !eventDays.some(day => day.date === slot.dayDate) || !slot.startTime || !slot.endTime || slot.endTime <= slot.startTime) throw new Error('Choose a room, an event day, and an end time after the start time.')
+    const start = parseTimeInTimezone(slot.startTime, slot.dayDate, event.timezone)
+    const end = parseTimeInTimezone(slot.endTime, slot.dayDate, event.timezone)
+    return { venue_id: slot.venueId, event_id: event.id, day_date: slot.dayDate, label: slot.label || null, start_time: start.toISOString(), end_time: end.toISOString(), is_break: slot.isBreak, slot_type: slot.slotType || (slot.isBreak ? 'break' : 'session') }
+  }
+
+  const overlapsSameVenue = (row: Pick<TimeSlot, 'venue_id' | 'start_time' | 'end_time'>, others: Pick<TimeSlot, 'venue_id' | 'start_time' | 'end_time'>[]) =>
+    others.some(other => other.venue_id === row.venue_id && Date.parse(other.start_time) < Date.parse(row.end_time) && Date.parse(row.start_time) < Date.parse(other.end_time))
+
+  const sortByStart = (slots: TimeSlot[]) => [...slots].sort((a, b) => Date.parse(a.start_time) - Date.parse(b.start_time))
+
+  const handleSaveTimeSlots = async (slots: SlotInput[]) => {
     const token = getAccessToken()
     if (!token) { setSaveError('Please sign in again to save changes.'); return false }
     if (isSaving) return false
     setIsSaving(true)
     setSaveError(null)
     try {
-      const rows = slots.map(slot => {
-        if (!venues.some(v => v.id === slot.venueId) || !eventDays.some(day => day.date === slot.dayDate) || !slot.startTime || !slot.endTime || slot.endTime <= slot.startTime) throw new Error('Choose a room, an event day, and an end time after the start time.')
-        const start = parseTimeInTimezone(slot.startTime, slot.dayDate, event.timezone)
-        const end = parseTimeInTimezone(slot.endTime, slot.dayDate, event.timezone)
-        return { venue_id: slot.venueId, event_id: event.id, day_date: slot.dayDate, label: slot.label || null, start_time: start.toISOString(), end_time: end.toISOString(), is_break: slot.isBreak, slot_type: slot.slotType || (slot.isBreak ? 'break' : 'session') }
-      })
+      const rows = slots.map(buildTimeSlotRow)
       rows.forEach((row,index) => {
-        if ([...timeSlots,...rows.slice(0,index)].some(other => other.venue_id === row.venue_id && Date.parse(other.start_time) < Date.parse(row.end_time) && Date.parse(row.start_time) < Date.parse(other.end_time))) throw new Error('These slots overlap existing availability in the same room. Adjust the times before saving.')
+        if (overlapsSameVenue(row, [...timeSlots,...rows.slice(0,index)])) throw new Error('These slots overlap existing availability in the same room. Adjust the times before saving.')
       })
       // A single PostgREST insert is transactional: the whole batch succeeds or fails.
       const response = await fetch(`${SUPABASE_URL}/rest/v1/time_slots`, {
@@ -291,7 +320,7 @@ export default function AdminSetupPage() {
         body: JSON.stringify(rows),
       })
       const created = await requireSavedRows<TimeSlot>(response)
-      setTimeSlots(prev => [...prev,...created].sort((a,b) => Date.parse(a.start_time) - Date.parse(b.start_time)))
+      setTimeSlots(prev => sortByStart([...prev,...created]))
       return true
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : 'Could not save this availability.')
@@ -302,9 +331,57 @@ export default function AdminSetupPage() {
   const handleAddTimeSlot = (venueId: string, dayDate: string, startTime: string, endTime: string, label: string, slotType: string, isBreak: boolean) =>
     handleSaveTimeSlots([{venueId,dayDate,startTime,endTime,label,slotType,isBreak}])
 
+  // Update one slot. Resolves to null on success or an error message the form shows inline.
+  const handleUpdateTimeSlot = async (id: string, slot: SlotInput): Promise<string | null> => {
+    const token = getAccessToken()
+    if (!token) return 'Please sign in again to save changes.'
+    if (isSaving) return 'Another change is still saving. Try again in a moment.'
+    setIsSaving(true)
+    try {
+      const row = buildTimeSlotRow(slot)
+      if (overlapsSameVenue(row, timeSlots.filter(s => s.id !== id))) throw new Error('This slot would overlap existing availability in the same room. Adjust the times before saving.')
+      const response = await fetch(`${SUPABASE_URL}/rest/v1/time_slots?id=eq.${id}&event_id=eq.${event.id}`, {
+        method: 'PATCH',
+        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Prefer: 'return=representation' },
+        body: JSON.stringify(row),
+      })
+      const [updated] = await requireSavedRows<TimeSlot>(response)
+      if (updated.id !== id || updated.venue_id !== row.venue_id || Date.parse(updated.start_time) !== Date.parse(row.start_time) || Date.parse(updated.end_time) !== Date.parse(row.end_time)) {
+        throw new Error('The saved slot does not match what you entered. Refresh and try again.')
+      }
+      setTimeSlots(prev => sortByStart(prev.map(s => (s.id === id ? updated : s))))
+      return null
+    } catch (err) {
+      return err instanceof Error ? err.message : 'Could not update this availability.'
+    } finally { setIsSaving(false) }
+  }
+
+  // Number of sessions scheduled in a slot, or null when it could not be checked.
+  const fetchSlotSessionCount = async (slotId: string): Promise<number | null> => {
+    const token = getAccessToken()
+    if (!token) return null
+    try {
+      const response = await fetch(`${SUPABASE_URL}/rest/v1/sessions?time_slot_id=eq.${slotId}&event_id=eq.${event.id}&select=id`, {
+        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${token}` },
+      })
+      if (!response.ok) return null
+      const rows = await response.json()
+      return Array.isArray(rows) ? rows.length : null
+    } catch {
+      return null
+    }
+  }
+
   const handleDeleteTimeSlot = async (id: string) => {
     const token = getAccessToken()
     if (!token) { setSaveError('Please sign in again to save changes.'); return false }
+
+    const sessionCount = await fetchSlotSessionCount(id)
+    if (sessionCount === null) {
+      if (!confirm('Could not check whether sessions are scheduled in this slot. Remove it anyway? Any sessions scheduled here will lose their time.')) return
+    } else if (sessionCount > 0) {
+      if (!confirm(`${sessionCount} ${sessionCount === 1 ? 'session is' : 'sessions are'} scheduled in this slot and will lose ${sessionCount === 1 ? 'its' : 'their'} time if you remove it. Remove this slot?`)) return
+    }
 
     try {
       const response = await fetch(`${SUPABASE_URL}/rest/v1/time_slots?id=eq.${id}&event_id=eq.${event.id}`, {
@@ -578,11 +655,15 @@ export default function AdminSetupPage() {
                       <div className="mt-4 pt-4 border-t">
                         <VenueAvailabilityEditor
                           venue={venue}
+                          venues={venues}
                           slots={venueSlots}
                           eventDays={eventDays}
                           canManage={can('manageVenues')}
+                          isSaving={isSaving}
                           onAddSlot={handleAddTimeSlot}
+                          onUpdateSlot={handleUpdateTimeSlot}
                           onDeleteSlot={handleDeleteTimeSlot}
+                          onCountSessions={fetchSlotSessionCount}
                         />
                       </div>
                     )}
@@ -616,48 +697,92 @@ export default function AdminSetupPage() {
 // Venue availability editor component
 function VenueAvailabilityEditor({
   venue,
+  venues,
   slots,
   eventDays,
   canManage,
+  isSaving,
   onAddSlot,
+  onUpdateSlot,
   onDeleteSlot,
+  onCountSessions,
 }: {
   venue: Venue
+  venues: Venue[]
   slots: TimeSlot[]
   eventDays: { date: string; label: string }[]
   canManage: boolean
+  isSaving: boolean
   onAddSlot: (venueId: string, dayDate: string, startTime: string, endTime: string, label: string, slotType: string, isBreak: boolean) => Promise<boolean>
+  onUpdateSlot: (id: string, slot: SlotInput) => Promise<string | null>
   onDeleteSlot: (id: string) => void
+  onCountSessions: (slotId: string) => Promise<number | null>
 }) {
   const event = useEvent()
   const [isAdding, setIsAdding] = React.useState(false)
   const [selectedDay, setSelectedDay] = React.useState(eventDays[0]?.date || '')
   const [showAddForm, setShowAddForm] = React.useState(false)
-  const [newStartTime, setNewStartTime] = React.useState('09:00')
-  const [newEndTime, setNewEndTime] = React.useState('10:00')
-  const [newLabel, setNewLabel] = React.useState('')
-  const [newSlotType, setNewSlotType] = React.useState('session')
-  const [newIsBreak, setNewIsBreak] = React.useState(false)
+  const [editingSlot, setEditingSlot] = React.useState<TimeSlot | null>(null)
+  const [editingSessionCount, setEditingSessionCount] = React.useState<number | null>(null)
+  const [editError, setEditError] = React.useState<string | null>(null)
+  // Id of the slot whose session count is being fetched, so a late response is ignored.
+  const editingIdRef = React.useRef<string | null>(null)
 
   const daySlots = slots
     .filter((s) => s.day_date === selectedDay)
     .sort((a, b) => new Date(a.start_time).getTime() - new Date(b.start_time).getTime())
 
-  const handleAdd = async () => {
+  const handleAdd = async (input: SlotInput) => {
     if (isAdding) return
     setIsAdding(true)
-    const saved = await onAddSlot(venue.id, selectedDay, newStartTime, newEndTime, newLabel, newSlotType, newIsBreak)
+    const saved = await onAddSlot(input.venueId, input.dayDate, input.startTime, input.endTime, input.label, input.slotType || 'session', input.isBreak)
     setIsAdding(false)
-    if (!saved) return
+    if (saved) setShowAddForm(false)
+  }
+
+  const startEditSlot = async (slot: TimeSlot) => {
     setShowAddForm(false)
-    setNewLabel('')
-    setNewSlotType('session')
-    setNewIsBreak(false)
+    setEditError(null)
+    setEditingSessionCount(null)
+    setEditingSlot(slot)
+    editingIdRef.current = slot.id
+    const count = await onCountSessions(slot.id)
+    if (editingIdRef.current === slot.id) setEditingSessionCount(count)
+  }
+
+  const cancelEdit = () => {
+    editingIdRef.current = null
+    setEditingSlot(null)
+    setEditingSessionCount(null)
+    setEditError(null)
+  }
+
+  const handleUpdate = async (input: SlotInput) => {
+    if (!editingSlot) return
+    setEditError(null)
+    const error = await onUpdateSlot(editingSlot.id, input)
+    if (error) { setEditError(error); return }
+    cancelEdit()
   }
 
   const formatTime = (dateStr: string) => {
     return new Date(dateStr).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZone: event.timezone })
   }
+
+  const editingInitial = React.useMemo<SlotInput | null>(() => {
+    if (!editingSlot) return null
+    const start = toEventLocalParts(editingSlot.start_time, event.timezone)
+    const end = toEventLocalParts(editingSlot.end_time, event.timezone)
+    return {
+      venueId: editingSlot.venue_id || venue.id,
+      dayDate: editingSlot.day_date || start.date,
+      startTime: start.time,
+      endTime: end.time,
+      label: editingSlot.label || '',
+      slotType: editingSlot.slot_type || (editingSlot.is_break ? 'break' : 'session'),
+      isBreak: editingSlot.is_break,
+    }
+  }, [editingSlot, event.timezone, venue.id])
 
   return (
     <div className="space-y-4">
@@ -683,37 +808,66 @@ function VenueAvailabilityEditor({
             No time slots for this day. Add availability windows below.
           </p>
         ) : (
-          daySlots.map((slot) => (
-            <div
-              key={slot.id}
-              className={cn(
-                'flex items-center justify-between p-3 rounded-lg border gap-2',
-                slot.is_break ? 'bg-amber-50 dark:bg-amber-950/20 border-amber-200 dark:border-amber-800' : 'bg-muted/30'
-              )}
-            >
-              <div className="flex items-center gap-2 sm:gap-3 flex-wrap flex-1 min-w-0">
-                <div className="text-sm whitespace-nowrap">
-                  {formatTime(slot.start_time)} - {formatTime(slot.end_time)}
+          daySlots.map((slot) =>
+            editingSlot?.id === slot.id && editingInitial ? (
+              <SlotForm
+                key={slot.id}
+                mode="edit"
+                initial={editingInitial}
+                venues={venues}
+                eventDays={eventDays}
+                isSaving={isSaving}
+                error={editError}
+                sessionCount={editingSessionCount}
+                onSubmit={handleUpdate}
+                onCancel={cancelEdit}
+              />
+            ) : (
+              <div
+                key={slot.id}
+                className={cn(
+                  'flex items-center justify-between p-3 rounded-lg border gap-2',
+                  slot.is_break ? 'bg-amber-50 dark:bg-amber-950/20 border-amber-200 dark:border-amber-800' : 'bg-muted/30'
+                )}
+              >
+                <div className="flex items-center gap-2 sm:gap-3 flex-wrap flex-1 min-w-0">
+                  <div className="text-sm whitespace-nowrap">
+                    {formatTime(slot.start_time)} - {formatTime(slot.end_time)}
+                  </div>
+                  <Badge variant={slot.is_break ? 'secondary' : 'outline'} className="text-xs">
+                    {slot.is_break ? 'Break' : slot.slot_type || 'session'}
+                  </Badge>
+                  {slot.label && (
+                    <span className="text-sm text-muted-foreground truncate">{slot.label}</span>
+                  )}
                 </div>
-                <Badge variant={slot.is_break ? 'secondary' : 'outline'} className="text-xs">
-                  {slot.is_break ? 'Break' : slot.slot_type || 'session'}
-                </Badge>
-                {slot.label && (
-                  <span className="text-sm text-muted-foreground truncate">{slot.label}</span>
+                {canManage && (
+                  <div className="flex gap-1 flex-shrink-0">
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="h-9 w-9"
+                      onClick={() => startEditSlot(slot)}
+                      disabled={isSaving}
+                      aria-label={`Edit ${formatTime(slot.start_time)} slot`}
+                    >
+                      <Edit2 className="h-4 w-4" />
+                    </Button>
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="h-9 w-9 text-destructive hover:text-destructive"
+                      onClick={() => onDeleteSlot(slot.id)}
+                      disabled={isSaving}
+                      aria-label={`Remove ${formatTime(slot.start_time)} slot`}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
                 )}
               </div>
-              {canManage && (
-                <Button
-                  size="icon"
-                  variant="ghost"
-                  className="h-9 w-9 flex-shrink-0 text-destructive hover:text-destructive"
-                  onClick={() => onDeleteSlot(slot.id)} aria-label={`Remove ${formatTime(slot.start_time)} slot`}
-                >
-                  <Trash2 className="h-4 w-4" />
-                </Button>
-              )}
-            </div>
-          ))
+            )
+          )
         )}
       </div>
 
@@ -721,67 +875,19 @@ function VenueAvailabilityEditor({
       {canManage && (
         <>
           {showAddForm ? (
-            <Card className="border-dashed">
-              <CardContent className="p-4 space-y-4">
-                <div className="grid gap-3 grid-cols-2 sm:grid-cols-4">
-                  <div className="space-y-2">
-                    <label className="text-xs font-medium">Start</label>
-                    <Input
-                      type="time"
-                      value={newStartTime}
-                      onChange={(e) => setNewStartTime(e.target.value)}
-                      className="min-h-[44px]"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-xs font-medium">End</label>
-                    <Input
-                      type="time"
-                      value={newEndTime}
-                      onChange={(e) => setNewEndTime(e.target.value)}
-                      className="min-h-[44px]"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-xs font-medium">Type</label>
-                    <select
-                      value={newSlotType}
-                      onChange={(e) => {
-                        setNewSlotType(e.target.value)
-                        setNewIsBreak(e.target.value === 'break')
-                      }}
-                      className="w-full min-h-[44px] rounded-md border bg-background px-3 text-sm"
-                    >
-                      <option value="session">Session</option>
-                      <option value="unconference">Unconference</option>
-                      <option value="track">Track</option>
-                      <option value="break">Break</option>
-                      <option value="checkin">Check-in</option>
-                    </select>
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-xs font-medium">Label</label>
-                    <Input
-                      placeholder="Optional"
-                      value={newLabel}
-                      onChange={(e) => setNewLabel(e.target.value)}
-                      className="min-h-[44px]"
-                    />
-                  </div>
-                </div>
-                <div className="flex gap-2">
-                  <Button size="sm" variant="outline" onClick={() => setShowAddForm(false)} className="flex-1 sm:flex-none">
-                    Cancel
-                  </Button>
-                  <Button size="sm" onClick={handleAdd} disabled={isAdding} className="flex-1 sm:flex-none">
-                    <Plus className="h-4 w-4 mr-1" />
-                    Add
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
+            <SlotForm
+              mode="add"
+              initial={{ venueId: venue.id, dayDate: selectedDay, startTime: '09:00', endTime: '10:00', label: '', slotType: 'session', isBreak: false }}
+              venues={venues}
+              eventDays={eventDays}
+              isSaving={isAdding || isSaving}
+              error={null}
+              sessionCount={null}
+              onSubmit={handleAdd}
+              onCancel={() => setShowAddForm(false)}
+            />
           ) : (
-            <Button variant="outline" size="sm" onClick={() => setShowAddForm(true)} className="w-full">
+            <Button variant="outline" size="sm" onClick={() => { cancelEdit(); setShowAddForm(true) }} className="w-full">
               <Plus className="h-4 w-4 mr-2" />
               <span className="hidden sm:inline">Add Time Slot for {eventDays.find((d) => d.date === selectedDay)?.label}</span>
               <span className="sm:hidden">Add Slot</span>
@@ -790,5 +896,134 @@ function VenueAvailabilityEditor({
         </>
       )}
     </div>
+  )
+}
+
+// Shared create/edit form for a single time slot. Times are wall-clock in the event timezone.
+function SlotForm({
+  mode,
+  initial,
+  venues,
+  eventDays,
+  isSaving,
+  error,
+  sessionCount,
+  onSubmit,
+  onCancel,
+}: {
+  mode: 'add' | 'edit'
+  initial: SlotInput
+  venues: Venue[]
+  eventDays: { date: string; label: string }[]
+  isSaving: boolean
+  error: string | null
+  sessionCount: number | null
+  onSubmit: (input: SlotInput) => void
+  onCancel: () => void
+}) {
+  const id = React.useId()
+  const [venueId, setVenueId] = React.useState(initial.venueId)
+  const [dayDate, setDayDate] = React.useState(initial.dayDate)
+  const [startTime, setStartTime] = React.useState(initial.startTime)
+  const [endTime, setEndTime] = React.useState(initial.endTime)
+  const [label, setLabel] = React.useState(initial.label)
+  const [slotType, setSlotType] = React.useState(initial.slotType || 'session')
+
+  const isEdit = mode === 'edit'
+  const selectClass = 'w-full min-h-[44px] rounded-md border bg-background px-3 text-sm'
+
+  return (
+    <Card className={cn(isEdit ? 'border-primary/50' : 'border-dashed')} role="group" aria-labelledby={`${id}-title`}>
+      <CardContent className="p-4 space-y-4">
+        <h4 id={`${id}-title`} className="text-sm font-semibold">{isEdit ? 'Edit Time Slot' : 'New Time Slot'}</h4>
+
+        {isEdit && sessionCount !== null && sessionCount > 0 && (
+          <p role="status" className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/20 dark:text-amber-200">
+            {sessionCount} {sessionCount === 1 ? 'session is' : 'sessions are'} scheduled in this slot; {sessionCount === 1 ? 'its' : 'their'} time will move with it.
+          </p>
+        )}
+
+        {isEdit && (
+          <div className="grid gap-3 grid-cols-1 sm:grid-cols-2">
+            <div className="space-y-2">
+              <label htmlFor={`${id}-venue`} className="text-xs font-medium">Venue</label>
+              <select id={`${id}-venue`} value={venueId} onChange={(e) => setVenueId(e.target.value)} className={selectClass}>
+                {venues.map((v) => (
+                  <option key={v.id} value={v.id}>{v.name}</option>
+                ))}
+              </select>
+            </div>
+            <div className="space-y-2">
+              <label htmlFor={`${id}-day`} className="text-xs font-medium">Day</label>
+              <select id={`${id}-day`} value={dayDate} onChange={(e) => setDayDate(e.target.value)} className={selectClass}>
+                {eventDays.map((day) => (
+                  <option key={day.date} value={day.date}>{day.label}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+        )}
+
+        <div className="grid gap-3 grid-cols-2 sm:grid-cols-4">
+          <div className="space-y-2">
+            <label htmlFor={`${id}-start`} className="text-xs font-medium">Start</label>
+            <Input
+              id={`${id}-start`}
+              type="time"
+              value={startTime}
+              onChange={(e) => setStartTime(e.target.value)}
+              className="min-h-[44px]"
+            />
+          </div>
+          <div className="space-y-2">
+            <label htmlFor={`${id}-end`} className="text-xs font-medium">End</label>
+            <Input
+              id={`${id}-end`}
+              type="time"
+              value={endTime}
+              onChange={(e) => setEndTime(e.target.value)}
+              className="min-h-[44px]"
+            />
+          </div>
+          <div className="space-y-2">
+            <label htmlFor={`${id}-type`} className="text-xs font-medium">Type</label>
+            <select id={`${id}-type`} value={slotType} onChange={(e) => setSlotType(e.target.value)} className={selectClass}>
+              {SLOT_TYPE_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+          </div>
+          <div className="space-y-2">
+            <label htmlFor={`${id}-label`} className="text-xs font-medium">Label</label>
+            <Input
+              id={`${id}-label`}
+              placeholder="Optional"
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+              className="min-h-[44px]"
+            />
+          </div>
+        </div>
+
+        {error && (
+          <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">{error}</p>
+        )}
+
+        <div className="flex gap-2">
+          <Button size="sm" variant="outline" onClick={onCancel} disabled={isSaving} className="flex-1 sm:flex-none">
+            Cancel
+          </Button>
+          <Button
+            size="sm"
+            onClick={() => onSubmit({ venueId, dayDate, startTime, endTime, label, slotType, isBreak: slotType === 'break' })}
+            disabled={isSaving}
+            className="flex-1 sm:flex-none"
+          >
+            {isEdit ? <Check className="h-4 w-4 mr-1" /> : <Plus className="h-4 w-4 mr-1" />}
+            {isEdit ? 'Update' : 'Add'}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
   )
 }

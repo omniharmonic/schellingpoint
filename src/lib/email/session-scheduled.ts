@@ -1,3 +1,5 @@
+import { appUrl } from './base-template'
+
 interface SessionScheduledEmailParams {
   sessionTitle: string
   hostName: string
@@ -74,7 +76,7 @@ export function buildSessionScheduledEmail(params: SessionScheduledEmailParams) 
               <table role="presentation" cellspacing="0" cellpadding="0" border="0">
                 <tr>
                   <td style="padding-bottom: 16px;">
-                    <img src="https://schellingpointapp-new.vercel.app/logo.png" alt="Schelling Point" width="56" height="56" style="display: block; border: 0;">
+                    <img src="${appUrl()}/logo.png" alt="Schelling Point" width="56" height="56" style="display: block; border: 0;">
                   </td>
                 </tr>
                 <tr>
@@ -233,7 +235,7 @@ export function buildSessionScheduledEmail(params: SessionScheduledEmailParams) 
           <tr>
             <td align="center" style="padding: 24px 20px;">
               <p style="margin: 0; font-size: 11px; color: #484f58;">
-                Powered by <a href="https://schellingpoint.city" style="color: #6e7681; text-decoration: none;">Schelling Point</a>
+                Powered by <a href="${appUrl()}" style="color: #6e7681; text-decoration: none;">Schelling Point</a>
               </p>
             </td>
           </tr>

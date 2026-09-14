@@ -12,6 +12,31 @@ export type Database = {
   __InternalSupabase: {
     PostgrestVersion: "14.1"
   }
+  graphql_public: {
+    Tables: {
+      [_ in never]: never
+    }
+    Views: {
+      [_ in never]: never
+    }
+    Functions: {
+      graphql: {
+        Args: {
+          extensions?: Json
+          operationName?: string
+          query?: string
+          variables?: Json
+        }
+        Returns: Json
+      }
+    }
+    Enums: {
+      [_ in never]: never
+    }
+    CompositeTypes: {
+      [_ in never]: never
+    }
+  }
   public: {
     Tables: {
       cohost_invites: {
@@ -82,6 +107,59 @@ export type Database = {
           },
         ]
       }
+      event_invitations: {
+        Row: {
+          accepted_at: string | null
+          created_at: string
+          created_by: string
+          email: string | null
+          event_id: string
+          expires_at: string
+          id: string
+          max_uses: number | null
+          revoked_at: string | null
+          role: string
+          token: string
+          use_count: number
+        }
+        Insert: {
+          accepted_at?: string | null
+          created_at?: string
+          created_by: string
+          email?: string | null
+          event_id: string
+          expires_at?: string
+          id?: string
+          max_uses?: number | null
+          revoked_at?: string | null
+          role?: string
+          token?: string
+          use_count?: number
+        }
+        Update: {
+          accepted_at?: string | null
+          created_at?: string
+          created_by?: string
+          email?: string | null
+          event_id?: string
+          expires_at?: string
+          id?: string
+          max_uses?: number | null
+          revoked_at?: string | null
+          role?: string
+          token?: string
+          use_count?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "event_invitations_event_id_fkey"
+            columns: ["event_id"]
+            isOneToOne: false
+            referencedRelation: "events"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       event_members: {
         Row: {
           event_id: string
@@ -136,6 +214,7 @@ export type Database = {
           favicon_url: string | null
           id: string
           is_featured: boolean | null
+          last_schedule_change_at: string | null
           location_address: string | null
           location_geo: unknown
           location_name: string | null
@@ -146,16 +225,21 @@ export type Database = {
           proposals_close_at: string | null
           proposals_open_at: string | null
           require_proposal_approval: boolean | null
+          schedule_published_at: string | null
           slug: string
           start_date: string
           status: string | null
+          stripe_account_id: string | null
+          suggested_topics: string[] | null
           tagline: string | null
           theme: Json | null
+          ticketing_enabled: boolean
           timezone: string
           updated_at: string | null
           visibility: string | null
           vote_credits_per_user: number | null
           voting_closes_at: string | null
+          voting_mechanism: string
           voting_opens_at: string | null
         }
         Insert: {
@@ -169,6 +253,7 @@ export type Database = {
           favicon_url?: string | null
           id?: string
           is_featured?: boolean | null
+          last_schedule_change_at?: string | null
           location_address?: string | null
           location_geo?: unknown
           location_name?: string | null
@@ -179,16 +264,21 @@ export type Database = {
           proposals_close_at?: string | null
           proposals_open_at?: string | null
           require_proposal_approval?: boolean | null
+          schedule_published_at?: string | null
           slug: string
           start_date: string
           status?: string | null
+          stripe_account_id?: string | null
+          suggested_topics?: string[] | null
           tagline?: string | null
           theme?: Json | null
+          ticketing_enabled?: boolean
           timezone?: string
           updated_at?: string | null
           visibility?: string | null
           vote_credits_per_user?: number | null
           voting_closes_at?: string | null
+          voting_mechanism?: string
           voting_opens_at?: string | null
         }
         Update: {
@@ -202,6 +292,7 @@ export type Database = {
           favicon_url?: string | null
           id?: string
           is_featured?: boolean | null
+          last_schedule_change_at?: string | null
           location_address?: string | null
           location_geo?: unknown
           location_name?: string | null
@@ -212,16 +303,21 @@ export type Database = {
           proposals_close_at?: string | null
           proposals_open_at?: string | null
           require_proposal_approval?: boolean | null
+          schedule_published_at?: string | null
           slug?: string
           start_date?: string
           status?: string | null
+          stripe_account_id?: string | null
+          suggested_topics?: string[] | null
           tagline?: string | null
           theme?: Json | null
+          ticketing_enabled?: boolean
           timezone?: string
           updated_at?: string | null
           visibility?: string | null
           vote_credits_per_user?: number | null
           voting_closes_at?: string | null
+          voting_mechanism?: string
           voting_opens_at?: string | null
         }
         Relationships: [
@@ -477,6 +573,177 @@ export type Database = {
           },
         ]
       }
+      session_feedback: {
+        Row: {
+          comment: string | null
+          created_at: string
+          event_id: string
+          id: string
+          rating: number
+          session_id: string
+          updated_at: string
+          user_id: string
+          would_attend_again: boolean | null
+        }
+        Insert: {
+          comment?: string | null
+          created_at?: string
+          event_id: string
+          id?: string
+          rating: number
+          session_id: string
+          updated_at?: string
+          user_id: string
+          would_attend_again?: boolean | null
+        }
+        Update: {
+          comment?: string | null
+          created_at?: string
+          event_id?: string
+          id?: string
+          rating?: number
+          session_id?: string
+          updated_at?: string
+          user_id?: string
+          would_attend_again?: boolean | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "session_feedback_event_id_fkey"
+            columns: ["event_id"]
+            isOneToOne: false
+            referencedRelation: "events"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "session_feedback_session_id_fkey"
+            columns: ["session_id"]
+            isOneToOne: false
+            referencedRelation: "sessions"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "session_feedback_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      session_resources: {
+        Row: {
+          added_by: string | null
+          created_at: string
+          display_order: number
+          event_id: string
+          id: string
+          kind: string
+          session_id: string
+          title: string
+          url: string
+        }
+        Insert: {
+          added_by?: string | null
+          created_at?: string
+          display_order?: number
+          event_id: string
+          id?: string
+          kind?: string
+          session_id: string
+          title: string
+          url: string
+        }
+        Update: {
+          added_by?: string | null
+          created_at?: string
+          display_order?: number
+          event_id?: string
+          id?: string
+          kind?: string
+          session_id?: string
+          title?: string
+          url?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "session_resources_added_by_fkey"
+            columns: ["added_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "session_resources_event_id_fkey"
+            columns: ["event_id"]
+            isOneToOne: false
+            referencedRelation: "events"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "session_resources_session_id_fkey"
+            columns: ["session_id"]
+            isOneToOne: false
+            referencedRelation: "sessions"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      session_rsvps: {
+        Row: {
+          created_at: string
+          event_id: string
+          id: string
+          session_id: string
+          status: string
+          updated_at: string
+          user_id: string
+          waitlist_position: number | null
+        }
+        Insert: {
+          created_at?: string
+          event_id: string
+          id?: string
+          session_id: string
+          status?: string
+          updated_at?: string
+          user_id: string
+          waitlist_position?: number | null
+        }
+        Update: {
+          created_at?: string
+          event_id?: string
+          id?: string
+          session_id?: string
+          status?: string
+          updated_at?: string
+          user_id?: string
+          waitlist_position?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "session_rsvps_event_id_fkey"
+            columns: ["event_id"]
+            isOneToOne: false
+            referencedRelation: "events"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "session_rsvps_session_id_fkey"
+            columns: ["session_id"]
+            isOneToOne: false
+            referencedRelation: "sessions"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "session_rsvps_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       sessions: {
         Row: {
           created_at: string | null
@@ -484,6 +751,7 @@ export type Database = {
           description: string | null
           duration: number | null
           event_id: string
+          expected_attendance: number | null
           format: string | null
           host_id: string | null
           host_name: string | null
@@ -491,6 +759,9 @@ export type Database = {
           id: string
           is_self_hosted: boolean | null
           is_votable: boolean | null
+          rejection_reason: string | null
+          required_features: string[] | null
+          rsvp_count: number
           self_hosted_end_time: string | null
           self_hosted_start_time: string | null
           session_type: string | null
@@ -506,6 +777,7 @@ export type Database = {
           updated_at: string | null
           venue_id: string | null
           voter_count: number | null
+          waitlist_count: number
         }
         Insert: {
           created_at?: string | null
@@ -513,6 +785,7 @@ export type Database = {
           description?: string | null
           duration?: number | null
           event_id: string
+          expected_attendance?: number | null
           format?: string | null
           host_id?: string | null
           host_name?: string | null
@@ -520,6 +793,9 @@ export type Database = {
           id?: string
           is_self_hosted?: boolean | null
           is_votable?: boolean | null
+          rejection_reason?: string | null
+          required_features?: string[] | null
+          rsvp_count?: number
           self_hosted_end_time?: string | null
           self_hosted_start_time?: string | null
           session_type?: string | null
@@ -535,6 +811,7 @@ export type Database = {
           updated_at?: string | null
           venue_id?: string | null
           voter_count?: number | null
+          waitlist_count?: number
         }
         Update: {
           created_at?: string | null
@@ -542,6 +819,7 @@ export type Database = {
           description?: string | null
           duration?: number | null
           event_id?: string
+          expected_attendance?: number | null
           format?: string | null
           host_id?: string | null
           host_name?: string | null
@@ -549,6 +827,9 @@ export type Database = {
           id?: string
           is_self_hosted?: boolean | null
           is_votable?: boolean | null
+          rejection_reason?: string | null
+          required_features?: string[] | null
+          rsvp_count?: number
           self_hosted_end_time?: string | null
           self_hosted_start_time?: string | null
           session_type?: string | null
@@ -564,6 +845,7 @@ export type Database = {
           updated_at?: string | null
           venue_id?: string | null
           voter_count?: number | null
+          waitlist_count?: number
         }
         Relationships: [
           {
@@ -599,6 +881,157 @@ export type Database = {
             columns: ["venue_id"]
             isOneToOne: false
             referencedRelation: "venues"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      ticket_tiers: {
+        Row: {
+          allows_proposals: boolean
+          allows_voting: boolean
+          created_at: string
+          currency: string
+          description: string | null
+          display_order: number
+          event_id: string
+          id: string
+          is_active: boolean
+          name: string
+          price_cents: number
+          quantity_sold: number
+          quantity_total: number | null
+          sale_ends_at: string | null
+          sale_starts_at: string | null
+          stripe_price_id: string | null
+          updated_at: string
+          vote_credits_override: number | null
+        }
+        Insert: {
+          allows_proposals?: boolean
+          allows_voting?: boolean
+          created_at?: string
+          currency?: string
+          description?: string | null
+          display_order?: number
+          event_id: string
+          id?: string
+          is_active?: boolean
+          name: string
+          price_cents?: number
+          quantity_sold?: number
+          quantity_total?: number | null
+          sale_ends_at?: string | null
+          sale_starts_at?: string | null
+          stripe_price_id?: string | null
+          updated_at?: string
+          vote_credits_override?: number | null
+        }
+        Update: {
+          allows_proposals?: boolean
+          allows_voting?: boolean
+          created_at?: string
+          currency?: string
+          description?: string | null
+          display_order?: number
+          event_id?: string
+          id?: string
+          is_active?: boolean
+          name?: string
+          price_cents?: number
+          quantity_sold?: number
+          quantity_total?: number | null
+          sale_ends_at?: string | null
+          sale_starts_at?: string | null
+          stripe_price_id?: string | null
+          updated_at?: string
+          vote_credits_override?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "ticket_tiers_event_id_fkey"
+            columns: ["event_id"]
+            isOneToOne: false
+            referencedRelation: "events"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      tickets: {
+        Row: {
+          amount_paid_cents: number | null
+          checked_in_at: string | null
+          checked_in_by: string | null
+          created_at: string
+          event_id: string
+          id: string
+          payment_confirmed_at: string | null
+          payment_intent_id: string | null
+          qr_code: string | null
+          qr_generated_at: string | null
+          status: string
+          tier_id: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          amount_paid_cents?: number | null
+          checked_in_at?: string | null
+          checked_in_by?: string | null
+          created_at?: string
+          event_id: string
+          id?: string
+          payment_confirmed_at?: string | null
+          payment_intent_id?: string | null
+          qr_code?: string | null
+          qr_generated_at?: string | null
+          status?: string
+          tier_id: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          amount_paid_cents?: number | null
+          checked_in_at?: string | null
+          checked_in_by?: string | null
+          created_at?: string
+          event_id?: string
+          id?: string
+          payment_confirmed_at?: string | null
+          payment_intent_id?: string | null
+          qr_code?: string | null
+          qr_generated_at?: string | null
+          status?: string
+          tier_id?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "tickets_checked_in_by_fkey"
+            columns: ["checked_in_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "tickets_event_id_fkey"
+            columns: ["event_id"]
+            isOneToOne: false
+            referencedRelation: "events"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "tickets_tier_id_fkey"
+            columns: ["tier_id"]
+            isOneToOne: false
+            referencedRelation: "ticket_tiers"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "tickets_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
             referencedColumns: ["id"]
           },
         ]
@@ -830,10 +1263,34 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      can_manage_session: { Args: { target_session: string }; Returns: boolean }
+      can_read_event: { Args: { target_event: string }; Returns: boolean }
+      can_read_session_event: {
+        Args: { target_session: string }
+        Returns: boolean
+      }
+      create_event_with_program: {
+        Args: {
+          p_event: Json
+          p_time_slots: Json
+          p_tracks: Json
+          p_venues: Json
+        }
+        Returns: Json
+      }
+      event_role: { Args: { target_event: string }; Returns: string }
       get_notification_category: {
         Args: { notification_type: string }
         Returns: string
       }
+      session_feedback_summary: {
+        Args: { target_session: string }
+        Returns: {
+          avg_rating: number
+          count: number
+        }[]
+      }
+      session_started_at: { Args: { target_session: string }; Returns: string }
       should_send_notification: {
         Args: {
           p_channel: string
@@ -861,12 +1318,12 @@ export type Tables<
   DefaultSchemaTableNameOrOptions extends
     | keyof (DefaultSchema["Tables"] & DefaultSchema["Views"])
     | { schema: keyof DatabaseWithoutInternals },
-  TableName extends DefaultSchemaTableNameOrOptions extends {
+  TableName extends (DefaultSchemaTableNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof (DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"] &
         DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Views"])
-    : never = never,
+    : never) = never,
 > = DefaultSchemaTableNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -890,11 +1347,11 @@ export type TablesInsert<
   DefaultSchemaTableNameOrOptions extends
     | keyof DefaultSchema["Tables"]
     | { schema: keyof DatabaseWithoutInternals },
-  TableName extends DefaultSchemaTableNameOrOptions extends {
+  TableName extends (DefaultSchemaTableNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"]
-    : never = never,
+    : never) = never,
 > = DefaultSchemaTableNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -915,11 +1372,11 @@ export type TablesUpdate<
   DefaultSchemaTableNameOrOptions extends
     | keyof DefaultSchema["Tables"]
     | { schema: keyof DatabaseWithoutInternals },
-  TableName extends DefaultSchemaTableNameOrOptions extends {
+  TableName extends (DefaultSchemaTableNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"]
-    : never = never,
+    : never) = never,
 > = DefaultSchemaTableNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -940,11 +1397,11 @@ export type Enums<
   DefaultSchemaEnumNameOrOptions extends
     | keyof DefaultSchema["Enums"]
     | { schema: keyof DatabaseWithoutInternals },
-  EnumName extends DefaultSchemaEnumNameOrOptions extends {
+  EnumName extends (DefaultSchemaEnumNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[DefaultSchemaEnumNameOrOptions["schema"]]["Enums"]
-    : never = never,
+    : never) = never,
 > = DefaultSchemaEnumNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -957,11 +1414,11 @@ export type CompositeTypes<
   PublicCompositeTypeNameOrOptions extends
     | keyof DefaultSchema["CompositeTypes"]
     | { schema: keyof DatabaseWithoutInternals },
-  CompositeTypeName extends PublicCompositeTypeNameOrOptions extends {
+  CompositeTypeName extends (PublicCompositeTypeNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[PublicCompositeTypeNameOrOptions["schema"]]["CompositeTypes"]
-    : never = never,
+    : never) = never,
 > = PublicCompositeTypeNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -971,7 +1428,11 @@ export type CompositeTypes<
     : never
 
 export const Constants = {
+  graphql_public: {
+    Enums: {},
+  },
   public: {
     Enums: {},
   },
 } as const
+

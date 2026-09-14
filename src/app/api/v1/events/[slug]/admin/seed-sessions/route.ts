@@ -8,6 +8,17 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient, createRequestClient } from '@/lib/supabase/server'
 import { getUserFromRequest } from '@/lib/api/getUser'
 
+// Test-data seeding is disabled in production unless explicitly enabled.
+function seedingDisabled(): NextResponse | null {
+  if (process.env.NODE_ENV !== 'production' || process.env.ALLOW_SEED_SESSIONS === 'true') {
+    return null
+  }
+  return NextResponse.json(
+    { error: 'Test session seeding is disabled in production' },
+    { status: 403 }
+  )
+}
+
 const TEST_SESSIONS = [
   // Time slot conflicts (5 sessions wanting morning keynote time)
   { title: 'Opening Keynote: The Future of DAOs', expectedAttendance: 100, trackPreference: 'governance', description: 'A high-energy opening session exploring the evolution and future of decentralized autonomous organizations.' },
@@ -54,6 +65,9 @@ export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ slug: string }> }
 ) {
+  const disabled = seedingDisabled()
+  if (disabled) return disabled
+
   const { slug } = await params
 
   const user = await getUserFromRequest(request)
@@ -131,6 +145,9 @@ export async function DELETE(
   request: NextRequest,
   { params }: { params: Promise<{ slug: string }> }
 ) {
+  const disabled = seedingDisabled()
+  if (disabled) return disabled
+
   const { slug } = await params
 
   const user = await getUserFromRequest(request)

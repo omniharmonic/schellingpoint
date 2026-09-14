@@ -45,7 +45,13 @@ interface InviteData {
     duration: number
     host_name: string | null
     host: { id: string; display_name: string | null; avatar_url: string | null } | null
+    event: { slug: string } | null
   }
+}
+
+// Sessions live under /e/[slug]/sessions; without a slug fall back to the home page.
+function sessionHref(eventSlug: string | null | undefined, sessionId: string): string {
+  return eventSlug ? `/e/${eventSlug}/sessions/${sessionId}` : '/'
 }
 
 interface InviteClientProps {
@@ -77,7 +83,7 @@ export function InviteClient({ token, invite }: InviteClientProps) {
           </CardHeader>
           <CardContent className="text-center">
             <Button asChild>
-              <Link href="/sessions">Browse Sessions</Link>
+              <Link href="/">Go Home</Link>
             </Button>
           </CardContent>
         </Card>
@@ -86,6 +92,8 @@ export function InviteClient({ token, invite }: InviteClientProps) {
   }
 
   const session = invite.session as any
+  const eventSlug: string | null = session.event?.slug ?? null
+  const sessionUrl = sessionHref(eventSlug, session.id)
   const FormatIcon = formatIcons[session.format] || Mic
 
   // Invite is not pending
@@ -112,7 +120,7 @@ export function InviteClient({ token, invite }: InviteClientProps) {
           </CardHeader>
           <CardContent className="text-center">
             <Button asChild>
-              <Link href={`/sessions/${session.id}`}>View Session</Link>
+              <Link href={sessionUrl}>View Session</Link>
             </Button>
           </CardContent>
         </Card>
@@ -138,7 +146,7 @@ export function InviteClient({ token, invite }: InviteClientProps) {
           </CardHeader>
           <CardContent className="text-center">
             <Button asChild>
-              <Link href={`/sessions/${session.id}`}>View Session</Link>
+              <Link href={sessionUrl}>View Session</Link>
             </Button>
           </CardContent>
         </Card>
@@ -162,7 +170,7 @@ export function InviteClient({ token, invite }: InviteClientProps) {
       if (!response.ok) {
         if (response.status === 409) {
           // Already a co-host — redirect to session
-          router.push(`/sessions/${data.session_id}`)
+          router.push(sessionHref(data.event_slug ?? eventSlug, data.session_id ?? session.id))
           return
         }
         setError(data.error || 'Failed to accept invite')

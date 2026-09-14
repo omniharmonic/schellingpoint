@@ -9,6 +9,45 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/server'
 import { getUserFromRequest } from '@/lib/api/getUser'
 
+async function notifySchedulePublished(
+  supabase: Awaited<ReturnType<typeof createAdminClient>>,
+  eventId: string,
+  slug: string,
+  eventName: string,
+  scheduledCount: number
+): Promise<number> {
+  try {
+    const { data: members, error } = await supabase
+      .from('event_members')
+      .select('user_id')
+      .eq('event_id', eventId)
+    if (error) {
+      console.error('Error loading members for schedule notification:', error)
+      return 0
+    }
+    if (!members || members.length === 0) return 0
+
+    const rows = members.map((member) => ({
+      user_id: member.user_id,
+      event_id: eventId,
+      type: 'schedule_published',
+      title: `The schedule for ${eventName} is live`,
+      body: `${scheduledCount} session${scheduledCount === 1 ? '' : 's'} are on the schedule. Plan your days and add favorites.`,
+      action_url: `/e/${slug}/schedule`,
+      data: { scheduled_sessions: scheduledCount },
+    }))
+    const { error: insertError } = await supabase.from('notifications').insert(rows)
+    if (insertError) {
+      console.error('Error creating schedule_published notifications:', insertError)
+      return 0
+    }
+    return rows.length
+  } catch (err) {
+    console.error('Unexpected error sending schedule_published notifications:', err)
+    return 0
+  }
+}
+
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ slug: string }> }
@@ -26,7 +65,7 @@ export async function POST(
   // Get event
   const { data: event, error: eventError } = await supabase
     .from('events')
-    .select('id, schedule_published_at, last_schedule_change_at')
+    .select('id, name, schedule_published_at, last_schedule_change_at')
     .eq('slug', slug)
     .single()
 
@@ -69,13 +108,15 @@ export async function POST(
     )
   }
 
-  // TODO: Trigger "schedule published" notification to attendees
-  // This can be implemented with the existing notification system
+  // Let every member know the schedule is live. A notification failure must
+  // never undo a successful publish, so it is logged and reported, not thrown.
+  const notified = await notifySchedulePublished(supabase, event.id, slug, event.name, scheduledCount || 0)
 
   return NextResponse.json({
     success: true,
     publishedAt: now,
     scheduledSessions: scheduledCount || 0,
+    notified,
     message: `Schedule published with ${scheduledCount || 0} scheduled sessions`,
   })
 }

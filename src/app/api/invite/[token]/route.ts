@@ -27,7 +27,8 @@ export async function GET(
         format,
         duration,
         host_name,
-        host:profiles!host_id(id, display_name, avatar_url)
+        host:profiles!host_id(id, display_name, avatar_url),
+        event:events(slug)
       )
     `)
     .eq('token', token)
@@ -41,8 +42,14 @@ export async function GET(
   const isExpired = new Date(invite.expires_at) < new Date()
   const effectiveStatus = invite.status === 'pending' && isExpired ? 'expired' : invite.status
 
+  // Supabase infers nested joins as arrays; the FK relationships are to-one.
+  const session = invite.session as any
+  const eventSlug: string | null = session?.event?.slug ?? null
+
   return NextResponse.json({
     status: effectiveStatus,
-    session: invite.session,
+    session_id: session?.id ?? null,
+    event_slug: eventSlug,
+    session,
   })
 }

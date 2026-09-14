@@ -264,3 +264,34 @@ Phase D (Scheduling)
 - Refund management UI (use Stripe dashboard)
 - Promo codes / discounts
 - Ticket resale / transfer
+
+## Implementation note: C5 Stripe Connect (2026-09-14)
+
+Implemented as Express accounts owned by the platform (not the OAuth flow
+sketched above; Stripe now steers new platforms to Express + account links).
+
+- `POST /api/v1/events/[slug]/admin/stripe-connect` (owner/admin) creates an
+  Express account on first call (`accounts.create` with `type: 'express'`,
+  `card_payments` + `transfers` capabilities, `metadata.event_id/event_slug`),
+  stores `events.stripe_account_id`, then returns an onboarding link from
+  `accountLinks.create({ type: 'account_onboarding' })`. `?action=dashboard`
+  returns an Express Dashboard link (`accounts.createLoginLink`).
+- `GET` returns `{ connected, accountId, chargesEnabled, payoutsEnabled,
+  detailsSubmitted, requirementsDue, platformFallbackAllowed }` via
+  `accounts.retrieve`.
+- `DELETE` (owner) clears `stripe_account_id` and, unless
+  `STRIPE_ALLOW_PLATFORM_CHARGES=true`, sets `ticketing_enabled=false`. The
+  Stripe account is never deleted.
+- No server-side callback route: `return_url`/`refresh_url` land on
+  `/e/[slug]/admin/tickets?stripe=return|refresh`; the page shows a banner and
+  re-fetches `GET`, which is the only trustworthy source of onboarding state.
+- `stripe_account_status` column was not added; status is read live from
+  Stripe rather than cached.
+- Checkout is unchanged in behaviour: null `stripe_account_id` charges the
+  platform account; a connected account gets `transfer_data.destination` +
+  `application_fee_amount = calculatePlatformFee(price)` (5% + $0.50).
+- Admin UI blocks *enabling* ticket sales while paid tiers exist unless the
+  connected account has `charges_enabled`, or (with no account connected)
+  `STRIPE_ALLOW_PLATFORM_CHARGES=true`. Free-only events are never blocked.
+- Without `STRIPE_SECRET_KEY`, every stripe-connect handler and paid checkout
+  answer `503 { error: 'Payments are not configured' }`.

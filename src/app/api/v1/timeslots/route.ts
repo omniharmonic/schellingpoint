@@ -1,5 +1,5 @@
 import { createAdminClient } from '@/lib/supabase/server'
-import { validateApiKey } from '@/lib/api/auth'
+import { validateApiKey, resolvePartnerEvent } from '@/lib/api/auth'
 import {
   apiSuccess,
   unauthorized,
@@ -28,6 +28,9 @@ export async function GET(request: Request) {
 
   const supabase = await createAdminClient()
 
+  const resolved = await resolvePartnerEvent(request, supabase)
+  if ('error' in resolved) return resolved.error
+
   let selectQuery = TIMESLOT_FIELDS
   if (result.includes.includes('venue')) {
     selectQuery += ',venue:venues(id,name,slug)'
@@ -36,6 +39,7 @@ export async function GET(request: Request) {
   let query = supabase
     .from('time_slots')
     .select(selectQuery)
+    .eq('event_id', resolved.event.id)
     .order('start_time')
 
   if (dayParam) {

@@ -33,6 +33,19 @@ export async function getEventBySlug(slug: string): Promise<Event | null> {
 }
 
 /**
+ * Why a slug is not viewable by the current visitor. Used only to pick the
+ * access-gate copy; the event payload itself is never returned here.
+ */
+export async function getEventAccessReason(slug: string): Promise<'draft' | 'private' | 'unknown'> {
+  const supabase = await createAdminClient();
+  const { data } = await supabase.from('events').select('status, visibility').eq('slug', slug).maybeSingle();
+  if (!data) return 'unknown';
+  if (data.status === 'draft') return 'draft';
+  if (data.visibility === 'private') return 'private';
+  return 'unknown';
+}
+
+/**
  * Get event by ID (server-side)
  */
 export async function getEventById(id: string): Promise<Event | null> {

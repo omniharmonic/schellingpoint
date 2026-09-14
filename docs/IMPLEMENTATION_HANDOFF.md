@@ -355,6 +355,29 @@ npx supabase gen types typescript --local > src/types/supabase.ts
 See `docs/design/UX_POLISH_QA.md` for reproduced errors, fixes, validation, and remaining checks. New local migrations provide atomic event creation and database-enforced participation rules; deploy these before the corresponding app code. Event settings now supports publishing and lifecycle transitions. Build, typecheck, 20 targeted tests, and rolled-back SQL participation checks pass. Full organizer browser verification awaits the prepared local event's terms/submission approval; production readiness is not yet signed off.
 
 
+### 2026-09-14 functional completeness pass
+
+Gap audit of the post-overhaul app found broken flows, security holes at the database boundary, and organizer capabilities the plan implied but never shipped. All fixed on `main`:
+
+**Security / data boundary** (`20260915000001_harden_writes.sql`, `…03_fix_cohost_policy_recursion.sql`, `…04_fix_cohost_notification_triggers.sql`):
+- Removed the client `tickets` INSERT policy (free tickets + self-granted membership were possible via direct REST).
+- `enforce_session_update_rules` trigger: hosts may edit content, but only owner/admin/moderator can change status, venue, time slot, host, votability, counters or session type; `event_id` can never change. Counter-maintenance triggers and the service role are exempt.
+- `session_cohosts`/`cohost_invites` derive `event_id` from the session; cohost policies use SECURITY DEFINER predicates (`is_session_host/cohost/organizer`) — the old policies recursed and the old `is_admin` grant was global.
+- Cohost notification triggers referenced a non-existent `email` column, so every co-host invite creation/acceptance failed with 500. Fixed.
+- `event_members` gained owner/admin UPDATE/DELETE policies; helper `event_role(uuid)`.
+- Partner read API (`/api/v1/{sessions,tracks,venues,timeslots,schedule,profiles}`) now requires the API key and `?event=<slug>`, returns only public/unlisted non-draft events, and strips email/telegram/ens/is_admin. `docs/api-guide.md` updated.
+- Seed-sessions endpoint is blocked in production unless `ALLOW_SEED_SESSIONS=true`.
+
+**Broken flows fixed**: co-host invite pages linked to non-existent top-level `/sessions` routes; `/admin/proposals` notification target did not exist (redirect page + trigger fix); `EditSessionModal` hardcoded EthBoulder dates and a `-07:00` offset; `?filter=mine` was ignored on the sessions list; invitation email failures were hidden from organizers; `voting_opened` and `schedule_published` notifications were never created; notification dispatch had no cron (added `vercel.json`, every 5 minutes; **set `CRON_SECRET` in Vercel**).
+
+**New organizer capabilities**: full post-creation event settings (basics, dates/timezone, participation windows/formats/limits, voting config, branding/theme/social/assets, lifecycle transitions, archive, delete draft) at `/e/[slug]/admin/settings` backed by `PATCH|DELETE /api/events/[eventId]/settings`; member role management and removal (`PATCH|DELETE /api/v1/events/[slug]/members/[userId]`); invitation `max_uses`/`use_count` with CAS enforcement; time-slot editing in `/admin/setup`; batch rejection reason persisted (`sessions.rejection_reason`) and included in the host notification; Stripe Connect Express onboarding (`/api/v1/events/[slug]/admin/stripe-connect`, tickets admin "Payments" card; degrades to 503 without `STRIPE_SECRET_KEY`); revenue page shows platform fees and net.
+
+**New attendee features**: post-session feedback (P6.6, `session_feedback`, k-suppressed summary ≥3 responses, anonymous to hosts) and session resources (P6.7, `session_resources`) via `20260915000002_session_feedback_resources.sql`; `/events` directory page; "My sessions" view with pending/rejected badges linking to the editable detail page.
+
+**Verification**: `npm run typecheck`, `npm run build`, `npm test` (24 Playwright API/logic tests) and `npm run test:sql` (4 rolled-back SQL integration fixtures) all pass against local Supabase; browser smoke of the new admin pages at desktop and 390px. Migrations `20260915000001`–`04` are applied locally only — **apply to production before deploying** (`npx supabase db push`).
+
+**Still open**: push notifications (UI toggle disabled), PWA (P6.4), Phase 7 treasury/contract items, Phase 8 scale items. `tests/e2e.spec.ts` and `tests/new-features.spec.ts` remain stale and are not part of `npm test`.
+
 ### 2026-09-14 release hardening
 
 Production candidate includes Next.js 15.5.25 / React 19.3.0, zero npm audit findings, verified server access-token cookies, private/draft read isolation, JWT-scoped session creation, and corrected calendar exports. New migrations: `20260914000001` atomic creation, `20260914000002` participation guards, and `20260914000003` event read access. See `docs/design/UX_POLISH_QA.md` for validation and its limits.

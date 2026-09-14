@@ -22,7 +22,8 @@ async function getInviteData(token: string) {
           format,
           duration,
           host_name,
-          host:profiles!host_id(id, display_name, avatar_url)
+          host:profiles!host_id(id, display_name, avatar_url),
+          event:events(slug)
         )
       `)
       .eq('token', token)

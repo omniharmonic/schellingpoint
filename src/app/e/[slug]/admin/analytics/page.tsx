@@ -11,6 +11,7 @@ import {
   TrendingUp,
   BarChart3,
   ThumbsUp,
+  Star,
 } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 
@@ -76,6 +77,12 @@ interface Venue {
   capacity: number | null
 }
 
+interface FeedbackRow {
+  session_id: string
+  rating: number
+  would_attend_again: boolean | null
+}
+
 export default function AdminAnalyticsPage() {
   const router = useRouter()
   const { user, isLoading: authLoading } = useAuth()
@@ -88,6 +95,7 @@ export default function AdminAnalyticsPage() {
   const [votes, setVotes] = React.useState<Vote[]>([])
   const [timeSlots, setTimeSlots] = React.useState<TimeSlot[]>([])
   const [venues, setVenues] = React.useState<Venue[]>([])
+  const [feedback, setFeedback] = React.useState<FeedbackRow[]>([])
   const [isLoading, setIsLoading] = React.useState(true)
 
   // Redirect if not admin
@@ -104,7 +112,7 @@ export default function AdminAnalyticsPage() {
       const authHeader = token ? `Bearer ${token}` : `Bearer ${SUPABASE_KEY}`
 
       try {
-        const [sessionsRes, tracksRes, membersRes, votesRes, timeSlotsRes, venuesRes] = await Promise.all([
+        const [sessionsRes, tracksRes, membersRes, votesRes, timeSlotsRes, venuesRes, feedbackRes] = await Promise.all([
           fetch(`${SUPABASE_URL}/rest/v1/sessions?event_id=eq.${event.id}&select=id,status,total_votes,track_id,venue_id,time_slot_id,format,created_at`, {
             headers: { 'apikey': SUPABASE_KEY, 'Authorization': authHeader },
           }),
@@ -123,6 +131,10 @@ export default function AdminAnalyticsPage() {
           fetch(`${SUPABASE_URL}/rest/v1/venues?event_id=eq.${event.id}&select=id,name,capacity`, {
             headers: { 'apikey': SUPABASE_KEY, 'Authorization': authHeader },
           }),
+          // RLS: organizers can read all feedback for their event's sessions
+          fetch(`${SUPABASE_URL}/rest/v1/session_feedback?event_id=eq.${event.id}&select=session_id,rating,would_attend_again`, {
+            headers: { 'apikey': SUPABASE_KEY, 'Authorization': authHeader },
+          }),
         ])
 
         if (sessionsRes.ok) setSessions(await sessionsRes.json())
@@ -131,6 +143,7 @@ export default function AdminAnalyticsPage() {
         if (votesRes.ok) setVotes(await votesRes.json())
         if (timeSlotsRes.ok) setTimeSlots(await timeSlotsRes.json())
         if (venuesRes.ok) setVenues(await venuesRes.json())
+        if (feedbackRes.ok) setFeedback(await feedbackRes.json())
       } catch (err) {
         console.error('Error fetching analytics data:', err)
       } finally {
@@ -221,7 +234,24 @@ export default function AdminAnalyticsPage() {
       return { ...venue, slots: venueSlots.length, sessions: venueSessions.length, utilization }
     })
 
+    // Feedback stats
+    const feedbackCount = feedback.length
+    const avgRating = feedbackCount > 0
+      ? feedback.reduce((sum, f) => sum + f.rating, 0) / feedbackCount
+      : null
+    const ratedSessions = new Set(feedback.map((f) => f.session_id)).size
+    const attendAgainAnswers = feedback.filter((f) => f.would_attend_again !== null)
+    const attendAgainRate = attendAgainAnswers.length > 0
+      ? Math.round((attendAgainAnswers.filter((f) => f.would_attend_again).length / attendAgainAnswers.length) * 100)
+      : null
+
     return {
+      feedback: {
+        count: feedbackCount,
+        avgRating,
+        ratedSessions,
+        attendAgainRate,
+      },
       proposals: {
         total: totalProposals,
         pending: pendingCount,
@@ -252,7 +282,7 @@ export default function AdminAnalyticsPage() {
         venueStats,
       },
     }
-  }, [sessions, tracks, members, votes, timeSlots, venues])
+  }, [sessions, tracks, members, votes, timeSlots, venues, feedback])
 
   if (authLoading || roleLoading || isLoading) {
     return (
@@ -301,6 +331,17 @@ export default function AdminAnalyticsPage() {
               value={`${stats.schedule.slotUtilization}%`}
               icon={<Calendar className="h-4 w-4" />}
               description={`${stats.schedule.scheduledSlots}/${stats.schedule.availableSlots} slots filled`}
+            />
+            <StatCard
+              title="Feedback"
+              value={stats.feedback.avgRating !== null ? `${stats.feedback.avgRating.toFixed(1)} / 5` : '—'}
+              icon={<Star className="h-4 w-4" />}
+              description={
+                stats.feedback.count === 0
+                  ? 'No session ratings yet'
+                  : `${stats.feedback.count} ${stats.feedback.count === 1 ? 'rating' : 'ratings'} across ${stats.feedback.ratedSessions} ${stats.feedback.ratedSessions === 1 ? 'session' : 'sessions'}` +
+                    (stats.feedback.attendAgainRate !== null ? ` · ${stats.feedback.attendAgainRate}% would attend again` : '')
+              }
             />
           </div>
 

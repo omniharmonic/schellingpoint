@@ -204,7 +204,7 @@ export function BatchActions({
           >
             <h3 className="font-semibold mb-2">Reject {selectedCount} Session{selectedCount > 1 ? 's' : ''}?</h3>
             <p className="text-sm text-muted-foreground mb-4">
-              Optionally provide a reason for rejection (will be included in notification).
+              Optionally provide a reason for rejection. Included in the host&apos;s notification.
             </p>
             <textarea
               value={rejectReason}

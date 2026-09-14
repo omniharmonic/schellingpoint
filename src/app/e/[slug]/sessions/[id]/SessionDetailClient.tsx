@@ -38,6 +38,8 @@ import { EditSessionModal } from '@/components/EditSessionModal'
 import { ManageCohostsSection } from '@/components/ManageCohostsSection'
 import { AddToCalendar } from '@/components/AddToCalendar'
 import { RSVPButton } from '@/components/RSVPButton'
+import { SessionFeedback } from '@/components/SessionFeedback'
+import { SessionResources } from '@/components/SessionResources'
 import { useAuth } from '@/hooks/useAuth'
 import { useEvent, useEventRole } from '@/contexts/EventContext'
 import { votesToCredits, nextVoteCost } from '@/lib/utils'
@@ -85,12 +87,25 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
   const { user } = useAuth()
   const event = useEvent()
   const votingClosed = !isParticipationOpen(event, 'vote')
-  const { voteCredits, isAdmin } = useEventRole()
+  const { voteCredits, isAdmin, role } = useEventRole()
 
   // Use event's vote credits per user
   const totalCredits = voteCredits
 
   const [session, setSession] = React.useState<any>(initialSession || null)
+
+  // Host, co-host, or event organizer (owner/admin/moderator) - can curate resources
+  const canManageSession = !!user && (
+    session?.host_id === user.id ||
+    session?.cohosts?.some((c: any) => c.user_id === user.id) ||
+    isAdmin ||
+    role === 'moderator'
+  )
+  // Feedback opens once a scheduled session's start time has passed
+  const sessionStartTime: string | null = session?.status === 'scheduled'
+    ? (session.is_self_hosted ? session.self_hosted_start_time : session.time_slot?.start_time) ?? null
+    : null
+  const sessionHasStarted = !!sessionStartTime && new Date(sessionStartTime).getTime() <= Date.now()
   const [isLoading, setIsLoading] = React.useState(!initialSession)
   const [actionError, setActionError] = React.useState<string | null>(null)
   const [error, setError] = React.useState<string | null>(null)
@@ -871,6 +886,11 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
                 </div>
               </div>
             </Card>
+
+            {/* Post-session feedback - only once the session has started */}
+            {sessionHasStarted && (
+              <SessionFeedback sessionId={sessionId} eventSlug={event.slug} />
+            )}
           </div>
 
           {/* Sidebar */}
@@ -1015,7 +1035,6 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
                     Add Telegram Group
                   </Button>
                 )}
-                {/* TODO: Knowledge Graph button - Make this configurable per-event when needed */}
                 {/* Delete button for session host or admin */}
                 {user && (session.host_id === user.id || isAdmin) && (
                   <Button
@@ -1029,6 +1048,13 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
                 )}
               </div>
             </Card>
+
+            {/* Session resources (slides, recordings, notes, links) */}
+            <SessionResources
+              sessionId={sessionId}
+              eventSlug={event.slug}
+              canManage={canManageSession}
+            />
 
             {/* Delete Confirmation Modal */}
             {showDeleteConfirm && (

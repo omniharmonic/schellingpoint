@@ -4,9 +4,10 @@ import { isParticipationOpen } from '@/lib/events/lifecycle'
 import * as React from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { Search, SlidersHorizontal, Loader2, Heart, Calendar } from 'lucide-react'
+import { Search, SlidersHorizontal, Loader2, Heart, Calendar, Mic, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Badge } from '@/components/ui/badge'
 import { SessionCard } from '@/components/SessionCard'
 import { DashboardLayout } from '@/components/DashboardLayout'
 import { useAuth } from '@/hooks/useAuth'
@@ -40,6 +41,14 @@ const sortOptions = [
   { value: 'alpha', label: 'A-Z' },
   { value: 'time', label: 'By Time' },
 ]
+
+const SESSION_SELECT = 'select=*,venue:venues(name),time_slot:time_slots(label,start_time),track:tracks(id,name,color),cohosts:session_cohosts(profile:profiles(display_name))'
+
+// Statuses that are not publicly listed; shown only in the "My sessions" view
+const ownerOnlyStatus: Record<string, { label: string; className: string }> = {
+  pending: { label: 'Pending review', className: 'bg-yellow-500/15 text-yellow-700 dark:text-yellow-400 border-yellow-500/40' },
+  rejected: { label: 'Not selected', className: 'bg-destructive/10 text-destructive border-destructive/30' },
+}
 
 function getAccessToken(): string | null {
   const storageKey = `sb-${new URL(SUPABASE_URL).hostname.split('.')[0]}-auth-token`
@@ -86,10 +95,26 @@ export default function EventSessionsPage() {
   const [showFilters, setShowFilters] = React.useState(false)
   const [day, setDay] = React.useState<string>('all')
   const [showFavoritesOnly, setShowFavoritesOnly] = React.useState(false)
+  // ?filter=mine — sessions the current user hosts or co-hosts, in any status
+  const [mineOnly, setMineOnly] = React.useState(false)
+  const [mySessions, setMySessions] = React.useState<any[]>([])
+  const [myLoading, setMyLoading] = React.useState(false)
+  const [myLoadError, setMyLoadError] = React.useState(false)
 
   React.useEffect(() => {
-    const requestedSort = new URLSearchParams(window.location.search).get('sort')
+    const params = new URLSearchParams(window.location.search)
+    const requestedSort = params.get('sort')
     if (sortOptions.some(option => option.value === requestedSort)) setSort(requestedSort!)
+    if (params.get('filter') === 'mine') setMineOnly(true)
+  }, [])
+
+  // Keep ?filter=mine in the URL in sync so the view is shareable/bookmarkable
+  const updateMineOnly = React.useCallback((next: boolean) => {
+    setMineOnly(next)
+    const url = new URL(window.location.href)
+    if (next) url.searchParams.set('filter', 'mine')
+    else url.searchParams.delete('filter')
+    window.history.replaceState(null, '', url.toString())
   }, [])
 
   // Generate list of event days
@@ -186,6 +211,51 @@ export default function EventSessionsPage() {
       mounted = false
     }
   }, [event.id])
+
+  // Fetch the user's own sessions (hosted or co-hosted, any status) for the "mine" view.
+  // Uses the bearer token: RLS lets hosts read their own pending/rejected sessions and
+  // co-hosts read pending sessions they co-host.
+  React.useEffect(() => {
+    if (!user || !mineOnly) {
+      setMySessions([])
+      return
+    }
+    let mounted = true
+    const token = getAccessToken()
+    if (!token) return
+    const headers = { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${token}` }
+
+    const fetchMine = async () => {
+      setMyLoading(true)
+      setMyLoadError(false)
+      try {
+        const cohostRes = await fetch(
+          `${SUPABASE_URL}/rest/v1/session_cohosts?user_id=eq.${user.id}&event_id=eq.${event.id}&select=session_id`,
+          { headers }
+        )
+        const cohostIds: string[] = cohostRes.ok
+          ? (await cohostRes.json()).map((row: any) => row.session_id)
+          : []
+        const ownership = cohostIds.length > 0
+          ? `or=(host_id.eq.${user.id},id.in.(${cohostIds.join(',')}))`
+          : `host_id=eq.${user.id}`
+        const response = await fetch(
+          `${SUPABASE_URL}/rest/v1/sessions?event_id=eq.${event.id}&${ownership}&${SESSION_SELECT}&order=created_at.desc`,
+          { headers }
+        )
+        if (!response.ok) throw new Error('My sessions unavailable')
+        if (mounted) setMySessions(await response.json())
+      } catch (err) {
+        if (mounted) setMyLoadError(true)
+        console.error('Error fetching my sessions:', err)
+      } finally {
+        if (mounted) setMyLoading(false)
+      }
+    }
+
+    fetchMine()
+    return () => { mounted = false }
+  }, [user, event.id, mineOnly])
 
   // Fetch user votes and favorites when user changes
   React.useEffect(() => {
@@ -420,7 +490,7 @@ export default function EventSessionsPage() {
 
   // Filter and sort sessions
   const filteredSessions = React.useMemo(() => {
-    let filtered = sessions
+    let filtered = mineOnly ? mySessions : sessions
 
     // Search filter
     if (search) {
@@ -472,7 +542,7 @@ export default function EventSessionsPage() {
       // Use stable positions from last server fetch — prevents jumping during voting
       const order = stableVoteOrderRef.current
       filtered = [...filtered].sort((a, b) =>
-        (order[a.id] ?? Infinity) - (order[b.id] ?? Infinity)
+        ((order[a.id] ?? Infinity) - (order[b.id] ?? Infinity)) || ((b.total_votes || 0) - (a.total_votes || 0))
       )
     } else if (sort === 'recent') {
       filtered = [...filtered].sort(
@@ -490,9 +560,9 @@ export default function EventSessionsPage() {
     }
 
     return filtered
-  }, [sessions, search, format, track, status, sort, day, showFavoritesOnly, favorites, event.timezone])
+  }, [sessions, mySessions, mineOnly, search, format, track, status, sort, day, showFavoritesOnly, favorites, event.timezone])
 
-  if (isLoading) {
+  if (isLoading || (mineOnly && myLoading && mySessions.length === 0)) {
     return (
       <DashboardLayout>
         <div className="flex items-center justify-center py-12">
@@ -513,8 +583,37 @@ export default function EventSessionsPage() {
           </p>
         </div>
 
+        {/* "My sessions" view heading */}
+        {mineOnly && (
+          <div className="flex flex-wrap items-center gap-3 rounded-xl border bg-muted/30 p-4">
+            <Badge variant="secondary" className="flex items-center gap-1.5 px-2.5 py-1 text-sm">
+              <Mic className="h-3.5 w-3.5" />
+              My sessions
+              <button
+                type="button"
+                aria-label="Show all sessions"
+                onClick={() => updateMineOnly(false)}
+                className="ml-1 rounded-full p-0.5 hover:bg-foreground/10"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </Badge>
+            <p className="text-sm text-muted-foreground flex-1 min-w-[12rem]">
+              {user
+                ? 'Sessions you host or co-host, including proposals still under review.'
+                : 'Sign in to see the sessions you host or co-host.'}
+            </p>
+            {!user && (
+              <Button size="sm" asChild>
+                <Link href={`/login?returnTo=${encodeURIComponent(`/e/${event.slug}/sessions?filter=mine`)}`}>Sign in</Link>
+              </Button>
+            )}
+          </div>
+        )}
+
         {actionError && <p role="alert" className="sticky top-20 z-10 rounded-xl border bg-card p-4 text-sm text-destructive">{actionError}</p>}
-        {loadError && <div role="alert" className="rounded-xl border p-5"><p>Sessions couldn’t load. Please try again.</p><Button className="mt-3" variant="outline" onClick={() => window.location.reload()}>Try again</Button></div>}
+        {loadError && !mineOnly && <div role="alert" className="rounded-xl border p-5"><p>Sessions couldn’t load. Please try again.</p><Button className="mt-3" variant="outline" onClick={() => window.location.reload()}>Try again</Button></div>}
+        {myLoadError && mineOnly && <div role="alert" className="rounded-xl border p-5"><p>Your sessions couldn’t load. Please try again.</p><Button className="mt-3" variant="outline" onClick={() => window.location.reload()}>Try again</Button></div>}
         {/* Search and Filters */}
         <div className="space-y-4">
           <div className="flex gap-3">
@@ -541,9 +640,21 @@ export default function EventSessionsPage() {
 
           {showFilters && (
             <div className="flex flex-wrap gap-4 p-4 rounded-lg border bg-muted/30">
-              {/* Favorites toggle */}
+              {/* Favorites / mine toggles */}
               {user && (
-                <div className="w-full">
+                <div className="w-full flex flex-wrap gap-2">
+                  <button
+                    onClick={() => updateMineOnly(!mineOnly)}
+                    className={cn(
+                      'flex items-center gap-2 px-3 py-1.5 text-sm rounded-md transition-colors',
+                      mineOnly
+                        ? 'bg-primary text-primary-foreground'
+                        : 'bg-background border hover:bg-accent'
+                    )}
+                  >
+                    <Mic className="h-4 w-4" />
+                    My Sessions
+                  </button>
                   <button
                     onClick={() => setShowFavoritesOnly(!showFavoritesOnly)}
                     className={cn(
@@ -702,24 +813,52 @@ export default function EventSessionsPage() {
 
         {/* Sessions Grid */}
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-          {filteredSessions.map((session) => (
-            <SessionCard
-              key={session.id}
-              session={session}
-              eventSlug={event.slug}
-              userVotes={userVotes[session.id] || 0}
-              isFavorited={favorites.has(session.id)}
-              remainingCredits={creditsRemaining}
-              onVote={handleVote}
-              onToggleFavorite={handleToggleFavorite}
-              showVoting={!votingClosed}
-              isLoggedIn={!!user}
-              votingMechanism={event.votingMechanism}
-            />
-          ))}
+          {filteredSessions.map((session) => {
+            const ownerStatus = mineOnly ? ownerOnlyStatus[session.status] : undefined
+            return (
+              <div key={session.id} className="space-y-2">
+                {ownerStatus && (
+                  <div className="flex items-center justify-between gap-2 px-1">
+                    <Badge variant="outline" className={cn('text-xs', ownerStatus.className)}>{ownerStatus.label}</Badge>
+                    <Link href={`/e/${event.slug}/sessions/${session.id}`} className="text-xs text-muted-foreground hover:text-foreground underline-offset-4 hover:underline">
+                      {session.status === 'pending' ? 'View or edit' : 'View'}
+                    </Link>
+                  </div>
+                )}
+                <SessionCard
+                  session={session}
+                  eventSlug={event.slug}
+                  userVotes={userVotes[session.id] || 0}
+                  isFavorited={favorites.has(session.id)}
+                  remainingCredits={creditsRemaining}
+                  onVote={handleVote}
+                  onToggleFavorite={handleToggleFavorite}
+                  showVoting={!votingClosed && !ownerStatus}
+                  isLoggedIn={!!user}
+                  votingMechanism={event.votingMechanism}
+                />
+              </div>
+            )
+          })}
         </div>
 
-        {!loadError && filteredSessions.length === 0 && (
+        {mineOnly && !myLoadError && !myLoading && filteredSessions.length === 0 && (
+          <div className="text-center py-12">
+            <h2 className="text-xl font-semibold mb-2">{mySessions.length ? 'No sessions match just yet.' : user ? "You aren't hosting any sessions yet." : 'Sign in to see your sessions.'}</h2>
+            <p className="text-muted-foreground">{mySessions.length ? 'Try another search or clear your filters.' : user && isParticipationOpen(event, 'propose') ? 'Propose a session and it will show up here, even while it is under review.' : user ? 'Sessions you host or co-host will appear here.' : ''}</p>
+            <div className="flex flex-wrap justify-center gap-3 mt-4">
+              {mySessions.length > 0 && <Button variant="outline" onClick={() => { setSearch(''); setFormat('all'); setTrack('all'); setStatus('all'); setDay('all'); setShowFavoritesOnly(false) }}>Clear filters</Button>}
+              <Button variant="outline" onClick={() => updateMineOnly(false)}>Show all sessions</Button>
+              {user && isParticipationOpen(event, 'propose') && (
+                <Button asChild>
+                  <Link href={`/e/${event.slug}/propose`}>Propose a Session</Link>
+                </Button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {!mineOnly && !loadError && filteredSessions.length === 0 && (
           <div className="text-center py-12">
             <h2 className="text-xl font-semibold mb-2">{sessions.length ? 'No sessions match just yet.' : 'What could we explore together?'}</h2>
             <p className="text-muted-foreground">{sessions.length ? 'Try another search or clear your filters.' : isParticipationOpen(event, 'propose') ? 'Be the first to bring an idea to the gathering.' : 'Sessions will appear here as the community shapes the program.'}</p>

@@ -1,5 +1,5 @@
 import { createAdminClient, createRequestClient } from '@/lib/supabase/server'
-import { validateApiKey } from '@/lib/api/auth'
+import { validateApiKey, resolvePartnerEvent } from '@/lib/api/auth'
 import { getUserFromRequest } from '@/lib/api/getUser'
 import {
   apiSuccess,
@@ -17,7 +17,7 @@ const VALID_STATUSES = ['pending', 'approved', 'rejected', 'scheduled']
 function buildSelect(includes: string[]): string {
   const parts = [SESSION_FIELDS]
   if (includes.includes('host')) {
-    parts.push('host:profiles!host_id(id,display_name,bio,affiliation,building,telegram,ens,interests)')
+    parts.push('host:profiles!host_id(id,display_name,bio,affiliation,building,interests)')
   }
   if (includes.includes('track')) {
     parts.push('track:tracks(id,name,slug,color)')
@@ -56,11 +56,16 @@ export async function GET(request: Request) {
   }
 
   const supabase = await createAdminClient()
+
+  const resolved = await resolvePartnerEvent(request, supabase)
+  if ('error' in resolved) return resolved.error
+
   const selectQuery = buildSelect(result.includes)
 
   const { data, error } = await supabase
     .from('sessions')
     .select(selectQuery)
+    .eq('event_id', resolved.event.id)
     .in('status', statuses)
     .order('total_votes', { ascending: false })
 

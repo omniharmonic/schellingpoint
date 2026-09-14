@@ -150,11 +150,14 @@ export async function POST(
       })
     }
 
-    // Check Stripe is configured
+    // Check Stripe is configured (free tickets above never reach this point).
+    // A null stripe_account_id charges the platform account; a connected
+    // account gets a destination charge with the platform fee applied
+    // (see createCheckoutSession / calculatePlatformFee).
     if (!stripe) {
       return NextResponse.json(
-        { error: 'Payment processing is not configured' },
-        { status: 500 }
+        { error: 'Payments are not configured' },
+        { status: 503 }
       )
     }
 

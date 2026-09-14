@@ -1,5 +1,5 @@
 import { createAdminClient } from '@/lib/supabase/server'
-import { validateApiKey } from '@/lib/api/auth'
+import { validateApiKey, partnerEventForRow } from '@/lib/api/auth'
 import {
   apiSuccess,
   unauthorized,
@@ -30,7 +30,7 @@ export async function GET(
   const supabase = await createAdminClient()
   const { data, error } = await supabase
     .from('tracks')
-    .select(TRACK_FIELDS)
+    .select(`event_id,${TRACK_FIELDS}`)
     .eq('id', id)
     .single()
 
@@ -38,18 +38,24 @@ export async function GET(
     return notFound('Track')
   }
 
+  // Hide rows whose event is private/draft (or does not match ?event=)
+  const { event_id, ...track } = data
+  const event = await partnerEventForRow(request, supabase, event_id)
+  if (!event) return notFound('Track')
+
   if (result.includes.includes('sessions')) {
     const { data: sessions } = await supabase
       .from('sessions')
       .select('id,title,description,format,duration,host_name,status,session_type,topic_tags,total_votes,created_at')
       .eq('track_id', id)
+      .eq('event_id', event.id)
       .in('status', ['approved', 'scheduled'])
       .order('total_votes', { ascending: false })
 
-    return apiSuccess({ ...data, sessions: sessions ?? [] })
+    return apiSuccess({ ...track, sessions: sessions ?? [] })
   }
 
-  return apiSuccess(data)
+  return apiSuccess(track)
 }
 
 export async function POST() { return methodNotAllowed() }

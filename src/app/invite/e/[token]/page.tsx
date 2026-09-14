@@ -22,6 +22,9 @@ interface InvitationInfo {
   is_expired: boolean
   is_used: boolean
   is_revoked: boolean
+  max_uses: number | null
+  use_count: number
+  exhausted: boolean
 }
 
 export default function AcceptEventInvitationPage() {
@@ -139,7 +142,8 @@ export default function AcceptEventInvitationPage() {
 
   if (!invitation) return null
 
-  const isInvalid = invitation.is_expired || invitation.is_used || invitation.is_revoked
+  const isInvalid =
+    invitation.is_expired || invitation.is_used || invitation.is_revoked || invitation.exhausted
 
   return (
     <div className="min-h-screen flex items-center justify-center p-4">
@@ -176,10 +180,20 @@ export default function AcceptEventInvitationPage() {
             <div className="rounded-lg bg-muted p-4 text-center">
               <XCircle className="h-8 w-8 mx-auto text-muted-foreground mb-2" />
               <p className="font-medium">
-                {invitation.is_expired && 'This invitation has expired'}
-                {invitation.is_used && 'This invitation has already been used'}
-                {invitation.is_revoked && 'This invitation has been revoked'}
+                {invitation.is_revoked
+                  ? 'This invitation has been revoked'
+                  : invitation.is_expired
+                    ? 'This invitation has expired'
+                    : invitation.is_used
+                      ? 'This invitation has already been used'
+                      : 'This invitation has reached its use limit'}
               </p>
+              {invitation.exhausted && !invitation.is_revoked && !invitation.is_expired && (
+                <p className="text-sm text-muted-foreground mt-1">
+                  All {invitation.max_uses} {invitation.max_uses === 1 ? 'seat' : 'seats'} on this
+                  link have been claimed. Ask the organizer for a new one.
+                </p>
+              )}
             </div>
           ) : user ? (
             <Button

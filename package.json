@@ -6,7 +6,10 @@
     "dev": "next dev -p 3001",
     "build": "next build",
     "start": "next start -p 3001",
-    "db:reset": "psql postgresql://postgres:postgres@127.0.0.1:54322/postgres -f supabase/schema.sql && psql postgresql://postgres:postgres@127.0.0.1:54322/postgres -f supabase/seed.sql"
+    "db:reset": "psql postgresql://postgres:postgres@127.0.0.1:54322/postgres -f supabase/schema.sql && psql postgresql://postgres:postgres@127.0.0.1:54322/postgres -f supabase/seed.sql",
+    "test": "playwright test tests/event-api.spec.ts tests/creation-database.spec.ts tests/creation-reliability.spec.ts tests/ux-logic.spec.ts tests/members-api.spec.ts",
+    "test:sql": "for f in tests/sql/*.sql; do psql postgresql://postgres:postgres@127.0.0.1:54322/postgres -v ON_ERROR_STOP=1 -q -f $f || exit 1; done",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@radix-ui/react-checkbox": "^1.3.3",

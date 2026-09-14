@@ -188,12 +188,15 @@ async function fetchEvents() {
  * - Create event CTA
  * - My Events section (for logged-in users)
  */
+// Upcoming gatherings shown on the homepage; the full list lives at /events.
+const HOMEPAGE_UPCOMING_LIMIT = 6;
+
 export default async function HomePage() {
   const { featuredEvents, upcomingEvents, allEvents, loadFailed } = await fetchEvents();
   const pastEvents = allEvents.filter(e => !upcomingEvents.some(upcoming => upcoming.id === e.id));
 
-  const displayedUpcoming = upcomingEvents;
-  const hasMoreUpcoming = false;
+  const displayedUpcoming = upcomingEvents.slice(0, HOMEPAGE_UPCOMING_LIMIT);
+  const hasMoreUpcoming = upcomingEvents.length > HOMEPAGE_UPCOMING_LIMIT;
 
   return (
     <div className="min-h-screen bg-background flex flex-col">

@@ -441,17 +441,25 @@ export default function DashboardPage() {
                   <Clock className="h-5 w-5 text-yellow-500" />
                   My pending proposals
                 </CardTitle>
-                <Badge variant="outline" className="text-yellow-600 border-yellow-500/50">
-                  Awaiting review
-                </Badge>
+                <div className="flex items-center gap-2">
+                  <Badge variant="outline" className="text-yellow-600 border-yellow-500/50">
+                    Awaiting review
+                  </Badge>
+                  <Button variant="ghost" size="sm" asChild>
+                    <Link href={`/e/${event.slug}/sessions?filter=mine`} className="text-muted-foreground">
+                      View all <ArrowRight className="h-4 w-4 ml-1" />
+                    </Link>
+                  </Button>
+                </div>
               </div>
             </CardHeader>
             <CardContent className="pt-0">
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                 {myPendingSessions.map((session) => (
-                  <div
+                  <Link
                     key={session.id}
-                    className="p-4 rounded-lg border border-yellow-500/20 bg-background/50"
+                    href={`/e/${event.slug}/sessions/${session.id}`}
+                    className="block p-4 rounded-lg border border-yellow-500/20 bg-background/50 hover:border-yellow-500/50 hover:bg-muted/30 transition-all"
                   >
                     <div className="flex items-start justify-between gap-2 mb-2">
                       <p className="font-medium line-clamp-2">{session.title}</p>
@@ -473,11 +481,11 @@ export default function DashboardPage() {
                           : ''}
                       </span>
                     </div>
-                  </div>
+                  </Link>
                 ))}
               </div>
               <p className="text-xs text-muted-foreground mt-3">
-                Your proposals are being reviewed by admins. Once approved they&apos;ll appear in the sessions list for voting.
+                Your proposals are being reviewed by admins. You can still open and edit them while they wait. Once approved they&apos;ll appear in the sessions list for voting.
               </p>
             </CardContent>
           </Card>

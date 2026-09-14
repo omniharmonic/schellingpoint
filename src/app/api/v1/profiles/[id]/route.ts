@@ -1,5 +1,5 @@
 import { createAdminClient } from '@/lib/supabase/server'
-import { validateApiKey } from '@/lib/api/auth'
+import { validateApiKey, resolvePartnerEvent, partnerVisibleEventIds } from '@/lib/api/auth'
 import {
   apiSuccess,
   unauthorized,
@@ -10,7 +10,9 @@ import {
   parseIncludes,
 } from '@/lib/api/response'
 
-const PROFILE_FIELDS = 'id,display_name,bio,affiliation,building,telegram,ens,interests,is_admin,created_at'
+// Contact and permission fields (email, telegram, ens, is_admin) are never
+// exposed to the partner API.
+const PROFILE_FIELDS = 'id,display_name,bio,affiliation,building,interests,created_at'
 const VALID_INCLUDES = ['sessions']
 
 export async function GET(
@@ -28,6 +30,27 @@ export async function GET(
   if ('error' in result) return result.error
 
   const supabase = await createAdminClient()
+
+  // Optional ?event=<slug> scopes the profile to a single partner-visible event
+  const hasEventParam = new URL(request.url).searchParams.has('event')
+  let eventIds: string[]
+  if (hasEventParam) {
+    const resolved = await resolvePartnerEvent(request, supabase)
+    if ('error' in resolved) return resolved.error
+    eventIds = [resolved.event.id]
+
+    // When scoped to an event, the profile must be a member of it
+    const { data: membership } = await supabase
+      .from('event_members')
+      .select('id')
+      .eq('event_id', resolved.event.id)
+      .eq('user_id', id)
+      .maybeSingle()
+    if (!membership) return notFound('Profile')
+  } else {
+    eventIds = await partnerVisibleEventIds(supabase)
+  }
+
   const { data, error } = await supabase
     .from('profiles')
     .select(PROFILE_FIELDS)
@@ -39,12 +62,15 @@ export async function GET(
   }
 
   if (result.includes.includes('sessions')) {
-    const { data: sessions } = await supabase
-      .from('sessions')
-      .select('id,title,description,format,duration,status,session_type,topic_tags,total_votes,created_at')
-      .eq('host_id', id)
-      .in('status', ['approved', 'scheduled'])
-      .order('total_votes', { ascending: false })
+    const { data: sessions } = eventIds.length
+      ? await supabase
+          .from('sessions')
+          .select('id,title,description,format,duration,status,session_type,topic_tags,total_votes,created_at')
+          .eq('host_id', id)
+          .in('event_id', eventIds)
+          .in('status', ['approved', 'scheduled'])
+          .order('total_votes', { ascending: false })
+      : { data: [] }
 
     return apiSuccess({ ...data, sessions: sessions ?? [] })
   }
