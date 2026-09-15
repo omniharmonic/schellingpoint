@@ -186,6 +186,46 @@ export interface ApprovalRecord {
   createdAt: string
 }
 
+export type SeriesFreq = 'daily' | 'weekly' | 'monthly' | 'yearly'
+export type WeekdayCode = 'MO' | 'TU' | 'WE' | 'TH' | 'FR' | 'SA' | 'SU'
+
+export interface SeriesRecord {
+  $type: typeof NSID.series
+  firstEvent: StrongRef
+  rrule: string
+  freq: SeriesFreq
+  interval?: number
+  byDay?: WeekdayCode[]
+  until?: string
+  count?: number
+  exdates?: string[]
+  timezone: string
+  materializeAhead?: number
+  createdAt: string
+}
+
+export interface OccurrenceRecord {
+  $type: typeof NSID.occurrence
+  event: StrongRef
+  series: StrongRef
+  originalStartsAt: string
+  sequence?: number
+  createdAt: string
+}
+
+export interface SkillRecord {
+  $type: typeof NSID.skill
+  id: string
+  label: string
+  description?: string
+  broader?: string[]
+  prerequisites?: string[]
+  externalIds?: { esco?: string; wikidata?: string; onet?: string }
+  status: 'canonical' | 'proposed' | 'deprecated' | (string & {})
+  replacedBy?: string
+  createdAt: string
+}
+
 /* ────────────────────────── schellingpoint.draft.* ────────────────────────── */
 
 export type GatheringPhase =
@@ -371,3 +411,5 @@ export type AnyRecord =
   | SlotRecord
   | TallyRecord
   | EndorsementRecord
+  | SeriesRecord
+  | OccurrenceRecord

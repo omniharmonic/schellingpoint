@@ -1,0 +1,38 @@
+{
+  "lexicon": 1,
+  "id": "freeschool.draft.occurrence",
+  "description": "Back-pointer sidecar binding one materialized community.lexicon.calendar.event to the freeschool.draft.series that generated it. Chosen over an occurrences[] array on the series record because (a) appending to an array rewrites the series record on every materialization, turning the series into a write-conflict hotspot that grows without bound, (b) an array forces the series author to also be the author of every occurrence, where a separate record lets a scene's materializer write occurrences the series author did not, and (c) RFC 5545 RECURRENCE-ID semantics need per-occurrence state (originalStartsAt) that has nowhere to live on the series. Placement: follows its event.",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["event", "series", "originalStartsAt", "createdAt"],
+        "properties": {
+          "event": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef",
+            "description": "Strong reference to the materialized occurrence event."
+          },
+          "series": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef",
+            "description": "Strong reference to the freeschool.draft.series that generated it."
+          },
+          "originalStartsAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "The start instant the recurrence rule PRODUCED for this occurrence — the RFC 5545 RECURRENCE-ID. Stays fixed when the event's own startsAt is edited, which is what lets a materializer recognise an already-materialized slot instead of creating a duplicate, and lets a reader say 'moved from Tuesday to Wednesday this week'."
+          },
+          "sequence": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Optional 1-based index of this occurrence within the series ('week 3 of 8'), for display only; never used to locate an occurrence."
+          },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

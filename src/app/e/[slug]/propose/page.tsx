@@ -4,7 +4,7 @@ import { isParticipationOpen } from '@/lib/events/lifecycle'
 import * as React from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
-import { Loader2, CheckCircle, MapPin, Building2, Clock, Users } from 'lucide-react'
+import { Loader2, CheckCircle, MapPin, Building2, Clock, Users, Globe } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -15,10 +15,15 @@ import { DashboardLayout } from '@/components/DashboardLayout'
 import { useAuth } from '@/hooks/useAuth'
 import { useEvent } from '@/contexts/EventContext'
 import { parseTimeInTimezone } from '@/lib/events/timezone'
+import { getEventDays, formatCalendarDate } from '@/lib/events/dates'
+import { apiFetch } from '@/lib/api/client'
+import { useTracks } from '@/hooks/useTracks'
+import { SkillPicker } from '@/components/SkillPicker'
+import { TimePreferences, type TimePreferenceValue } from '@/components/TimePreferences'
 import { cn } from '@/lib/utils'
 
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+/** Said wherever a record is written into someone's own repository. */
+const PERMANENCE = 'Public records can be deleted from your repository later, but copies may persist on the network.'
 
 const formats = [
   { value: 'talk', label: 'Talk', description: 'A presentation or lecture' },
@@ -43,59 +48,11 @@ const expectedAttendanceOptions = [
   { value: 150, label: 'Auditorium (100+)', description: 'Keynote level' },
 ]
 
-const TIME_PREFERENCES = [
-  { value: 'friday_pm', label: 'Friday PM' },
-  { value: 'saturday_am', label: 'Saturday AM' },
-  { value: 'saturday_pm', label: 'Saturday PM' },
-  { value: 'sunday_am', label: 'Sunday AM' },
-  { value: 'sunday_pm', label: 'Sunday PM' },
-]
-
 // Default tags - will be overridden by event's suggestedTopics
 const DEFAULT_TAGS = [
   'governance', 'defi', 'nfts', 'infrastructure', 'security',
   'community', 'education', 'tooling', 'research', 'design'
 ]
-
-interface Track {
-  id: string
-  name: string
-  color: string | null
-}
-
-function getAccessToken(): string | null {
-  const storageKey = `sb-${new URL(SUPABASE_URL).hostname.split('.')[0]}-auth-token`
-  const stored = localStorage.getItem(storageKey)
-  if (stored) {
-    try {
-      const session = JSON.parse(stored)
-      return session?.access_token || null
-    } catch {
-      return null
-    }
-  }
-  return null
-}
-
-// Generate event days from event start/end dates
-function getEventDays(startDate: Date, endDate: Date): { value: string; label: string }[] {
-  const days: { value: string; label: string }[] = []
-  const current = new Date(startDate)
-  const end = new Date(endDate)
-
-  while (current <= end) {
-    const value = current.toISOString().split('T')[0]
-    const label = current.toLocaleDateString('en-US', {
-      weekday: 'long',
-      month: 'short',
-      day: 'numeric',
-    })
-    days.push({ value, label })
-    current.setDate(current.getDate() + 1)
-  }
-
-  return days
-}
 
 // Generate time options
 const TIME_OPTIONS: { value: string; label: string }[] = []
@@ -121,7 +78,7 @@ export default function ProposePage() {
   const event = useEvent()
   const proposalsClosed = !isParticipationOpen(event, 'propose')
 
-  const [tracks, setTracks] = React.useState<Track[]>([])
+  const { tracks } = useTracks(event.slug)
   const [title, setTitle] = React.useState('')
   const [trackId, setTrackId] = React.useState<string | null>(null)
   const [description, setDescription] = React.useState('')
@@ -130,42 +87,29 @@ export default function ProposePage() {
   const [expectedAttendance, setExpectedAttendance] = React.useState<number | null>(null)
   const [tags, setTags] = React.useState<string[]>([])
   const [customTag, setCustomTag] = React.useState('')
-  const [timePreferences, setTimePreferences] = React.useState<string[]>([])
+  const [skills, setSkills] = React.useState<string[]>([])
+  const [availability, setAvailability] = React.useState<TimePreferenceValue>({ windows: [], blackouts: [] })
+  const [publishAvailability, setPublishAvailability] = React.useState(false)
   const [isSelfHosted, setIsSelfHosted] = React.useState(false)
   const [customLocation, setCustomLocation] = React.useState('')
+  const [publicPlace, setPublicPlace] = React.useState('')
   const [selfHostedDay, setSelfHostedDay] = React.useState('')
   const [selfHostedStartTime, setSelfHostedStartTime] = React.useState('')
   const [selfHostedEndTime, setSelfHostedEndTime] = React.useState('')
   const [isSubmitting, setIsSubmitting] = React.useState(false)
   const [isSuccess, setIsSuccess] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
-  // ATProto opt-in: shown only when the profile has a linked DID; the default
-  // is the profile's `publish_proposals` preference.
-  const [atprotoLinked, setAtprotoLinked] = React.useState(false)
-  const [publishToAtproto, setPublishToAtproto] = React.useState(false)
-
-  React.useEffect(() => {
-    if (!user) return
-    const token = getAccessToken()
-    if (!token) return
-    let cancelled = false
-    fetch('/api/atproto/me', { headers: { Authorization: `Bearer ${token}` } })
-      .then(async (res) => {
-        if (!res.ok || cancelled) return
-        const me = await res.json()
-        if (cancelled || me?.configured === false) return
-        setAtprotoLinked(!!me?.linked)
-        setPublishToAtproto(!!me?.linked && !!me?.publishProposals)
-      })
-      .catch(() => {})
-    return () => {
-      cancelled = true
-    }
-  }, [user])
+  const [publishNote, setPublishNote] = React.useState<string | null>(null)
+  // Custodial accounts publish the proposal into their own repository on submit; accounts from
+  // the Bluesky door do so once they have confirmed public linkage (spec §4.2, §7).
+  const publishesNow = user?.kind === 'custodial' || !!profile?.publish_proposals
 
   // Generate event days from event dates
   const eventDays = React.useMemo(() => {
-    return getEventDays(event.startDate, event.endDate)
+    return getEventDays(event.startDate, event.endDate).map((date) => ({
+      value: date,
+      label: formatCalendarDate(date, { weekday: 'long', month: 'short', day: 'numeric' }),
+    }))
   }, [event.startDate, event.endDate])
 
   // Humanize a custom format slug ("fireside-chat" -> "Fireside chat")
@@ -210,38 +154,12 @@ export default function ProposePage() {
     return topics.map(t => t.toLowerCase())
   }, [event.suggestedTopics])
 
-  // Fetch tracks for this event
-  React.useEffect(() => {
-    const fetchTracks = async () => {
-      try {
-        const response = await fetch(
-          `${SUPABASE_URL}/rest/v1/tracks?event_id=eq.${event.id}&is_active=eq.true&select=id,name,color&order=name`,
-          {
-            headers: {
-              'apikey': SUPABASE_KEY,
-              'Authorization': `Bearer ${SUPABASE_KEY}`,
-            },
-          }
-        )
-
-        if (response.ok) {
-          const data = await response.json()
-          setTracks(data)
-        }
-      } catch (err) {
-        console.error('Error fetching tracks:', err)
-      }
-    }
-
-    fetchTracks()
-  }, [event.id])
-
   // Redirect if not logged in
   React.useEffect(() => {
     if (!authLoading && !user) {
-      router.push(`/login?redirect=${encodeURIComponent(`/e/${event.slug}/propose`)}`)
+      router.push(`/login?returnTo=${encodeURIComponent(`/e/${event.slug}/propose`)}`)
     }
-  }, [user, authLoading, router])
+  }, [user, authLoading, router, event.slug])
 
   // Ensure format/duration defaults match what the event allows
   React.useEffect(() => {
@@ -285,51 +203,42 @@ export default function ProposePage() {
       return
     }
 
-    const token = getAccessToken()
-    if (!token) {
-      setError('Session expired. Please log in again.')
-      return
-    }
-
     setIsSubmitting(true)
     setError(null)
+    setPublishNote(null)
 
+    const hasAvailability = availability.windows.length > 0 || availability.blackouts.length > 0
     try {
-      const response = await fetch('/api/v1/sessions', {
+      const result = await apiFetch<{ id: string; status: string; atproto?: { uri?: string; error?: string; skipped?: string } }>('/api/v1/sessions', {
         method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          event_id: event.id,
+        json: {
+          event_slug: event.slug,
           title: title.trim(),
           description: description.trim() || null,
           format,
           duration,
           expected_attendance: expectedAttendance,
-          host_name: profile.display_name || profile.email,
           topic_tags: tags.length > 0 ? tags : null,
-          time_preferences: timePreferences.length > 0 ? timePreferences : null,
+          skills,
           is_self_hosted: isSelfHosted,
           custom_location: isSelfHosted ? customLocation.trim() || null : null,
+          public_place: isSelfHosted ? publicPlace.trim() || null : null,
           self_hosted_start_time: isSelfHosted && selfHostedDay && selfHostedStartTime
             ? buildTimestamp(selfHostedDay, selfHostedStartTime, event.timezone) : null,
           self_hosted_end_time: isSelfHosted && selfHostedDay && selfHostedEndTime
             ? buildTimestamp(selfHostedDay, selfHostedEndTime, event.timezone) : null,
           track_id: trackId,
-          ...(atprotoLinked ? { publish_to_atproto: publishToAtproto } : {}),
-        }),
+          ...(hasAvailability || publishAvailability
+            ? { time_preference: { windows: availability.windows, blackouts: availability.blackouts, publish: publishAvailability } }
+            : {}),
+        },
       })
-
-      if (!response.ok) {
-        const errorData = await response.json()
-        throw new Error(errorData.message || 'Failed to submit proposal')
-      }
-
+      if (result.atproto?.uri) setPublishNote('Your proposal is now a public record in your own repository.')
+      else if (result.atproto?.error) setPublishNote('Your proposal is saved. Writing its public record failed; you can publish it from the session page.')
+      else if (result.atproto?.skipped === 'not_confirmed') setPublishNote('Your proposal is saved in this gathering. Confirm public linkage from the session page to publish it to your repository.')
       setIsSuccess(true)
-    } catch (err: any) {
-      setError(err.message || 'Failed to submit proposal')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to submit proposal')
     } finally {
       setIsSubmitting(false)
     }
@@ -366,12 +275,14 @@ export default function ProposePage() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="rounded-lg bg-muted p-4 text-sm text-center">
+              <div className="rounded-lg bg-muted p-4 text-sm text-center space-y-2">
                 <p>
                   {event.requireProposalApproval
-                    ? 'An admin will review your proposal and approve it for voting.'
+                    ? 'An organizer will review your proposal and approve it for voting.'
                     : 'Your session has been added to the voting pool.'}
                 </p>
+                {publishNote && <p className="text-muted-foreground">{publishNote}</p>}
+                <p className="text-muted-foreground">Want co-hosts? Share an invite link from the session page; they accept it themselves.</p>
               </div>
               <div className="flex gap-3">
                 <Button variant="outline" className="flex-1" asChild>
@@ -387,7 +298,10 @@ export default function ProposePage() {
                     setDuration(60)
                     setExpectedAttendance(null)
                     setTags([])
-                    setTimePreferences([])
+                    setSkills([])
+                    setAvailability({ windows: [], blackouts: [] })
+                    setPublishAvailability(false)
+                    setPublishNote(null)
                     setIsSelfHosted(false)
                     setCustomLocation('')
                     setSelfHostedDay('')
@@ -529,35 +443,35 @@ export default function ProposePage() {
                 </div>
               </div>
 
-              {/* Time Preferences */}
+              {/* Availability (app-side by default) */}
               <div className="space-y-2">
-                <label className="text-sm font-medium">Time Preference</label>
+                <span className="text-sm font-medium">When can you be there?</span>
                 <p className="text-xs text-muted-foreground">
-                  When would you prefer to present? Select all that work.
+                  Optional. Organizers use this to schedule you; it stays inside this gathering unless you choose to publish it.
                 </p>
-                <div className="flex flex-wrap gap-2">
-                  {TIME_PREFERENCES.map((tp) => (
-                    <button
-                      key={tp.value}
-                      type="button"
-                      onClick={() =>
-                        setTimePreferences((prev) =>
-                          prev.includes(tp.value)
-                            ? prev.filter((v) => v !== tp.value)
-                            : [...prev, tp.value]
-                        )
-                      }
-                      className={cn(
-                        'px-4 py-2 rounded-lg border transition-colors',
-                        timePreferences.includes(tp.value)
-                          ? 'border-primary bg-primary/10'
-                          : 'hover:border-muted-foreground/50'
-                      )}
-                    >
-                      {tp.label}
-                    </button>
-                  ))}
-                </div>
+                <TimePreferences
+                  value={availability}
+                  onChange={setAvailability}
+                  startDate={eventDays[0]?.value ?? ''}
+                  endDate={eventDays[eventDays.length - 1]?.value ?? ''}
+                  timezone={event.timezone}
+                />
+                {(availability.windows.length > 0 || availability.blackouts.length > 0) && (
+                  <label className="flex items-start gap-3 cursor-pointer rounded-lg border p-3">
+                    <Checkbox
+                      id="publish-availability"
+                      checked={publishAvailability}
+                      onCheckedChange={(checked) => setPublishAvailability(checked === true)}
+                      className="mt-0.5"
+                    />
+                    <span className="text-sm">
+                      <span className="font-medium">Also publish my availability for this proposal</span>
+                      <span className="block text-xs text-muted-foreground mt-1">
+                        Writes a public record to your repository saying when you can and cannot attend. {PERMANENCE}
+                      </span>
+                    </span>
+                  </label>
+                )}
               </div>
 
               {/* Track */}
@@ -720,12 +634,40 @@ export default function ProposePage() {
                       maxLength={300}
                     />
                     <p className="text-xs text-muted-foreground">
-                      {customLocation.length}/300 - Provide enough detail for attendees to find you
+                      {customLocation.length}/300 - Shown only to confirmed attendees, hosts and organizers. Never published.
+                    </p>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label htmlFor="propose-public-place" className="text-sm font-medium">
+                      Public area <span className="text-xs font-normal text-muted-foreground">(optional)</span>
+                    </label>
+                    <input
+                      id="propose-public-place"
+                      type="text"
+                      value={publicPlace}
+                      onChange={(e) => setPublicPlace(e.target.value)}
+                      placeholder="e.g. Near Pearl St, Boulder"
+                      maxLength={80}
+                      className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      A neighbourhood or landmark, never a street address. This label goes on your public
+                      proposal record, so anyone on the network can see it. Leave it empty to publish no location.
                     </p>
                   </div>
                   </>
                 )}
               </div>
+
+              {/* Skills (shared taxonomy) */}
+              <SkillPicker
+                value={skills}
+                onChange={(next) => setSkills(next.slice(0, 5))}
+                max={5}
+                label="Skills (up to 5)"
+                description="From the shared skill taxonomy, so people can find this session next to classes on the same subject."
+              />
 
               {/* Tags */}
               <div className="space-y-2">
@@ -781,26 +723,24 @@ export default function ProposePage() {
                 </div>
               </div>
 
-              {/* ATProto opt-in (only when the profile has a linked DID) */}
-              {atprotoLinked && (
-                <div className="rounded-lg border p-4 space-y-2">
-                  <label className="flex items-start gap-3 cursor-pointer">
-                    <Checkbox
-                      id="publish-to-atproto"
-                      checked={publishToAtproto}
-                      onCheckedChange={(checked) => setPublishToAtproto(checked === true)}
-                      className="mt-0.5"
-                    />
-                    <span className="text-sm">
-                      <span className="font-medium">Also publish this proposal to my ATProto repo</span>
-                      <span className="block text-xs text-muted-foreground mt-1">
-                        This writes a public record to your ATProto repository. It can be deleted, but copies may
-                        persist on the network. You can publish or withdraw later from the session page.
-                      </span>
-                    </span>
-                  </label>
-                </div>
-              )}
+              {/* What submitting publishes */}
+              <div className="rounded-lg border p-4 text-sm space-y-2">
+                <p className="font-medium flex items-center gap-2">
+                  <Globe className="h-4 w-4" />
+                  Your proposal is yours
+                </p>
+                <p className="text-muted-foreground">
+                  {user?.kind === 'custodial'
+                    ? 'Submitting writes this proposal as a public record in your own repository. It names only you, travels with you, and no organizer can edit it.'
+                    : publishesNow
+                      ? 'Submitting writes this proposal as a public record in your own Bluesky/ATProto repository. It names only you, and no organizer can edit it.'
+                      : 'Your proposal is saved in this gathering. It becomes a public record in your own Bluesky/ATProto repository after you confirm public linkage from the session page.'}{' '}
+                  {PERMANENCE}
+                </p>
+                <p className="text-muted-foreground">
+                  Co-hosts are never added on your say-so: after submitting, share an invite link and each co-host accepts it themselves.
+                </p>
+              </div>
 
               {/* Error */}
               {error && (

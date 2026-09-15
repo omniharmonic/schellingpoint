@@ -62,3 +62,17 @@ and pins it for regression, the same way `validate: false` could not.
   output rather than reconstructing Lucian's record from external descriptions — see
   `docs/interop-audit.md` gap 7 for the distinction and the outstanding question for
   Lucian.
+
+## `freeschool.draft.*` — reused verbatim (unconference.events)
+
+Copied unmodified from Free School `packages/lexicons/lexicons/freeschool/draft/` (2026-09-14):
+
+| File | NSID | Used for |
+|---|---|---|
+| `freeschool/policy.json` | `freeschool.draft.policy` | the gathering's rules and thresholds (`destructiveActionStewards`, `feedbackK`, `publishRoles`) |
+| `freeschool/approval.json` | `freeschool.draft.approval` | an organiser's approval of a destructive change, in THEIR repo (`action: other` for move/cancel, `remove-listing`) |
+| `freeschool/series.json`, `freeschool/occurrence.json` | `freeschool.draft.series` / `.occurrence` | recurring gatherings |
+| `freeschool/skill.json` | `freeschool.draft.skill` | reading the shared skill taxonomy (never written here) |
+
+Never extended: records we write under these NSIDs carry only the fields defined here
+(`assertNoUnknownFields` at write time, `npm run atproto:audit` after).

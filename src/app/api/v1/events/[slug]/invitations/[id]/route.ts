@@ -1,59 +1,27 @@
 /**
- * Single Invitation Operations
- * DELETE - Revoke an invitation
+ * DELETE /api/v1/events/[slug]/invitations/[id] — revoke an invitation (kept, marked revoked).
  */
+import { sql } from '@/lib/db'
+import { errorResponse, fail, isUuid, json, requireOrganizer } from '@/lib/scheduling/admin-api'
 
-import { NextRequest, NextResponse } from 'next/server'
-import { createAdminClient } from '@/lib/supabase/server'
-import { getUserFromRequest } from '@/lib/api/getUser'
+export const dynamic = 'force-dynamic'
 
-export async function DELETE(
-  request: NextRequest,
-  { params }: { params: Promise<{ slug: string; id: string }> }
-) {
+const ROLES = ['owner', 'admin'] as const
+
+export async function DELETE(request: Request, { params }: { params: Promise<{ slug: string; id: string }> }) {
   const { slug, id } = await params
-
-  const user = await getUserFromRequest(request)
-  if (!user) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  const ctx = await requireOrganizer(request, slug, ROLES)
+  if (ctx instanceof Response) return ctx
+  if (!isUuid(id)) return fail(404, 'Invitation not found')
+  try {
+    const rows = await sql`
+      update event_invitations set revoked_at = coalesce(revoked_at, now())
+      where id = ${id} and event_id = ${ctx.event.id}
+      returning id
+    `
+    if (rows.length === 0) return fail(404, 'Invitation not found')
+    return json({ success: true })
+  } catch (e) {
+    return errorResponse(e, 'revoke invitation')
   }
-
-  const supabase = await createAdminClient()
-
-  // Get event
-  const { data: event, error: eventError } = await supabase
-    .from('events')
-    .select('id')
-    .eq('slug', slug)
-    .single()
-
-  if (eventError || !event) {
-    return NextResponse.json({ error: 'Event not found' }, { status: 404 })
-  }
-
-  // Verify admin/owner role
-  const { data: membership } = await supabase
-    .from('event_members')
-    .select('role')
-    .eq('event_id', event.id)
-    .eq('user_id', user.id)
-    .maybeSingle()
-
-  if (!membership || !['owner', 'admin'].includes(membership.role)) {
-    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
-  }
-
-  // Revoke invitation (soft delete)
-  const { error: updateError } = await supabase
-    .from('event_invitations')
-    .update({ revoked_at: new Date().toISOString() })
-    .eq('id', id)
-    .eq('event_id', event.id)
-
-  if (updateError) {
-    console.error('Error revoking invitation:', updateError)
-    return NextResponse.json({ error: 'Failed to revoke invitation' }, { status: 500 })
-  }
-
-  return NextResponse.json({ success: true })
 }

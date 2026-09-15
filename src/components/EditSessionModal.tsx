@@ -1,7 +1,7 @@
 'use client'
 
 import * as React from 'react'
-import { X, Loader2, Search, MapPin, Clock, Send } from 'lucide-react'
+import { X, Loader2, Send, ShieldCheck, MessageSquareWarning, Lock } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
@@ -11,12 +11,13 @@ import { useTracks } from '@/hooks/useTracks'
 import { useEvent } from '@/contexts/EventContext'
 import { getEventDays, formatCalendarDate } from '@/lib/events/dates'
 import { parseTimeInTimezone } from '@/lib/events/timezone'
-import type { Event } from '@/types/event'
+import { apiFetch } from '@/lib/api/client'
+import { SkillPicker } from '@/components/SkillPicker'
+import { TimePreferences, type TimePreferenceValue, type TimeWindowValue } from '@/components/TimePreferences'
+import { Checkbox } from '@/components/ui/checkbox'
+import type { SessionView } from '@/app/api/v1/sessions/_lib/read'
 
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-
-const formats = [
+const FORMATS = [
   { value: 'talk', label: 'Talk', description: 'A presentation or lecture' },
   { value: 'workshop', label: 'Workshop', description: 'Hands-on interactive session' },
   { value: 'discussion', label: 'Discussion', description: 'Open group conversation' },
@@ -24,23 +25,18 @@ const formats = [
   { value: 'demo', label: 'Demo', description: 'Live demonstration' },
 ]
 
-const suggestedTags = [
-  'governance', 'defi', 'nfts', 'infrastructure', 'security',
-  'community', 'education', 'tooling', 'research', 'design'
+const SESSION_TYPES = [
+  { value: 'proposed', label: 'Proposed' },
+  { value: 'curated', label: 'Curated' },
+  { value: 'workshop', label: 'Workshop' },
+  { value: 'track_reserved', label: 'Track reserved' },
 ]
 
-/**
- * The modal is normally rendered inside an event's layout (EventProvider).
- * If it is ever mounted outside one, degrade gracefully instead of throwing:
- * the self-hosted day picker is simply unavailable.
- */
-function useOptionalEvent(): Event | null {
-  try {
-    return useEvent()
-  } catch {
-    return null
-  }
-}
+const REVIEW_STATUSES = [
+  { value: 'pending', label: 'Pending review' },
+  { value: 'approved', label: 'Approved' },
+  { value: 'rejected', label: 'Declined' },
+]
 
 const TIME_OPTIONS: { value: string; label: string }[] = []
 for (let h = 9; h <= 22; h++) {
@@ -48,416 +44,203 @@ for (let h = 9; h <= 22; h++) {
     if (h === 22 && m === 30) continue
     const hh = String(h).padStart(2, '0')
     const mm = String(m).padStart(2, '0')
-    const label = `${h > 12 ? h - 12 : h === 0 ? 12 : h}:${mm} ${h >= 12 ? 'PM' : 'AM'}`
-    TIME_OPTIONS.push({ value: `${hh}:${mm}`, label })
+    TIME_OPTIONS.push({ value: `${hh}:${mm}`, label: `${h > 12 ? h - 12 : h}:${mm} ${h >= 12 ? 'PM' : 'AM'}` })
   }
 }
 
-/** Build a UTC ISO timestamp for a wall-clock day/time in the event's timezone. */
-function buildTimestamp(day: string, time: string, timezone: string): string {
-  return parseTimeInTimezone(time, day, timezone).toISOString()
-}
-
 /** Split a stored timestamp into the event-timezone calendar day and HH:MM. */
-function parseTimestamp(iso: string | null | undefined, timezone: string | null): { day: string; time: string } {
+function parseTimestamp(iso: string | null | undefined, timezone: string): { day: string; time: string } {
   if (!iso) return { day: '', time: '' }
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return { day: '', time: '' }
   const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: timezone || undefined,
+    timeZone: timezone,
     year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
   }).formatToParts(d)
   const part = (type: string) => parts.find((x) => x.type === type)?.value ?? ''
-  return {
-    day: `${part('year')}-${part('month')}-${part('day')}`,
-    time: `${part('hour')}:${part('minute')}`,
-  }
+  return { day: `${part('year')}-${part('month')}-${part('day')}`, time: `${part('hour')}:${part('minute')}` }
 }
-
-function getAccessToken(): string | null {
-  const storageKey = `sb-${new URL(SUPABASE_URL).hostname.split('.')[0]}-auth-token`
-  const stored = localStorage.getItem(storageKey)
-  if (stored) {
-    try {
-      const session = JSON.parse(stored)
-      return session?.access_token || null
-    } catch {
-      return null
-    }
-  }
-  return null
-}
-
-// --- Profile types and search component ---
-
-interface ProfileResult {
-  id: string
-  display_name: string | null
-  avatar_url: string | null
-}
-
-function ProfileSearch({
-  onSelect,
-  excludeIds,
-  placeholder = 'Search profiles...',
-}: {
-  onSelect: (profile: ProfileResult) => void
-  excludeIds: string[]
-  placeholder?: string
-}) {
-  const [query, setQuery] = React.useState('')
-  const [results, setResults] = React.useState<ProfileResult[]>([])
-  const [isSearching, setIsSearching] = React.useState(false)
-  const [showDropdown, setShowDropdown] = React.useState(false)
-  const containerRef = React.useRef<HTMLDivElement>(null)
-  const debounceRef = React.useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
-
-  React.useEffect(() => {
-    if (debounceRef.current) clearTimeout(debounceRef.current)
-    if (query.trim().length < 2) {
-      setResults([])
-      setShowDropdown(false)
-      return
-    }
-    debounceRef.current = setTimeout(async () => {
-      setIsSearching(true)
-      try {
-        const token = getAccessToken()
-        const res = await fetch(
-          `${SUPABASE_URL}/rest/v1/profiles?display_name=ilike.*${encodeURIComponent(query.trim())}*&select=id,display_name,avatar_url&limit=8`,
-          {
-            headers: {
-              'apikey': SUPABASE_KEY,
-              'Authorization': `Bearer ${token || SUPABASE_KEY}`,
-            },
-          }
-        )
-        if (res.ok) {
-          const data: ProfileResult[] = await res.json()
-          setResults(data.filter((p) => !excludeIds.includes(p.id)))
-          setShowDropdown(true)
-        }
-      } finally {
-        setIsSearching(false)
-      }
-    }, 300)
-    return () => { if (debounceRef.current) clearTimeout(debounceRef.current) }
-  }, [query, excludeIds])
-
-  // Close dropdown on outside click
-  React.useEffect(() => {
-    function handleClick(e: MouseEvent) {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
-        setShowDropdown(false)
-      }
-    }
-    document.addEventListener('mousedown', handleClick)
-    return () => document.removeEventListener('mousedown', handleClick)
-  }, [])
-
-  return (
-    <div ref={containerRef} className="relative">
-      <div className="relative">
-        <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-        <Input
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder={placeholder}
-          className="pl-8"
-          onFocus={() => { if (results.length > 0) setShowDropdown(true) }}
-        />
-        {isSearching && <Loader2 className="absolute right-2.5 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />}
-      </div>
-      {showDropdown && results.length > 0 && (
-        <div className="absolute z-10 mt-1 w-full bg-popover border rounded-lg shadow-lg max-h-48 overflow-y-auto">
-          {results.map((profile) => (
-            <button
-              key={profile.id}
-              type="button"
-              className="w-full flex items-center gap-2 px-3 py-2 hover:bg-accent text-left text-sm"
-              onClick={() => {
-                onSelect(profile)
-                setQuery('')
-                setResults([])
-                setShowDropdown(false)
-              }}
-            >
-              {profile.avatar_url ? (
-                <img src={profile.avatar_url} alt="" className="w-6 h-6 rounded-full object-cover" />
-              ) : (
-                <div className="w-6 h-6 rounded-full bg-muted flex items-center justify-center text-xs font-medium">
-                  {(profile.display_name || '?')[0].toUpperCase()}
-                </div>
-              )}
-              <span className="truncate">{profile.display_name || 'Unnamed'}</span>
-            </button>
-          ))}
-        </div>
-      )}
-      {showDropdown && results.length === 0 && query.trim().length >= 2 && !isSearching && (
-        <div className="absolute z-10 mt-1 w-full bg-popover border rounded-lg shadow-lg px-3 py-2 text-sm text-muted-foreground">
-          No profiles found
-        </div>
-      )}
-    </div>
-  )
-}
-
-// --- Cohost type matching the shape from SessionDetailClient ---
-
-interface CohostEntry {
-  user_id: string
-  profile: ProfileResult | null
-}
-
-// --- Main modal ---
 
 interface EditSessionModalProps {
   isOpen: boolean
   onClose: () => void
-  session: {
-    id: string
-    title: string
-    description: string | null
-    format: string
-    topic_tags: string[] | null
-    track_id?: string | null
-    is_self_hosted?: boolean
-    custom_location?: string | null
-    self_hosted_start_time?: string | null
-    self_hosted_end_time?: string | null
-    telegram_group_url?: string | null
-  }
-  onSave: () => void
-  isAdmin?: boolean
-  hostId?: string | null
-  hostName?: string | null
-  host?: ProfileResult | null
-  cohosts?: CohostEntry[]
+  session: SessionView
+  onSave: (updated: SessionView) => void
 }
 
-export function EditSessionModal({
-  isOpen, onClose, session, onSave,
-  isAdmin, hostId, hostName, host, cohosts,
-}: EditSessionModalProps) {
-  const { tracks } = useTracks()
-  const event = useOptionalEvent()
-  const eventTimezone = event?.timezone ?? null
+/**
+ * Edit a session, in the sections the viewer has authority over (spec §4.2):
+ *   - proposal content: only its author (the record lives in their repository); organizers
+ *     edit content only on a host-less session, and otherwise "ask the proposer to update"
+ *   - track: the author's suggestion or an organizer's curation (never rewrites the record)
+ *   - attendee logistics (Telegram group): hosts, co-hosts, organizers
+ *   - review status and session type: organizers
+ * Hosts are never assigned here: co-hosts accept invites themselves (R9). Scheduling happens
+ * in the schedule builder.
+ */
+export function EditSessionModal({ isOpen, onClose, session, onSave }: EditSessionModalProps) {
+  const event = useEvent()
+  const { tracks } = useTracks(event.slug)
+  const isOrganizer = session.viewer.is_organizer
+  const canEditContent = session.viewer.can_edit_content
+  const canSetTrack = session.viewer.is_host || isOrganizer
+  const authored = !session.unclaimed
 
-  // Event days (inclusive, event-timezone calendar dates) for the self-hosted day picker
-  const eventDays = React.useMemo(() => {
-    if (!event) return []
-    return getEventDays(event.startDate, event.endDate).map((date) => ({
+  const eventDays = React.useMemo(
+    () => getEventDays(event.startDate, event.endDate).map((date) => ({
       value: date,
       label: formatCalendarDate(date, { weekday: 'short', month: 'short', day: 'numeric' }),
-    }))
-  }, [event])
+    })),
+    [event.startDate, event.endDate],
+  )
 
-  const [title, setTitle] = React.useState(session.title)
-  const [description, setDescription] = React.useState(session.description || '')
-  const [format, setFormat] = React.useState(session.format)
-  const [tags, setTags] = React.useState<string[]>(session.topic_tags || [])
-  const [trackId, setTrackId] = React.useState<string | null>(session.track_id || null)
+  const allowedFormats = React.useMemo(() => {
+    if (!event.allowedFormats.length) return FORMATS
+    const preset = FORMATS.filter((f) => event.allowedFormats.includes(f.value))
+    const current = FORMATS.find((f) => f.value === session.format)
+    return current && !preset.includes(current) ? [...preset, current] : preset
+  }, [event.allowedFormats, session.format])
+
+  const initial = React.useCallback(() => {
+    const start = parseTimestamp(session.self_hosted_start_time, event.timezone)
+    const end = parseTimestamp(session.self_hosted_end_time, event.timezone)
+    return {
+      title: session.title,
+      description: session.description || '',
+      format: session.format || 'talk',
+      tags: session.topic_tags,
+      skills: session.skills,
+      trackId: session.track_id,
+      telegram: session.telegram_group_url || '',
+      isSelfHosted: session.is_self_hosted,
+      customLocation: session.custom_location || '',
+      publicPlace: session.public_place || '',
+      day: start.day,
+      startTime: start.time,
+      endTime: end.time,
+      sessionType: session.session_type || 'proposed',
+      status: session.status,
+      availability: {
+        windows: (session.time_preference?.windows as TimeWindowValue[] | undefined) ?? [],
+        blackouts: (session.time_preference?.blackouts as TimeWindowValue[] | undefined) ?? [],
+      } as TimePreferenceValue,
+      publishAvailability: !!session.time_preference?.publish,
+    }
+  }, [session, event.timezone])
+
+  const [form, setForm] = React.useState(initial)
   const [customTag, setCustomTag] = React.useState('')
   const [isSaving, setIsSaving] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
+  const [askMessage, setAskMessage] = React.useState('')
+  const [askState, setAskState] = React.useState<'idle' | 'sending' | 'sent'>('idle')
+  const set = <K extends keyof ReturnType<typeof initial>>(key: K, value: ReturnType<typeof initial>[K]) =>
+    setForm((prev) => ({ ...prev, [key]: value }))
 
-  const [telegramGroupUrl, setTelegramGroupUrl] = React.useState(session?.telegram_group_url || '')
-
-  // Self-hosted state
-  const [isSelfHosted, setIsSelfHosted] = React.useState(session.is_self_hosted || false)
-  const [customLocation, setCustomLocation] = React.useState(session.custom_location || '')
-  const [selfHostedDay, setSelfHostedDay] = React.useState(() => parseTimestamp(session.self_hosted_start_time, eventTimezone).day)
-  const [selfHostedStartTime, setSelfHostedStartTime] = React.useState(() => parseTimestamp(session.self_hosted_start_time, eventTimezone).time)
-  const [selfHostedEndTime, setSelfHostedEndTime] = React.useState(() => parseTimestamp(session.self_hosted_end_time, eventTimezone).time)
-
-  // Admin host editing state
-  const [selectedHost, setSelectedHost] = React.useState<ProfileResult | null>(host || null)
-  const [hostNameText, setHostNameText] = React.useState(hostName || '')
-  const [editCohosts, setEditCohosts] = React.useState<CohostEntry[]>(cohosts || [])
-
-  // Reset form when session changes
   React.useEffect(() => {
-    setTitle(session.title)
-    setDescription(session.description || '')
-    setFormat(session.format)
-    setTags(session.topic_tags || [])
-    setTrackId(session.track_id || null)
-    setTelegramGroupUrl(session?.telegram_group_url || '')
-    setIsSelfHosted(session.is_self_hosted || false)
-    setCustomLocation(session.custom_location || '')
-    setSelfHostedDay(parseTimestamp(session.self_hosted_start_time, eventTimezone).day)
-    setSelfHostedStartTime(parseTimestamp(session.self_hosted_start_time, eventTimezone).time)
-    setSelfHostedEndTime(parseTimestamp(session.self_hosted_end_time, eventTimezone).time)
-    setSelectedHost(host || null)
-    setHostNameText(hostName || '')
-    setEditCohosts(cohosts || [])
-  }, [session, host, hostName, cohosts, eventTimezone])
+    if (isOpen) {
+      setForm(initial())
+      setError(null)
+      setAskMessage('')
+      setAskState('idle')
+    }
+  }, [isOpen, initial])
+
+  // Attendee-only details are only in the payload for hosts/organizers; if they are absent,
+  // do not send them (an absent key is left untouched by the API).
+  const canSeeAttendeeDetails = session.telegram_group_url !== undefined
+  const canManageLogistics = session.viewer.can_manage && canSeeAttendeeDetails
+
+  const handleAskToUpdate = async () => {
+    if (!askMessage.trim()) return
+    setAskState('sending')
+    setError(null)
+    try {
+      await apiFetch(`/api/v1/sessions/${session.id}/request-update`, { method: 'POST', json: { message: askMessage.trim() } })
+      setAskState('sent')
+      setAskMessage('')
+    } catch (err) {
+      setAskState('idle')
+      setError(err instanceof Error ? err.message : 'The request could not be sent')
+    }
+  }
 
   const handleAddTag = (tag: string) => {
-    const normalizedTag = tag.toLowerCase().trim()
-    if (normalizedTag && !tags.includes(normalizedTag) && tags.length < 5) {
-      setTags([...tags, normalizedTag])
-    }
+    const normalized = tag.toLowerCase().trim()
+    if (normalized && !form.tags.includes(normalized) && form.tags.length < 5) set('tags', [...form.tags, normalized])
     setCustomTag('')
   }
 
-  const handleRemoveTag = (tag: string) => {
-    setTags(tags.filter((t) => t !== tag))
-  }
-
-  // Compute IDs to exclude from profile search
-  const excludeFromSearch = React.useMemo(() => {
-    const ids: string[] = []
-    if (selectedHost?.id) ids.push(selectedHost.id)
-    editCohosts.forEach((c) => { if (c.user_id) ids.push(c.user_id) })
-    return ids
-  }, [selectedHost, editCohosts])
-
-  const handleSelectPrimaryHost = (profile: ProfileResult) => {
-    // If the new primary host is currently a co-host, remove them from co-hosts
-    setEditCohosts((prev) => prev.filter((c) => c.user_id !== profile.id))
-    setSelectedHost(profile)
-    setHostNameText(profile.display_name || '')
-  }
-
-  const handleAddCohost = (profile: ProfileResult) => {
-    setEditCohosts((prev) => [...prev, { user_id: profile.id, profile }])
-  }
-
-  const handleRemoveCohost = (userId: string) => {
-    setEditCohosts((prev) => prev.filter((c) => c.user_id !== userId))
-  }
-
   const handleSave = async () => {
-    if (!title.trim()) {
+    if (canEditContent && !form.title.trim()) {
       setError('Title is required')
       return
     }
-
-    const token = getAccessToken()
-    if (!token) {
-      setError('Session expired. Please log in again.')
-      return
-    }
-
-    if (isSelfHosted && selfHostedDay && (selfHostedStartTime || selfHostedEndTime) && !eventTimezone) {
-      setError('Event timezone is unavailable, so the self-hosted time cannot be saved.')
-      return
-    }
-    if (isSelfHosted && selfHostedDay && selfHostedStartTime && selfHostedEndTime && selfHostedEndTime <= selfHostedStartTime) {
+    if (form.isSelfHosted && form.day && form.startTime && form.endTime && form.endTime <= form.startTime) {
       setError('The end time must be after the start time.')
       return
     }
-
     setIsSaving(true)
     setError(null)
-
     try {
-      const canBuildTimes = isSelfHosted && !!selfHostedDay && !!eventTimezone
-      // Build session PATCH body
-      const patchBody: Record<string, any> = {
-        title: title.trim(),
-        description: description.trim() || null,
-        format,
-        topic_tags: tags.length > 0 ? tags : null,
-        track_id: trackId,
-        is_self_hosted: isSelfHosted,
-        custom_location: isSelfHosted ? customLocation.trim() || null : null,
-        self_hosted_start_time: canBuildTimes && selfHostedStartTime
-          ? buildTimestamp(selfHostedDay, selfHostedStartTime, eventTimezone!) : null,
-        self_hosted_end_time: canBuildTimes && selfHostedEndTime
-          ? buildTimestamp(selfHostedDay, selfHostedEndTime, eventTimezone!) : null,
-        telegram_group_url: telegramGroupUrl.trim() || null,
-      }
-
-      // Organizer-only columns. A DB guard rejects (42501) any user-JWT update that
-      // touches status, venue_id, time_slot_id, host_id, session_type, etc. unless the
-      // caller is an event owner/admin/moderator, so hosts/co-hosts must never send
-      // them, not even unchanged. Non-organizers switching to self-hosted only send the
-      // self_hosted_* fields; organizers additionally clear the official slot.
-      if (isAdmin) {
-        if (isSelfHosted) {
-          patchBody.venue_id = null
-          patchBody.time_slot_id = null
+      const withTimes = form.isSelfHosted && !!form.day
+      // Send only what this viewer has authority over; the server enforces the same split.
+      const body: Record<string, unknown> = {}
+      if (canEditContent) {
+        Object.assign(body, {
+          title: form.title.trim(),
+          description: form.description.trim() || null,
+          format: form.format,
+          topic_tags: form.tags.length ? form.tags : null,
+          skills: form.skills,
+          is_self_hosted: form.isSelfHosted,
+        })
+        if (form.isSelfHosted) {
+          body.self_hosted_start_time = withTimes && form.startTime ? parseTimeInTimezone(form.startTime, form.day, event.timezone).toISOString() : null
+          body.self_hosted_end_time = withTimes && form.endTime ? parseTimeInTimezone(form.endTime, form.day, event.timezone).toISOString() : null
+          if (canSeeAttendeeDetails) body.custom_location = form.customLocation.trim() || null
+          body.public_place = form.publicPlace.trim() || null
         }
-        patchBody.host_id = selectedHost?.id || null
-        patchBody.host_name = hostNameText.trim() || null
       }
+      if (canSetTrack && form.trackId !== session.track_id) body.track_id = form.trackId
+      if (canManageLogistics) body.telegram_group_url = form.telegram.trim() || null
 
-      // Scope the update to this event so a row can never be edited across tenants
-      const eventScope = event ? `&event_id=eq.${event.id}` : ''
-      const response = await fetch(
-        `${SUPABASE_URL}/rest/v1/sessions?id=eq.${session.id}${eventScope}`,
-        {
-          method: 'PATCH',
-          headers: {
-            'apikey': SUPABASE_KEY,
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json',
-            'Prefer': 'return=minimal',
-          },
-          body: JSON.stringify(patchBody),
-        }
-      )
-
-      if (!response.ok) {
-        const errorData = await response.json()
-        throw new Error(errorData.message || 'Failed to update session')
-      }
-
-      // Sync co-hosts if admin
-      if (isAdmin) {
-        const originalIds = new Set((cohosts || []).map((c) => c.user_id))
-        const editedIds = new Set(editCohosts.map((c) => c.user_id))
-
-        // Removed co-hosts
-        const removed = Array.from(originalIds).filter((id) => !editedIds.has(id))
-        // Added co-hosts
-        const added = Array.from(editedIds).filter((id) => !originalIds.has(id))
-
-        const headers = {
-          'apikey': SUPABASE_KEY,
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-          'Prefer': 'return=minimal',
-        }
-
-        const cohostResults = await Promise.allSettled([
-          ...removed.map((userId) =>
-            fetch(
-              `${SUPABASE_URL}/rest/v1/session_cohosts?session_id=eq.${session.id}&user_id=eq.${userId}${eventScope}`,
-              { method: 'DELETE', headers }
-            )
-          ),
-          ...added.map((userId) =>
-            fetch(
-              `${SUPABASE_URL}/rest/v1/session_cohosts`,
-              {
-                method: 'POST',
-                headers,
-                body: JSON.stringify({ session_id: session.id, user_id: userId, ...(event ? { event_id: event.id } : {}) }),
-              }
-            )
-          ),
-        ])
-        // fetch() resolves on HTTP errors, so a rejected RLS write would otherwise
-        // close the modal as if the roster had changed.
-        const failedCohostWrites = cohostResults.filter(
-          (r) => r.status === 'rejected' || !r.value.ok
-        ).length
-        if (failedCohostWrites > 0) {
-          throw new Error(
-            `Session saved, but ${failedCohostWrites} co-host change${failedCohostWrites === 1 ? '' : 's'} could not be applied. Reopen the session to retry.`
-          )
+      if (session.viewer.is_host) {
+        const before = initial()
+        const changed = JSON.stringify(before.availability) !== JSON.stringify({ windows: form.availability.windows, blackouts: form.availability.blackouts })
+          || before.publishAvailability !== form.publishAvailability
+        if (changed) {
+          body.time_preference = { windows: form.availability.windows, blackouts: form.availability.blackouts, publish: form.publishAvailability }
         }
       }
 
-      onSave()
+      if (isOrganizer) {
+        if ((form.sessionType || 'proposed') !== (session.session_type || 'proposed')) body.session_type = form.sessionType
+        if (form.status !== session.status) body.status = form.status
+        // An organizer moving a host-less session to self-hosted also releases its official slot.
+        if (canEditContent && form.isSelfHosted && !session.is_self_hosted && (session.venue || session.time_slot)) {
+          body.venue_id = null
+          body.time_slot_id = null
+        }
+      }
+
+      if (Object.keys(body).length === 0) {
+        onClose()
+        return
+      }
+      const result = await apiFetch<{ session: SessionView; atproto?: { error?: string } }>(`/api/v1/sessions/${session.id}`, {
+        method: 'PATCH',
+        json: body,
+      })
+      onSave(result.session)
+      if (result.atproto?.error) {
+        setError(`Saved. Updating the public proposal record failed: ${result.atproto.error}`)
+        return
+      }
       onClose()
-    } catch (err: any) {
-      setError(err.message || 'Failed to update session')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update session')
     } finally {
       setIsSaving(false)
     }
@@ -467,154 +250,87 @@ export function EditSessionModal({
 
   return (
     <>
-      {/* Backdrop */}
+      <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50" onClick={onClose} />
       <div
-        className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50"
-        onClick={onClose}
-      />
-
-      {/* Modal */}
-      <div className="fixed inset-4 md:inset-auto md:left-1/2 md:top-1/2 md:-translate-x-1/2 md:-translate-y-1/2 md:w-full md:max-w-lg bg-card border rounded-2xl shadow-2xl z-50 flex flex-col max-h-[90vh] overflow-hidden">
-        {/* Header */}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="edit-session-title"
+        className="fixed inset-4 md:inset-auto md:left-1/2 md:top-1/2 md:-translate-x-1/2 md:-translate-y-1/2 md:w-full md:max-w-lg bg-card border rounded-2xl shadow-2xl z-50 flex flex-col max-h-[90vh] overflow-hidden"
+      >
         <div className="flex items-center justify-between p-4 border-b">
-          <h2 className="text-lg font-semibold">Edit Session</h2>
-          <button
-            onClick={onClose}
-            className="p-2 rounded-full hover:bg-muted transition-colors"
-          >
+          <h2 id="edit-session-title" className="text-lg font-semibold">Edit Session</h2>
+          <button onClick={onClose} className="p-2 rounded-full hover:bg-muted transition-colors" aria-label="Close">
             <X className="h-5 w-5" />
           </button>
         </div>
 
-        {/* Content */}
         <div className="flex-1 overflow-y-auto p-4 space-y-5">
           {error && (
-            <div className="rounded-lg bg-destructive/10 border border-destructive/20 p-3 text-sm text-destructive">
-              {error}
-            </div>
+            <div role="alert" className="rounded-lg bg-destructive/10 border border-destructive/20 p-3 text-sm text-destructive">{error}</div>
           )}
 
-          {/* Title */}
-          <div className="space-y-2">
-            <label className="text-sm font-medium">
-              Title <span className="text-destructive">*</span>
-            </label>
-            <Input
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              placeholder="What's your session about?"
-              maxLength={100}
-            />
-            <p className="text-xs text-muted-foreground">{title.length}/100</p>
-          </div>
+          {canEditContent && session.viewer.is_host && session.proposal_uri && (
+            <p className="text-xs text-muted-foreground rounded-lg border p-3">
+              This proposal is a public record in your own repository. Saving content changes updates that record.
+            </p>
+          )}
 
-          {/* Admin-only: Hosts section */}
-          {isAdmin && (
-            <div className="space-y-4 rounded-lg border border-primary/20 bg-primary/5 p-4">
-              <label className="text-sm font-medium">Hosts <span className="text-xs text-muted-foreground">(Admin)</span></label>
-
-              {/* Primary Host */}
-              <div className="space-y-2">
-                <label className="text-xs font-medium text-muted-foreground">Primary Host</label>
-                {selectedHost ? (
-                  <div className="flex items-center gap-2 rounded-lg border bg-background px-3 py-2">
-                    {selectedHost.avatar_url ? (
-                      <img src={selectedHost.avatar_url} alt="" className="w-6 h-6 rounded-full object-cover" />
-                    ) : (
-                      <div className="w-6 h-6 rounded-full bg-muted flex items-center justify-center text-xs font-medium">
-                        {(selectedHost.display_name || '?')[0].toUpperCase()}
-                      </div>
-                    )}
-                    <span className="text-sm flex-1 truncate">{selectedHost.display_name || 'Unnamed'}</span>
-                    <button
-                      type="button"
-                      onClick={() => { setSelectedHost(null); }}
-                      className="p-1 rounded hover:bg-muted"
-                    >
-                      <X className="h-3.5 w-3.5" />
-                    </button>
-                  </div>
-                ) : (
-                  <ProfileSearch
-                    onSelect={handleSelectPrimaryHost}
-                    excludeIds={excludeFromSearch}
-                    placeholder="Search for primary host..."
+          {authored && !canEditContent && (
+            <div className="rounded-lg border p-3 space-y-3">
+              <p className="text-xs text-muted-foreground flex items-start gap-2">
+                <Lock className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                This proposal belongs to its proposer: its title, description, format, skills, place and time are theirs to change.
+                {isOrganizer ? ' You can still set its track, review status and type.' : ''}
+              </p>
+              {isOrganizer && (
+                <div className="space-y-2">
+                  <label htmlFor="ask-proposer" className="text-sm font-medium flex items-center gap-2">
+                    <MessageSquareWarning className="h-4 w-4" />
+                    Ask the proposer to update
+                  </label>
+                  <Textarea
+                    id="ask-proposer"
+                    value={askMessage}
+                    onChange={(e) => { setAskMessage(e.target.value); if (askState === 'sent') setAskState('idle') }}
+                    placeholder="What would you like them to change, and why?"
+                    rows={3}
+                    maxLength={1000}
                   />
-                )}
-                <Input
-                  value={hostNameText}
-                  onChange={(e) => setHostNameText(e.target.value)}
-                  placeholder="Host display name (override)"
-                  className="text-sm"
-                />
-                <p className="text-xs text-muted-foreground">
-                  Auto-filled from profile. Edit to override the displayed name.
-                </p>
-              </div>
-
-              {/* Co-Hosts */}
-              <div className="space-y-2">
-                <label className="text-xs font-medium text-muted-foreground">Co-Hosts</label>
-                {editCohosts.length > 0 && (
-                  <div className="space-y-1.5">
-                    {editCohosts.map((c) => (
-                      <div key={c.user_id} className="flex items-center gap-2 rounded-lg border bg-background px-3 py-2">
-                        {c.profile?.avatar_url ? (
-                          <img src={c.profile.avatar_url} alt="" className="w-6 h-6 rounded-full object-cover" />
-                        ) : (
-                          <div className="w-6 h-6 rounded-full bg-muted flex items-center justify-center text-xs font-medium">
-                            {(c.profile?.display_name || '?')[0].toUpperCase()}
-                          </div>
-                        )}
-                        <span className="text-sm flex-1 truncate">{c.profile?.display_name || 'Unnamed'}</span>
-                        <button
-                          type="button"
-                          onClick={() => handleRemoveCohost(c.user_id)}
-                          className="p-1 rounded hover:bg-muted"
-                        >
-                          <X className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
-                    ))}
+                  <div className="flex items-center gap-3">
+                    <Button type="button" variant="outline" size="sm" onClick={handleAskToUpdate} disabled={!askMessage.trim() || askState === 'sending'}>
+                      {askState === 'sending' && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+                      Send request
+                    </Button>
+                    {askState === 'sent' && <span role="status" className="text-xs text-muted-foreground">Sent. The proposer was notified.</span>}
                   </div>
-                )}
-                <ProfileSearch
-                  onSelect={handleAddCohost}
-                  excludeIds={excludeFromSearch}
-                  placeholder="Add co-host..."
-                />
-              </div>
+                </div>
+              )}
             </div>
           )}
 
-          {/* Description */}
+          {canEditContent && (<>
           <div className="space-y-2">
-            <label className="text-sm font-medium">Description</label>
-            <Textarea
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder="Describe what participants will learn or experience..."
-              rows={4}
-              maxLength={500}
-            />
-            <p className="text-xs text-muted-foreground">{description.length}/500</p>
+            <label htmlFor="edit-title" className="text-sm font-medium">Title <span className="text-destructive">*</span></label>
+            <Input id="edit-title" value={form.title} onChange={(e) => set('title', e.target.value)} placeholder="What's your session about?" maxLength={100} />
+            <p className="text-xs text-muted-foreground">{form.title.length}/100</p>
           </div>
 
-          {/* Format */}
           <div className="space-y-2">
-            <label className="text-sm font-medium">Format</label>
+            <label htmlFor="edit-description" className="text-sm font-medium">Description</label>
+            <Textarea id="edit-description" value={form.description} onChange={(e) => set('description', e.target.value)} placeholder="Describe what participants will learn or experience..." rows={4} maxLength={500} />
+            <p className="text-xs text-muted-foreground">{form.description.length}/500</p>
+          </div>
+
+          <div className="space-y-2">
+            <span className="text-sm font-medium">Format</span>
             <div className="grid grid-cols-2 gap-2">
-              {formats.map((f) => (
+              {allowedFormats.map((f) => (
                 <button
                   key={f.value}
                   type="button"
-                  onClick={() => setFormat(f.value)}
-                  className={cn(
-                    'p-3 rounded-lg border text-left transition-colors',
-                    format === f.value
-                      ? 'border-primary bg-primary/10'
-                      : 'hover:border-muted-foreground/50'
-                  )}
+                  aria-pressed={form.format === f.value}
+                  onClick={() => set('format', f.value)}
+                  className={cn('p-3 rounded-lg border text-left transition-colors', form.format === f.value ? 'border-primary bg-primary/10' : 'hover:border-muted-foreground/50')}
                 >
                   <div className="font-medium text-sm">{f.label}</div>
                   <div className="text-xs text-muted-foreground">{f.description}</div>
@@ -622,185 +338,157 @@ export function EditSessionModal({
               ))}
             </div>
           </div>
+          </>)}
 
-          {/* Track */}
-          <div className="space-y-2">
-            <label className="text-sm font-medium">Track</label>
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                type="button"
-                onClick={() => setTrackId(null)}
-                className={cn(
-                  'px-3 py-2 rounded-lg border text-sm transition-colors text-left',
-                  trackId === null
-                    ? 'border-primary bg-primary/10'
-                    : 'hover:border-muted-foreground/50'
-                )}
-              >
-                None
-              </button>
-              {tracks.map((track) => (
-                <button
-                  key={track.id}
-                  type="button"
-                  onClick={() => setTrackId(track.id)}
-                  className={cn(
-                    'px-3 py-2 rounded-lg border text-sm transition-colors text-left flex items-center gap-2',
-                    trackId === track.id
-                      ? 'border-primary bg-primary/10'
-                      : 'hover:border-muted-foreground/50'
-                  )}
-                >
-                  {track.color && (
-                    <span
-                      className="w-2 h-2 rounded-full flex-shrink-0"
-                      style={{ backgroundColor: track.color }}
-                    />
-                  )}
-                  <span className="truncate">{track.name}</span>
-                </button>
-              ))}
+          {canSetTrack && tracks.length > 0 && (
+            <div className="space-y-2">
+              <span className="text-sm font-medium">Track</span>
+              <div className="grid grid-cols-2 gap-2">
+                {[{ id: null as string | null, name: 'None', color: null as string | null }, ...tracks].map((track) => (
+                  <button
+                    key={track.id ?? 'none'}
+                    type="button"
+                    aria-pressed={form.trackId === track.id}
+                    onClick={() => set('trackId', track.id)}
+                    className={cn('px-3 py-2 rounded-lg border text-sm transition-colors text-left flex items-center gap-2', form.trackId === track.id ? 'border-primary bg-primary/10' : 'hover:border-muted-foreground/50')}
+                  >
+                    {track.color && <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: track.color }} />}
+                    <span className="truncate">{track.name}</span>
+                  </button>
+                ))}
+              </div>
             </div>
-          </div>
+          )}
 
-          {/* Self-Hosted Toggle */}
+          {canEditContent && (<>
+          <SkillPicker
+            value={form.skills}
+            onChange={(skills) => set('skills', skills.slice(0, 5))}
+            max={5}
+            label="Skills (up to 5)"
+            description="From the shared skill taxonomy."
+          />
+
           <div className="space-y-3">
-            <label className="text-sm font-medium">Hosting</label>
+            <span className="text-sm font-medium">Hosting</span>
             <div className="grid grid-cols-2 gap-2">
               <button
                 type="button"
-                onClick={() => setIsSelfHosted(false)}
-                className={cn(
-                  'p-3 rounded-lg border text-left transition-colors',
-                  !isSelfHosted
-                    ? 'border-primary bg-primary/10'
-                    : 'hover:border-muted-foreground/50'
-                )}
+                aria-pressed={!form.isSelfHosted}
+                onClick={() => set('isSelfHosted', false)}
+                className={cn('p-3 rounded-lg border text-left transition-colors', !form.isSelfHosted ? 'border-primary bg-primary/10' : 'hover:border-muted-foreground/50')}
               >
                 <div className="font-medium text-sm">Official Venue</div>
-                <div className="text-xs text-muted-foreground">Assigned by admin</div>
+                <div className="text-xs text-muted-foreground">Assigned by organizers</div>
               </button>
               <button
                 type="button"
-                onClick={() => setIsSelfHosted(true)}
-                className={cn(
-                  'p-3 rounded-lg border text-left transition-colors',
-                  isSelfHosted
-                    ? 'border-primary bg-primary/10'
-                    : 'hover:border-muted-foreground/50'
-                )}
+                aria-pressed={form.isSelfHosted}
+                onClick={() => set('isSelfHosted', true)}
+                className={cn('p-3 rounded-lg border text-left transition-colors', form.isSelfHosted ? 'border-primary bg-primary/10' : 'hover:border-muted-foreground/50')}
               >
                 <div className="font-medium text-sm">Self-Hosted</div>
                 <div className="text-xs text-muted-foreground">Your own location</div>
               </button>
             </div>
 
-            {isSelfHosted && (
+            {form.isSelfHosted && (
               <div className="space-y-3 rounded-lg border bg-muted/30 p-3">
-                {/* Day Picker */}
                 <div className="space-y-1.5">
-                  <label className="text-xs font-medium text-muted-foreground">Day</label>
-                  {eventDays.length === 0 && (
-                    <p className="text-xs text-muted-foreground">Event dates are unavailable.</p>
-                  )}
+                  <span className="text-xs font-medium text-muted-foreground">Day</span>
                   <div className="flex flex-wrap gap-1.5">
                     {eventDays.map((day) => (
                       <button
                         key={day.value}
                         type="button"
-                        onClick={() => setSelfHostedDay(selfHostedDay === day.value ? '' : day.value)}
-                        className={cn(
-                          'px-2.5 py-1.5 rounded-md border text-xs transition-colors',
-                          selfHostedDay === day.value
-                            ? 'border-primary bg-primary/10 font-medium'
-                            : 'hover:border-muted-foreground/50'
-                        )}
+                        aria-pressed={form.day === day.value}
+                        onClick={() => set('day', form.day === day.value ? '' : day.value)}
+                        className={cn('px-2.5 py-1.5 rounded-md border text-xs transition-colors', form.day === day.value ? 'border-primary bg-primary/10 font-medium' : 'hover:border-muted-foreground/50')}
                       >
                         {day.label}
                       </button>
                     ))}
                   </div>
                 </div>
-
-                {/* Time Range */}
-                {selfHostedDay && (
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">Time Range</label>
-                    <div className="flex items-center gap-2">
-                      <select
-                        value={selfHostedStartTime}
-                        onChange={(e) => setSelfHostedStartTime(e.target.value)}
-                        className="flex-1 rounded-md border bg-background px-2 py-1.5 text-sm"
-                      >
-                        <option value="">Start</option>
-                        {TIME_OPTIONS.map((t) => (
-                          <option key={t.value} value={t.value}>{t.label}</option>
-                        ))}
-                      </select>
-                      <span className="text-xs text-muted-foreground">to</span>
-                      <select
-                        value={selfHostedEndTime}
-                        onChange={(e) => setSelfHostedEndTime(e.target.value)}
-                        className="flex-1 rounded-md border bg-background px-2 py-1.5 text-sm"
-                      >
-                        <option value="">End</option>
-                        {TIME_OPTIONS.map((t) => (
-                          <option key={t.value} value={t.value}>{t.label}</option>
-                        ))}
-                      </select>
-                    </div>
+                {form.day && (
+                  <div className="flex items-center gap-2">
+                    <select aria-label="Start time" value={form.startTime} onChange={(e) => set('startTime', e.target.value)} className="flex-1 rounded-md border bg-background px-2 py-1.5 text-sm">
+                      <option value="">Start</option>
+                      {TIME_OPTIONS.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                    </select>
+                    <span className="text-xs text-muted-foreground">to</span>
+                    <select aria-label="End time" value={form.endTime} onChange={(e) => set('endTime', e.target.value)} className="flex-1 rounded-md border bg-background px-2 py-1.5 text-sm">
+                      <option value="">End</option>
+                      {TIME_OPTIONS.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                    </select>
                   </div>
                 )}
-
-                {/* Location */}
+                {canSeeAttendeeDetails && (
+                  <div className="space-y-1.5">
+                    <label htmlFor="edit-location" className="text-xs font-medium text-muted-foreground">Location / Address</label>
+                    <Textarea id="edit-location" value={form.customLocation} onChange={(e) => set('customLocation', e.target.value)} placeholder="Address or directions for attendees..." rows={2} maxLength={300} />
+                    <p className="text-xs text-muted-foreground">Shown only to confirmed attendees, hosts and organizers.</p>
+                  </div>
+                )}
                 <div className="space-y-1.5">
-                  <label className="text-xs font-medium text-muted-foreground">Location / Address</label>
-                  <Textarea
-                    value={customLocation}
-                    onChange={(e) => setCustomLocation(e.target.value)}
-                    placeholder="Address or directions for attendees..."
-                    rows={2}
-                    maxLength={300}
-                  />
+                  <label htmlFor="edit-public-place" className="text-xs font-medium text-muted-foreground">Public area (optional)</label>
+                  <input id="edit-public-place" type="text" value={form.publicPlace} onChange={(e) => set('publicPlace', e.target.value)} placeholder="e.g. Near Pearl St, Boulder" maxLength={80} className="w-full rounded-md border bg-background px-3 py-1.5 text-sm" />
+                  <p className="text-xs text-muted-foreground">A neighbourhood or landmark, never a street address. It appears on your public proposal record.</p>
                 </div>
               </div>
             )}
           </div>
+          </>)}
 
-          {/* Telegram Group URL */}
-          <div className="space-y-2">
-            <label className="text-sm font-medium flex items-center gap-2">
-              <Send className="h-4 w-4" />
-              Telegram Group URL (optional)
-            </label>
-            <Input
-              type="url"
-              placeholder="https://t.me/your_group"
-              value={telegramGroupUrl}
-              onChange={(e) => setTelegramGroupUrl(e.target.value)}
-            />
-            <p className="text-xs text-muted-foreground">
-              Add a Telegram group link for attendees to join
-            </p>
-          </div>
+          {session.viewer.is_host && eventDays.length > 0 && (
+            <div className="space-y-2">
+              <span className="text-sm font-medium">Your availability</span>
+              <p className="text-xs text-muted-foreground">Organizers use this to schedule you. It stays in this gathering unless you publish it.</p>
+              <TimePreferences
+                value={form.availability}
+                onChange={(value) => set('availability', { windows: value.windows, blackouts: value.blackouts })}
+                timezone={event.timezone}
+                startDate={eventDays[0].value}
+                endDate={eventDays[eventDays.length - 1].value}
+              />
+              <label className="flex items-start gap-3 cursor-pointer rounded-lg border p-3">
+                <Checkbox
+                  checked={form.publishAvailability}
+                  onCheckedChange={(checked) => set('publishAvailability', checked === true)}
+                  className="mt-0.5"
+                />
+                <span className="text-xs text-muted-foreground">
+                  <span className="block text-sm font-medium text-foreground">Publish my availability for this proposal</span>
+                  Writes a public record to your repository saying when you can and cannot attend. Public records can be deleted later, but copies may persist on the network.
+                </span>
+              </label>
+            </div>
+          )}
 
-          {/* Tags */}
+          {canManageLogistics && (
+            <div className="space-y-2">
+              <label htmlFor="edit-telegram" className="text-sm font-medium flex items-center gap-2">
+                <Send className="h-4 w-4" />
+                Telegram Group URL (optional)
+              </label>
+              <Input id="edit-telegram" type="url" placeholder="https://t.me/your_group" value={form.telegram} onChange={(e) => set('telegram', e.target.value)} />
+              <p className="text-xs text-muted-foreground">Shared with confirmed attendees only.</p>
+            </div>
+          )}
+
+          {canEditContent && (
           <div className="space-y-2">
-            <label className="text-sm font-medium">Tags (up to 5)</label>
+            <span className="text-sm font-medium">Tags (up to 5)</span>
             <div className="flex flex-wrap gap-1.5 mb-2">
-              {tags.map((tag) => (
-                <Badge
-                  key={tag}
-                  variant="secondary"
-                  className="cursor-pointer hover:bg-destructive/20"
-                  onClick={() => handleRemoveTag(tag)}
-                >
+              {form.tags.map((tag) => (
+                <Badge key={tag} variant="secondary" className="cursor-pointer hover:bg-destructive/20" onClick={() => set('tags', form.tags.filter((t) => t !== tag))}>
                   {tag} ×
                 </Badge>
               ))}
             </div>
             <div className="flex gap-2">
               <Input
+                aria-label="Add a tag"
                 value={customTag}
                 onChange={(e) => setCustomTag(e.target.value)}
                 placeholder="Add a tag..."
@@ -811,43 +499,55 @@ export function EditSessionModal({
                   }
                 }}
               />
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => handleAddTag(customTag)}
-                disabled={!customTag.trim() || tags.length >= 5}
-              >
-                Add
-              </Button>
+              <Button type="button" variant="outline" onClick={() => handleAddTag(customTag)} disabled={!customTag.trim() || form.tags.length >= 5}>Add</Button>
             </div>
-            <div className="flex flex-wrap gap-1.5 mt-2">
-              {suggestedTags
-                .filter((t) => !tags.includes(t))
-                .slice(0, 6)
-                .map((tag) => (
-                  <button
-                    key={tag}
-                    type="button"
-                    onClick={() => handleAddTag(tag)}
-                    className="px-2 py-1 text-xs rounded border hover:bg-accent"
-                    disabled={tags.length >= 5}
-                  >
+            {event.suggestedTopics.length > 0 && (
+              <div className="flex flex-wrap gap-1.5 mt-2">
+                {event.suggestedTopics.map((t) => t.toLowerCase()).filter((t) => !form.tags.includes(t)).slice(0, 6).map((tag) => (
+                  <button key={tag} type="button" onClick={() => handleAddTag(tag)} className="px-2 py-1 text-xs rounded border hover:bg-accent" disabled={form.tags.length >= 5}>
                     + {tag}
                   </button>
                 ))}
-            </div>
+              </div>
+            )}
           </div>
+          )}
 
-          <p className="text-xs text-muted-foreground">
-            Note: Time slot and venue assignment can only be changed by an admin. You can switch to self-hosted at any time.
-          </p>
+          {isOrganizer && (
+            <div className="space-y-3 rounded-lg border border-primary/20 bg-primary/5 p-4">
+              <p className="text-sm font-medium flex items-center gap-2">
+                <ShieldCheck className="h-4 w-4" />
+                Organizer settings
+              </p>
+              {session.unclaimed && (
+                <p className="text-xs text-muted-foreground">
+                  {session.listed_as ? <>Listed as <span className="font-medium text-foreground">{session.listed_as}</span>. </> : null}
+                  Unclaimed: no participant has proposed or claimed this session. Listing labels are managed in the admin sessions view and are never shown publicly.
+                </p>
+              )}
+              {session.status !== 'scheduled' && (
+                <div className="space-y-1.5">
+                  <label htmlFor="edit-review-status" className="text-xs font-medium text-muted-foreground">Review status</label>
+                  <select id="edit-review-status" value={form.status} onChange={(e) => set('status', e.target.value)} className="w-full rounded-md border bg-background px-2 py-1.5 text-sm">
+                    {REVIEW_STATUSES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                  </select>
+                </div>
+              )}
+              <div className="space-y-1.5">
+                <label htmlFor="edit-session-type" className="text-xs font-medium text-muted-foreground">Session type</label>
+                <select id="edit-session-type" value={form.sessionType} onChange={(e) => set('sessionType', e.target.value)} className="w-full rounded-md border bg-background px-2 py-1.5 text-sm">
+                  {SESSION_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                </select>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Venue and time are set in the schedule builder. None of these settings change the proposer&apos;s record.
+              </p>
+            </div>
+          )}
         </div>
 
-        {/* Footer */}
         <div className="flex gap-3 p-4 border-t">
-          <Button variant="outline" onClick={onClose} className="flex-1">
-            Cancel
-          </Button>
+          <Button variant="outline" onClick={onClose} className="flex-1">Cancel</Button>
           <Button onClick={handleSave} disabled={isSaving} className="flex-1">
             {isSaving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
             Save Changes

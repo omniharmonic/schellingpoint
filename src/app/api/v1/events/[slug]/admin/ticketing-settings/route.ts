@@ -1,117 +1,68 @@
 /**
- * Admin Ticketing Settings API
+ * Admin ticketing settings (owner or admin).
  *
- * GET  → returns ticketing_enabled + stripe_account_id + platform stripe status
- * POST → updates ticketing_enabled (and in the future, stripe_account_id)
- *
- * Authorization: user must be owner or admin of the event.
+ *   GET  → { ticketing_enabled, stripe_account_id, platform_stripe_configured, webhook_configured }
+ *   POST { ticketing_enabled?: boolean, stripe_account_id?: string | null } → same shape
  */
+import { assertSameOrigin, requireEventRole } from '@/lib/auth/viewer'
+import { sql } from '@/lib/db'
+import { jsonError, TICKET_ADMIN_ROLES } from '@/lib/tickets'
 
-import { NextRequest, NextResponse } from 'next/server'
-import { createAdminClient } from '@/lib/supabase/server'
-import { getUserFromRequest } from '@/lib/api/getUser'
+export const dynamic = 'force-dynamic'
 
-const ALLOWED_ROLES = ['owner', 'admin']
+const NO_STORE = { 'Cache-Control': 'private, no-store' }
 
-async function assertAdmin(request: NextRequest, slug: string) {
-  const user = await getUserFromRequest(request)
-  if (!user) {
-    return { ok: false as const, response: NextResponse.json({ error: 'Unauthorized' }, { status: 401 }) }
-  }
-
-  const supabase = await createAdminClient()
-  const { data: event } = await supabase
-    .from('events')
-    .select('id, slug, name, ticketing_enabled, stripe_account_id')
-    .eq('slug', slug)
-    .maybeSingle()
-
-  if (!event) {
-    return { ok: false as const, response: NextResponse.json({ error: 'Event not found' }, { status: 404 }) }
-  }
-
-  const { data: membership } = await supabase
-    .from('event_members')
-    .select('role')
-    .eq('event_id', event.id)
-    .eq('user_id', user.id)
-    .maybeSingle()
-
-  if (!membership || !ALLOWED_ROLES.includes(membership.role)) {
-    return { ok: false as const, response: NextResponse.json({ error: 'Forbidden' }, { status: 403 }) }
-  }
-
-  return { ok: true as const, user, event, supabase }
-}
-
-export async function GET(
-  request: NextRequest,
-  { params }: { params: Promise<{ slug: string }> },
-) {
-  const { slug } = await params
-  const auth = await assertAdmin(request, slug)
-  if (!auth.ok) return auth.response
-
-  return NextResponse.json({
-    ticketing_enabled: auth.event.ticketing_enabled,
-    stripe_account_id: auth.event.stripe_account_id,
+function settingsBody(row: { ticketing_enabled: boolean; stripe_account_id: string | null }) {
+  return {
+    ticketing_enabled: row.ticketing_enabled,
+    stripe_account_id: row.stripe_account_id,
     platform_stripe_configured: Boolean(process.env.STRIPE_SECRET_KEY),
     webhook_configured: Boolean(process.env.STRIPE_WEBHOOK_SECRET),
-  })
+  }
 }
 
-export async function POST(
-  request: NextRequest,
-  { params }: { params: Promise<{ slug: string }> },
-) {
+export async function GET(request: Request, { params }: { params: Promise<{ slug: string }> }): Promise<Response> {
   const { slug } = await params
-  const auth = await assertAdmin(request, slug)
-  if (!auth.ok) return auth.response
+  const auth = await requireEventRole(request, slug, TICKET_ADMIN_ROLES)
+  if (auth instanceof Response) return auth
+  const [row] = await sql<{ ticketing_enabled: boolean; stripe_account_id: string | null }[]>`
+    select ticketing_enabled, stripe_account_id from events where id = ${auth.event.id}
+  `
+  return Response.json(settingsBody(row), { headers: NO_STORE })
+}
 
-  let body: { ticketing_enabled?: boolean; stripe_account_id?: string | null } = {}
+export async function POST(request: Request, { params }: { params: Promise<{ slug: string }> }): Promise<Response> {
+  const crossOrigin = assertSameOrigin(request)
+  if (crossOrigin) return crossOrigin
+  const { slug } = await params
+  const auth = await requireEventRole(request, slug, TICKET_ADMIN_ROLES)
+  if (auth instanceof Response) return auth
+
+  let body: { ticketing_enabled?: unknown; stripe_account_id?: unknown }
   try {
     body = await request.json()
   } catch {
-    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
+    return jsonError(400, 'Invalid JSON body')
   }
 
-  const updates: Record<string, unknown> = {}
-  if (typeof body.ticketing_enabled === 'boolean') {
-    updates.ticketing_enabled = body.ticketing_enabled
-  }
-  if (body.stripe_account_id !== undefined) {
-    // Accept null to clear, otherwise require a plausible format
-    if (
-      body.stripe_account_id !== null &&
-      (typeof body.stripe_account_id !== 'string' || !body.stripe_account_id.startsWith('acct_'))
-    ) {
-      return NextResponse.json(
-        { error: "stripe_account_id must start with 'acct_'" },
-        { status: 400 },
-      )
+  const setEnabled = typeof body.ticketing_enabled === 'boolean'
+  const setAccount = body.stripe_account_id !== undefined
+  if (setAccount && body.stripe_account_id !== null) {
+    if (typeof body.stripe_account_id !== 'string' || !/^acct_[A-Za-z0-9]{6,64}$/.test(body.stripe_account_id)) {
+      return jsonError(400, "stripe_account_id must look like 'acct_…'", { field: 'stripe_account_id' })
     }
-    updates.stripe_account_id = body.stripe_account_id
   }
+  if (!setEnabled && !setAccount) return jsonError(400, 'No updates provided')
 
-  if (Object.keys(updates).length === 0) {
-    return NextResponse.json({ error: 'No updates provided' }, { status: 400 })
-  }
-
-  const { data: updated, error } = await auth.supabase
-    .from('events')
-    .update(updates)
-    .eq('id', auth.event.id)
-    .select('ticketing_enabled, stripe_account_id')
-    .single()
-
-  if (error || !updated) {
-    return NextResponse.json({ error: error?.message || 'Failed to update' }, { status: 500 })
-  }
-
-  return NextResponse.json({
-    ticketing_enabled: updated.ticketing_enabled,
-    stripe_account_id: updated.stripe_account_id,
-    platform_stripe_configured: Boolean(process.env.STRIPE_SECRET_KEY),
-    webhook_configured: Boolean(process.env.STRIPE_WEBHOOK_SECRET),
-  })
+  const enabled = setEnabled ? (body.ticketing_enabled as boolean) : null
+  const account = setAccount ? ((body.stripe_account_id as string | null) ?? null) : null
+  const [row] = await sql<{ ticketing_enabled: boolean; stripe_account_id: string | null }[]>`
+    update events
+    set ticketing_enabled = ${setEnabled ? sql`${enabled}` : sql`ticketing_enabled`},
+        stripe_account_id = ${setAccount ? sql`${account}` : sql`stripe_account_id`},
+        updated_at = now()
+    where id = ${auth.event.id}
+    returning ticketing_enabled, stripe_account_id
+  `
+  return Response.json(settingsBody(row), { headers: NO_STORE })
 }

@@ -6,7 +6,7 @@ import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import { cn } from '@/lib/utils';
-import type { WizardState, WizardAction, EventVisibility } from '../useWizardState';
+import { MAX_SLUG_LENGTH, HANDLE_LABEL_MAX, type WizardState, type WizardAction, type EventVisibility } from '../useWizardState';
 
 // ============================================================================
 // Types
@@ -77,8 +77,10 @@ function generateSlug(name: string): string {
     .trim()
     .replace(/[^\w\s-]/g, '')
     .replace(/\s+/g, '-')
+    .replace(/_/g, '-')
     .replace(/-+/g, '-')
-    .substring(0, 50);
+    .substring(0, MAX_SLUG_LENGTH)
+    .replace(/^-+|-+$/g, '');
 }
 
 // ============================================================================
@@ -119,7 +121,7 @@ export function BasicsStep({ state, dispatch }: BasicsStepProps) {
     const newSlug = e.target.value
       .toLowerCase()
       .replace(/[^a-z0-9-]/g, '')
-      .substring(0, 50);
+      .substring(0, MAX_SLUG_LENGTH);
 
     setSlugManuallyEdited(true);
     dispatch({ type: 'UPDATE_BASICS', payload: { slug: newSlug } });
@@ -225,7 +227,7 @@ export function BasicsStep({ state, dispatch }: BasicsStepProps) {
                 Event URL <span className="text-destructive">*</span>
               </Label>
               <span className="text-xs text-muted-foreground">
-                {basics.slug.length}/50
+                {basics.slug.length}/{MAX_SLUG_LENGTH}
               </span>
             </div>
             <Input
@@ -233,7 +235,7 @@ export function BasicsStep({ state, dispatch }: BasicsStepProps) {
               placeholder="your-event-name"
               value={basics.slug}
               onChange={handleSlugChange}
-              maxLength={50}
+              maxLength={MAX_SLUG_LENGTH}
               error={
                 state.validation.basics?.includes('Event slug is required') ||
                 state.validation.basics?.includes(
@@ -244,8 +246,14 @@ export function BasicsStep({ state, dispatch }: BasicsStepProps) {
             <p className="text-sm text-muted-foreground">
               Your event URL:{' '}
               <span className="text-foreground">
-                schellingpoint.xyz/e/{basics.slug || 'your-event'}
+                /e/{basics.slug || 'your-event'}
               </span>
+            </p>
+            <p className="text-xs text-muted-foreground">
+              This also becomes the gathering&apos;s own address and handle on the network.
+              {basics.slug.length > HANDLE_LABEL_MAX
+                ? ` Handles fit ${HANDLE_LABEL_MAX} characters, so this one will get a generated handle — a shorter URL keeps the name.`
+                : ''}
             </p>
           </div>
         </CardContent>

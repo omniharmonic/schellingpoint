@@ -1,28 +1,10 @@
-'use client';
-
-import * as React from 'react';
 import Link from 'next/link';
-import { Calendar, MapPin, Settings, Plus, ArrowRight } from 'lucide-react';
+import { Calendar, MapPin, Settings, Plus, ArrowRight, AlertTriangle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { useAuth } from '@/hooks/useAuth';
-
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
-
-interface MyEvent {
-  id: string;
-  slug: string;
-  name: string;
-  tagline: string | null;
-  start_date: string;
-  end_date: string;
-  location_name: string | null;
-  status: string;
-  role: string;
-  logo_url: string | null;
-}
+import { getViewer } from '@/lib/auth/viewer';
+import { getOrganizedEvents, type OrganizedEvent } from '@/lib/events';
 
 // Status badge configuration
 const statusBadgeConfig: Record<string, { label: string; variant: 'default' | 'secondary' | 'destructive' | 'outline' | 'success' }> = {
@@ -53,124 +35,19 @@ function formatDateRange(startDate: string, endDate: string): string {
   return `${startMonth} ${startDay} - ${endMonth} ${endDay}, ${year}`;
 }
 
-function getAccessToken(): string | null {
-  if (typeof window === 'undefined') return null;
-  const storageKey = `sb-${new URL(SUPABASE_URL).hostname.split('.')[0]}-auth-token`;
-  const stored = localStorage.getItem(storageKey);
-  if (stored) {
-    try {
-      const session = JSON.parse(stored);
-      return session?.access_token || null;
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
+/**
+ * Gatherings the signed-in viewer organizes. A server component: the session cookie is read
+ * on the server and nothing about other people's memberships reaches the browser.
+ */
+export async function MyEventsSection() {
+  const viewer = await getViewer();
+  if (!viewer) return null;
 
-export function MyEventsSection() {
-  const { user, isLoading: authLoading } = useAuth();
-  const [events, setEvents] = React.useState<MyEvent[]>([]);
-  const [isLoading, setIsLoading] = React.useState(true);
-
-  React.useEffect(() => {
-    const fetchMyEvents = async () => {
-      if (!user) {
-        setIsLoading(false);
-        return;
-      }
-
-      const token = getAccessToken();
-      if (!token) {
-        setIsLoading(false);
-        return;
-      }
-
-      try {
-        // Fetch event memberships where user is owner or admin
-        const memberResponse = await fetch(
-          `${SUPABASE_URL}/rest/v1/event_members?user_id=eq.${user.id}&role=in.(owner,admin)&select=event_id,role`,
-          {
-            headers: {
-              apikey: SUPABASE_KEY,
-              Authorization: `Bearer ${token}`,
-            },
-          }
-        );
-
-        if (!memberResponse.ok) {
-          setIsLoading(false);
-          return;
-        }
-
-        const memberships = await memberResponse.json();
-        if (!memberships || memberships.length === 0) {
-          setEvents([]);
-          setIsLoading(false);
-          return;
-        }
-
-        const eventIds = memberships.map((m: { event_id: string }) => m.event_id);
-        const roleMap: Record<string, string> = {};
-        memberships.forEach((m: { event_id: string; role: string }) => {
-          roleMap[m.event_id] = m.role;
-        });
-
-        // Fetch event details
-        const eventsResponse = await fetch(
-          `${SUPABASE_URL}/rest/v1/events?id=in.(${eventIds.join(',')})&select=id,slug,name,tagline,start_date,end_date,location_name,status,logo_url&order=start_date.desc`,
-          {
-            headers: {
-              apikey: SUPABASE_KEY,
-              Authorization: `Bearer ${token}`,
-            },
-          }
-        );
-
-        if (eventsResponse.ok) {
-          const eventsData = await eventsResponse.json();
-          const eventsWithRoles = eventsData.map((e: MyEvent) => ({
-            ...e,
-            role: roleMap[e.id] || 'admin',
-          }));
-          setEvents(eventsWithRoles);
-        }
-      } catch (err) {
-        console.error('Error fetching my events:', err);
-      } finally {
-        setIsLoading(false);
-      }
-    };
-
-    if (!authLoading) {
-      fetchMyEvents();
-    }
-  }, [user, authLoading]);
-
-  // Don't render anything if not logged in
-  if (!user && !authLoading) {
-    return null;
-  }
-
-  // Show loading state
-  if (authLoading || isLoading) {
-    return (
-      <section className="py-12 sm:py-16">
-        <div className="container mx-auto px-4">
-          <h2 className="text-2xl sm:text-3xl font-bold mb-6">My Events</h2>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-            {[1, 2, 3].map((i) => (
-              <Card key={i} className="animate-pulse">
-                <CardContent className="p-6">
-                  <div className="h-6 bg-muted rounded w-3/4 mb-3" />
-                  <div className="h-4 bg-muted rounded w-1/2" />
-                </CardContent>
-              </Card>
-            ))}
-          </div>
-        </div>
-      </section>
-    );
+  let events: OrganizedEvent[] = [];
+  try {
+    events = await getOrganizedEvents(viewer.accountId);
+  } catch (err) {
+    console.error('Error fetching my events:', err);
   }
 
   return (
@@ -210,6 +87,12 @@ export function MyEventsSection() {
                           <span className="text-xs text-muted-foreground capitalize">
                             {event.role}
                           </span>
+                          {!event.has_identity && (
+                            <span className="mt-1 flex items-center gap-1 text-xs text-amber-700 dark:text-amber-400">
+                              <AlertTriangle className="h-3 w-3" aria-hidden="true" />
+                              Network identity not yet created
+                            </span>
+                          )}
                         </div>
                       </div>
                       <Badge variant={badge.variant} className="flex-shrink-0">

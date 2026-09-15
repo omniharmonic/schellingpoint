@@ -3,7 +3,6 @@
 import { isParticipationOpen } from '@/lib/events/lifecycle'
 import * as React from 'react'
 import { useRouter } from 'next/navigation'
-import Link from 'next/link'
 import {
   ArrowLeft,
   MapPin,
@@ -17,18 +16,14 @@ import {
   Monitor,
   User,
   Loader2,
-  Vote,
   Clock,
-  Plus,
-  Minus,
   ExternalLink,
   Pencil,
-  Hexagon,
   Trash2,
   AlertTriangle,
   X,
-  Brain,
   Send,
+  Lock,
 } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -41,12 +36,13 @@ import { RSVPButton } from '@/components/RSVPButton'
 import { SessionFeedback } from '@/components/SessionFeedback'
 import { SessionResources } from '@/components/SessionResources'
 import { AtprotoSessionActions } from '@/components/AtprotoSessionActions'
+import { VoteControl } from '@/components/VoteControl'
+import { setFavorite } from '@/components/SessionCard'
 import { useAuth } from '@/hooks/useAuth'
-import { useEvent, useEventRole } from '@/contexts/EventContext'
-import { votesToCredits, nextVoteCost } from '@/lib/utils'
-
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+import { useEvent } from '@/contexts/EventContext'
+import { apiFetch } from '@/lib/api/client'
+import { hostByline } from '@/app/api/v1/sessions/_lib/byline'
+import type { SessionView, PersonView } from '@/app/api/v1/sessions/_lib/read'
 
 const formatIcons: Record<string, React.ComponentType<{ className?: string }>> = {
   talk: Mic,
@@ -64,368 +60,91 @@ const formatDescriptions: Record<string, string> = {
   demo: 'Live demonstration of a project or tool',
 }
 
-function getAccessToken(): string | null {
-  const storageKey = `sb-${new URL(SUPABASE_URL).hostname.split('.')[0]}-auth-token`
-  const stored = localStorage.getItem(storageKey)
-  if (stored) {
-    try {
-      const session = JSON.parse(stored)
-      return session?.access_token || null
-    } catch {
-      return null
-    }
-  }
-  return null
-}
-
 interface SessionDetailClientProps {
   sessionId: string
-  initialSession?: any
+  initialSession?: SessionView | null
+}
+
+type HostCard = PersonView & { key: string; bio?: string | null; affiliation?: string | null; role: string }
+
+function formatInZone(iso: string, timeZone: string, options: Intl.DateTimeFormatOptions): string {
+  return new Date(iso).toLocaleString('en-US', { timeZone, ...options })
 }
 
 export function SessionDetailClient({ sessionId, initialSession }: SessionDetailClientProps) {
   const router = useRouter()
   const { user } = useAuth()
   const event = useEvent()
-  const votingClosed = !isParticipationOpen(event, 'vote')
-  const { voteCredits, isAdmin, role } = useEventRole()
+  const votingOpen = isParticipationOpen(event, 'vote')
 
-  // Use event's vote credits per user
-  const totalCredits = voteCredits
-
-  const [session, setSession] = React.useState<any>(initialSession || null)
-
-  // Host, co-host, or event organizer (owner/admin/moderator) - can curate resources
-  const canManageSession = !!user && (
-    session?.host_id === user.id ||
-    session?.cohosts?.some((c: any) => c.user_id === user.id) ||
-    isAdmin ||
-    role === 'moderator'
-  )
-  // Feedback opens once a scheduled session's start time has passed
-  const sessionStartTime: string | null = session?.status === 'scheduled'
-    ? (session.is_self_hosted ? session.self_hosted_start_time : session.time_slot?.start_time) ?? null
-    : null
-  const sessionHasStarted = !!sessionStartTime && new Date(sessionStartTime).getTime() <= Date.now()
+  const [session, setSession] = React.useState<SessionView | null>(initialSession ?? null)
   const [isLoading, setIsLoading] = React.useState(!initialSession)
-  const [actionError, setActionError] = React.useState<string | null>(null)
   const [error, setError] = React.useState<string | null>(null)
-  const [userVotes, setUserVotes] = React.useState(0)
-  const [isFavorited, setIsFavorited] = React.useState(false)
-  const [allUserVotes, setAllUserVotes] = React.useState<Record<string, number>>({})
+  const [actionError, setActionError] = React.useState<string | null>(null)
   const [showShareToast, setShowShareToast] = React.useState(false)
   const [showHostCard, setShowHostCard] = React.useState<string | null>(null)
   const [showEditModal, setShowEditModal] = React.useState(false)
-  const [showDeleteConfirm, setShowDeleteConfirm] = React.useState(false)
-  const [isDeleting, setIsDeleting] = React.useState(false)
-  const [userRsvpStatus, setUserRsvpStatus] = React.useState<'confirmed' | 'waitlist' | null>(null)
-  const [userWaitlistPosition, setUserWaitlistPosition] = React.useState<number | null>(null)
+  const [showWithdrawConfirm, setShowWithdrawConfirm] = React.useState(false)
+  const [isWithdrawing, setIsWithdrawing] = React.useState(false)
   const hostCardRef = React.useRef<HTMLDivElement>(null)
 
-  // Close host card when clicking outside
-  React.useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      if (hostCardRef.current && !hostCardRef.current.contains(event.target as Node)) {
-        setShowHostCard(null)
-      }
-    }
+  const endpoint = `/api/v1/events/${encodeURIComponent(event.slug)}/sessions/${sessionId}`
 
+  const refresh = React.useCallback(async () => {
+    try {
+      const data = await apiFetch<{ session: SessionView }>(endpoint, { cache: 'no-store' })
+      setSession(data.session)
+      setError(null)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load session')
+    } finally {
+      setIsLoading(false)
+    }
+  }, [endpoint])
+
+  // The server render saw the viewer's cookie; refresh once the client knows who is signed in.
+  React.useEffect(() => {
+    refresh()
+  }, [refresh, user?.id])
+
+  React.useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (hostCardRef.current && !hostCardRef.current.contains(e.target as Node)) setShowHostCard(null)
+    }
     if (showHostCard) {
       document.addEventListener('mousedown', handleClickOutside)
       return () => document.removeEventListener('mousedown', handleClickOutside)
     }
   }, [showHostCard])
 
-  // Calculate credits spent using the event's voting mechanism
-  const creditsSpent = React.useMemo(() => {
-    return Object.values(allUserVotes).reduce(
-      (sum, votes) => sum + votesToCredits(votes, event.votingMechanism),
-      0
-    )
-  }, [allUserVotes, event.votingMechanism])
+  const goToLogin = () => router.push(`/login?returnTo=${encodeURIComponent(`/e/${event.slug}/sessions/${sessionId}`)}`)
 
-  const creditsRemaining = totalCredits - creditsSpent
-
-  // Fetch session data (only if not provided initially)
-  React.useEffect(() => {
-    if (initialSession) return
-
-    const fetchSession = async () => {
-      try {
-        const response = await fetch(
-          `${SUPABASE_URL}/rest/v1/sessions?id=eq.${sessionId}&event_id=eq.${event.id}&select=*,venue:venues(*),time_slot:time_slots(*),host:profiles!host_id(id,display_name,bio,avatar_url,affiliation,building,telegram,ens,interests),cohosts:session_cohosts(user_id,display_order,profile:profiles(id,display_name,bio,avatar_url,affiliation,building,telegram,ens,interests)),track:tracks(id,name,color)`,
-          {
-            headers: {
-              'apikey': SUPABASE_KEY,
-              'Authorization': `Bearer ${SUPABASE_KEY}`,
-            },
-          }
-        )
-
-        if (response.ok) {
-          const data = await response.json()
-          if (data.length > 0) {
-            setSession(data[0])
-          } else {
-            setError('Session not found')
-          }
-        } else {
-          setError('Failed to load session')
-        }
-      } catch (err) {
-        console.error('Error fetching session:', err)
-        setError('Failed to load session')
-      } finally {
-        setIsLoading(false)
-      }
-    }
-
-    fetchSession()
-  }, [sessionId, initialSession, event.id])
-
-  // Fetch user's votes and favorites
-  React.useEffect(() => {
-    if (!user) return
-
-    const fetchUserData = async () => {
-      const token = getAccessToken()
-      if (!token) return
-
-      try {
-        // Fetch all user votes for this event
-        const votesResponse = await fetch(
-          `${SUPABASE_URL}/rest/v1/votes?user_id=eq.${user.id}&event_id=eq.${event.id}&select=session_id,vote_count`,
-          {
-            headers: {
-              'apikey': SUPABASE_KEY,
-              'Authorization': `Bearer ${token}`,
-            },
-          }
-        )
-
-        if (votesResponse.ok) {
-          const votesData = await votesResponse.json()
-          const votesMap: Record<string, number> = {}
-          votesData.forEach((v: any) => {
-            votesMap[v.session_id] = v.vote_count
-          })
-          setAllUserVotes(votesMap)
-          setUserVotes(votesMap[sessionId] || 0)
-        }
-
-        // Fetch favorites for this event
-        const favResponse = await fetch(
-          `${SUPABASE_URL}/rest/v1/favorites?user_id=eq.${user.id}&session_id=eq.${sessionId}&event_id=eq.${event.id}&select=id`,
-          {
-            headers: {
-              'apikey': SUPABASE_KEY,
-              'Authorization': `Bearer ${token}`,
-            },
-          }
-        )
-
-        if (favResponse.ok) {
-          const favData = await favResponse.json()
-          setIsFavorited(favData.length > 0)
-        }
-
-        // Fetch RSVP status for this session
-        const rsvpResponse = await fetch(
-          `${SUPABASE_URL}/rest/v1/session_rsvps?user_id=eq.${user.id}&session_id=eq.${sessionId}&select=status,waitlist_position`,
-          {
-            headers: {
-              'apikey': SUPABASE_KEY,
-              'Authorization': `Bearer ${token}`,
-            },
-          }
-        )
-
-        if (rsvpResponse.ok) {
-          const rsvpData = await rsvpResponse.json()
-          if (rsvpData.length > 0) {
-            setUserRsvpStatus(rsvpData[0].status)
-            setUserWaitlistPosition(rsvpData[0].waitlist_position)
-          }
-        }
-      } catch (err) {
-        console.error('Error fetching user data:', err)
-      }
-    }
-
-    fetchUserData()
-  }, [user, sessionId, event.id])
-
-  // Handle vote change
-  const handleVote = async (delta: number) => {
-    if (votingClosed) return
-    if (!user) {
-      router.push(`/login?returnTo=${encodeURIComponent(`/e/${event.slug}/sessions/${sessionId}`)}`)
-      return
-    }
-
-    const token = getAccessToken()
-    if (!token) {
-      router.push(`/login?returnTo=${encodeURIComponent(`/e/${event.slug}/sessions/${sessionId}`)}`)
-      return
-    }
-
-    const newVoteCount = Math.max(0, userVotes + delta)
-    const oldCredits = votesToCredits(userVotes, event.votingMechanism)
-    const newCredits = votesToCredits(newVoteCount, event.votingMechanism)
-    const creditDiff = newCredits - oldCredits
-
-    // Check if user has enough credits
-    if (creditsSpent + creditDiff > totalCredits) {
-      return
-    }
-
-    setActionError(null)
-    // Optimistic update
-    setUserVotes(newVoteCount)
-    setAllUserVotes(prev => ({ ...prev, [sessionId]: newVoteCount }))
-
-    try {
-      if (newVoteCount === 0) {
-        const voteResponse = await fetch(
-          `${SUPABASE_URL}/rest/v1/votes?user_id=eq.${user.id}&session_id=eq.${sessionId}`,
-          {
-            method: 'DELETE',
-            headers: {
-              'apikey': SUPABASE_KEY,
-              'Authorization': `Bearer ${token}`,
-            },
-          }
-        )
-        if (!voteResponse.ok) throw new Error('Your vote could not be saved. Please try again.')
-      } else {
-        const voteResponse = await fetch(
-          `${SUPABASE_URL}/rest/v1/votes?on_conflict=user_id,session_id`,
-          {
-            method: 'POST',
-            headers: {
-              'apikey': SUPABASE_KEY,
-              'Authorization': `Bearer ${token}`,
-              'Content-Type': 'application/json',
-              'Prefer': 'resolution=merge-duplicates',
-            },
-            body: JSON.stringify({
-              user_id: user.id,
-              session_id: sessionId,
-              event_id: event.id,
-              vote_count: newVoteCount,
-              credits_spent: newCredits,
-            }),
-          }
-        )
-        if (!voteResponse.ok) throw new Error('Your vote could not be saved. Please try again.')
-      }
-
-      window.dispatchEvent(new CustomEvent('schelling:votes-changed', { detail: { eventId: event.id } }))
-      // Refresh session to get updated vote counts
-      const response = await fetch(
-        `${SUPABASE_URL}/rest/v1/sessions?id=eq.${sessionId}&event_id=eq.${event.id}&select=*,venue:venues(*),time_slot:time_slots(*),host:profiles!host_id(id,display_name,bio,avatar_url,affiliation,building,telegram,ens,interests),cohosts:session_cohosts(user_id,display_order,profile:profiles(id,display_name,bio,avatar_url,affiliation,building,telegram,ens,interests)),track:tracks(id,name,color)`,
-        {
-          headers: {
-            'apikey': SUPABASE_KEY,
-            'Authorization': `Bearer ${SUPABASE_KEY}`,
-          },
-        }
-      )
-
-      if (response.ok) {
-        const data = await response.json()
-        if (data.length > 0) {
-          setSession(data[0])
-        }
-      }
-    } catch (err) {
-      setActionError('Your vote could not be saved. Please try again.')
-      console.error('Error voting:', err)
-      setUserVotes(userVotes)
-      setAllUserVotes(prev => ({ ...prev, [sessionId]: userVotes }))
-    }
-  }
-
-  // Handle favorite toggle
   const handleToggleFavorite = async () => {
-    if (!user) {
-      router.push(`/login?returnTo=${encodeURIComponent(`/e/${event.slug}/sessions/${sessionId}`)}`)
-      return
-    }
-
-    const token = getAccessToken()
-    if (!token) {
-      router.push(`/login?returnTo=${encodeURIComponent(`/e/${event.slug}/sessions/${sessionId}`)}`)
-      return
-    }
-
+    if (!session) return
+    if (!user) return goToLogin()
+    const next = !session.is_favorite
     setActionError(null)
-    // Optimistic update
-    setIsFavorited(!isFavorited)
-
+    setSession({ ...session, is_favorite: next })
     try {
-      if (isFavorited) {
-        const response = await fetch(
-          `${SUPABASE_URL}/rest/v1/favorites?user_id=eq.${user.id}&session_id=eq.${sessionId}`,
-          {
-            method: 'DELETE',
-            headers: {
-              'apikey': SUPABASE_KEY,
-              'Authorization': `Bearer ${token}`,
-            },
-          }
-        )
-        if (!response.ok) throw new Error('Save failed')
-      } else {
-        const response = await fetch(
-          `${SUPABASE_URL}/rest/v1/favorites`,
-          {
-            method: 'POST',
-            headers: {
-              'apikey': SUPABASE_KEY,
-              'Authorization': `Bearer ${token}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              user_id: user.id,
-              session_id: sessionId,
-              event_id: event.id,
-            }),
-          }
-        )
-        if (!response.ok) throw new Error('Save failed')
-      }
+      await setFavorite(event.slug, sessionId, next)
     } catch (err) {
-      console.error('Error toggling favorite:', err)
-      setActionError('Your saved schedule could not be updated. Please try again.')
-      setIsFavorited(isFavorited)
+      setActionError(err instanceof Error ? err.message : 'Your saved schedule could not be updated. Please try again.')
+      setSession((s) => (s ? { ...s, is_favorite: !next } : s))
     }
   }
 
-  // Handle share
   const handleShare = async () => {
     const shareUrl = window.location.href
     const shareTitle = session?.title || 'Check out this session'
-    const shareText = session?.description
-      ? `${shareTitle} - ${session.description.substring(0, 100)}...`
-      : shareTitle
-
-    // Try Web Share API first (mobile and some desktop browsers)
+    const shareText = session?.description ? `${shareTitle} - ${session.description.substring(0, 100)}...` : shareTitle
     if (navigator.share) {
       try {
-        await navigator.share({
-          title: shareTitle,
-          text: shareText,
-          url: shareUrl,
-        })
+        await navigator.share({ title: shareTitle, text: shareText, url: shareUrl })
         return
       } catch (err) {
-        // User cancelled or share failed, fall through to clipboard
         if ((err as Error).name === 'AbortError') return
       }
     }
-
-    // Fallback: copy to clipboard
     try {
       await navigator.clipboard.writeText(shareUrl)
       setShowShareToast(true)
@@ -435,38 +154,19 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
     }
   }
 
-  // Handle delete session
-  const handleDelete = async () => {
-    if (!user) return
-
-    const token = getAccessToken()
-    if (!token) return
-
-    setIsDeleting(true)
-
+  const handleWithdraw = async () => {
+    setIsWithdrawing(true)
+    setActionError(null)
     try {
-      const response = await fetch(
-        `${SUPABASE_URL}/rest/v1/sessions?id=eq.${sessionId}`,
-        {
-          method: 'DELETE',
-          headers: {
-            'apikey': SUPABASE_KEY,
-            'Authorization': `Bearer ${token}`,
-          },
-        }
-      )
-
-      if (response.ok || response.status === 204) {
-        router.push(`/e/${event.slug}/sessions`)
-      } else {
-        console.error('Error deleting session:', await response.text())
-        setShowDeleteConfirm(false)
-      }
+      const result = await apiFetch<{ deleted: boolean }>(`/api/v1/sessions/${sessionId}`, { method: 'DELETE' })
+      setShowWithdrawConfirm(false)
+      if (result.deleted) router.push(`/e/${event.slug}/sessions?filter=mine`)
+      else await refresh()
     } catch (err) {
-      console.error('Error deleting session:', err)
-      setShowDeleteConfirm(false)
+      setActionError(err instanceof Error ? err.message : 'Your proposal could not be withdrawn. Please try again.')
+      setShowWithdrawConfirm(false)
     } finally {
-      setIsDeleting(false)
+      setIsWithdrawing(false)
     }
   }
 
@@ -497,36 +197,37 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
     )
   }
 
-  const FormatIcon = formatIcons[session.format] || Mic
-  const isApproval = event.votingMechanism === 'approval'
-  const costToAddVote = nextVoteCost(userVotes, event.votingMechanism)
-  const canAddVote =
-    creditsRemaining >= costToAddVote && !(isApproval && userVotes > 0)
+  const FormatIcon = formatIcons[session.format ?? ''] || Mic
+  const { viewer } = session
+  const startsAt = session.time_slot?.start_time ?? (session.is_self_hosted ? session.self_hosted_start_time : null)
+  const sessionHasStarted = session.status === 'scheduled' && !!startsAt && new Date(startsAt).getTime() <= Date.now()
+  const hosts: HostCard[] = [
+    ...(session.host ? [{ ...session.host, key: 'host', role: 'Host' }] : []),
+    ...session.cohosts.map((c) => ({ ...c, key: c.id, role: 'Co-host' })),
+  ]
+  const confirmed = session.my_rsvp?.status === 'confirmed'
 
   return (
     <DashboardLayout>
       <div className="space-y-6 overflow-hidden">
         {actionError && <p role="alert" className="rounded-xl border p-4 text-sm text-destructive">{actionError}</p>}
-        {/* Back Button */}
         <Button variant="ghost" onClick={() => router.back()} className="gap-2">
           <ArrowLeft className="h-4 w-4" />
           Back to Sessions
         </Button>
 
+        {viewer.is_organizer && session.proposal_withdrawn && (
+          <Card className="p-4 border-amber-500/40 bg-amber-500/5 text-sm">
+            The proposer withdrew this proposal from their repository. Review it on the schedule.
+          </Card>
+        )}
+
         <div className="grid gap-6 lg:grid-cols-3">
-          {/* Main Content */}
           <div className="lg:col-span-2 space-y-6">
-            {/* Header Card - no overflow-hidden here as host popover needs to overflow */}
             <Card className="p-6 relative">
               <div className="absolute top-4 right-4 flex gap-2">
-                {/* Edit button - show for session host or admin */}
-                {user && (session.host_id === user.id || session.cohosts?.some((c: any) => c.user_id === user.id) || isAdmin) && (
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => setShowEditModal(true)}
-                    title="Edit session"
-                  >
+                {viewer.can_edit && (
+                  <Button variant="ghost" size="icon" onClick={() => setShowEditModal(true)} title="Edit session" aria-label="Edit session">
                     <Pencil className="h-5 w-5" />
                   </Button>
                 )}
@@ -534,11 +235,13 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
                   variant="ghost"
                   size="icon"
                   onClick={handleToggleFavorite}
-                  className={isFavorited ? 'text-red-500' : ''}
+                  className={session.is_favorite ? 'text-red-500' : ''}
+                  aria-label={session.is_favorite ? 'Remove from my schedule' : 'Save to my schedule'}
+                  aria-pressed={session.is_favorite}
                 >
-                  <Heart className={isFavorited ? 'fill-current' : ''} />
+                  <Heart className={session.is_favorite ? 'fill-current' : ''} />
                 </Button>
-                <Button variant="ghost" size="icon" onClick={handleShare}>
+                <Button variant="ghost" size="icon" onClick={handleShare} aria-label="Share session">
                   <Share2 className="h-5 w-5" />
                 </Button>
               </div>
@@ -551,169 +254,102 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
                   <Clock className="h-4 w-4 flex-shrink-0" />
                   <span>{session.duration} min</span>
                   <span className="text-muted-foreground/50 hidden sm:inline">-</span>
-                  <Badge variant={session.status === 'scheduled' ? 'default' : 'secondary'}>
-                    {session.status}
-                  </Badge>
+                  <Badge variant={session.status === 'scheduled' ? 'default' : 'secondary'}>{session.status}</Badge>
                   {session.track && (
                     <>
                       <span className="text-muted-foreground/50 hidden sm:inline">-</span>
                       <span className="flex items-center gap-1.5">
-                        {session.track.color && (
-                          <span
-                            className="w-2.5 h-2.5 rounded-full"
-                            style={{ backgroundColor: session.track.color }}
-                          />
-                        )}
+                        {session.track.color && <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: session.track.color }} />}
                         <span>{session.track.name}</span>
                       </span>
-                    </>
-                  )}
-                  {session.time_preferences && session.time_preferences.length > 0 && (
-                    <>
-                      <span className="text-muted-foreground/50 hidden sm:inline">-</span>
-                      {session.time_preferences.map((pref: string) => (
-                        <Badge key={pref} variant="outline" className="text-xs">
-                          {pref.replace('_', ' ').replace(/\b\w/g, (c: string) => c.toUpperCase())}
-                        </Badge>
-                      ))}
                     </>
                   )}
                 </div>
 
                 <h1 className="text-2xl sm:text-3xl font-bold mb-4 break-words pr-28">{session.title}</h1>
 
-                {(session.host_name || session.host) && (() => {
-                  const cohosts = (session.cohosts || [])
-                    .sort((a: any, b: any) => a.display_order - b.display_order)
-                    .filter((c: any) => c.profile)
-                  const allHosts = [
-                    session.host ? { ...session.host, _key: 'primary' } : null,
-                    ...cohosts.map((c: any) => ({ ...c.profile, _key: c.user_id })),
-                  ].filter(Boolean)
-                  const cohostNames = cohosts.map((c: any) => c.profile?.display_name).filter(Boolean)
-                  const primaryName = session.host?.display_name || session.host_name
-                  let hostedByText = `Hosted\u00a0by ${primaryName}`
-                  if (cohostNames.length === 1) {
-                    hostedByText += ` & ${cohostNames[0]}`
-                  } else if (cohostNames.length > 1) {
-                    hostedByText += ` & ${cohostNames.length} others`
-                  }
+                {hosts.length === 0 ? (
+                  <p className="text-muted-foreground italic">{hostByline(session)}</p>
+                ) : (
+                  <div className="relative" ref={hostCardRef}>
+                    <button
+                      onClick={() => setShowHostCard(showHostCard ? null : hosts[0].key)}
+                      className="flex items-center gap-2 hover:opacity-80 transition-opacity group text-left"
+                    >
+                      <div className="flex -space-x-2">
+                        {hosts.map((host) => (
+                          <div key={host.key} className="h-8 w-8 rounded-full bg-muted flex items-center justify-center overflow-hidden ring-2 ring-background">
+                            {host.avatar_url ? (
+                              <img src={host.avatar_url} alt={host.display_name || ''} className="h-full w-full object-cover" />
+                            ) : (
+                              <User className="h-4 w-4 text-muted-foreground" />
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                      <span className="text-muted-foreground">
+                        {session.host ? `Hosted by ${hostByline(session)}` : hostByline(session)}
+                      </span>
+                    </button>
 
-                  return (
-                    <div className="relative" ref={hostCardRef}>
-                      <button
-                        onClick={() => setShowHostCard(showHostCard ? null : (allHosts[0]?._key || 'primary'))}
-                        className="flex items-center gap-2 hover:opacity-80 transition-opacity group"
-                      >
-                        <div className="flex -space-x-2">
-                          {allHosts.map((host: any) => (
-                            <div key={host._key} className="h-8 w-8 rounded-full bg-muted flex items-center justify-center overflow-hidden ring-2 ring-background">
-                              {host.avatar_url ? (
-                                <img src={host.avatar_url} alt={host.display_name || ''} className="h-full w-full object-cover" />
-                              ) : (
-                                <User className="h-4 w-4 text-muted-foreground" />
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                        <span className="text-muted-foreground">{hostedByText}</span>
-                      </button>
-
-                      {/* Host Profile Card */}
-                      {showHostCard && (() => {
-                        const activeHost = allHosts.find((h: any) => h._key === showHostCard) || allHosts[0]
-                        if (!activeHost) return null
-                        return (
-                          <>
-                            <div className="fixed inset-0 bg-black/50 z-40 md:hidden" onClick={() => setShowHostCard(null)} />
-                            <div className="fixed md:absolute inset-x-4 bottom-4 md:inset-x-auto md:bottom-auto md:left-0 md:top-full md:mt-2 md:w-80 bg-card border rounded-xl shadow-xl z-50 overflow-hidden animate-in fade-in slide-in-from-bottom-2 md:slide-in-from-bottom-0">
-                              <button onClick={() => setShowHostCard(null)} className="absolute top-2 right-2 p-1.5 rounded-full hover:bg-muted transition-colors hidden md:flex" aria-label="Close">
-                                <X className="h-4 w-4 text-muted-foreground" />
-                              </button>
-
-                              {/* Host tabs when multiple hosts */}
-                              {allHosts.length > 1 && (
-                                <div className="flex border-b">
-                                  {allHosts.map((host: any) => (
-                                    <button
-                                      key={host._key}
-                                      onClick={() => setShowHostCard(host._key)}
-                                      className={`flex-1 px-3 py-2 text-sm truncate transition-colors ${
-                                        showHostCard === host._key ? 'border-b-2 border-primary font-medium' : 'text-muted-foreground hover:text-foreground'
-                                      }`}
-                                    >
-                                      {host.display_name || 'Host'}
-                                    </button>
-                                  ))}
-                                </div>
-                              )}
-
-                              <div className="p-4 pr-10 md:pr-10">
-                                <div className="flex items-start gap-3 mb-3">
-                                  <div className="h-12 w-12 rounded-full bg-muted flex items-center justify-center overflow-hidden shrink-0">
-                                    {activeHost.avatar_url ? (
-                                      <img src={activeHost.avatar_url} alt={activeHost.display_name || ''} className="h-full w-full object-cover" />
-                                    ) : (
-                                      <User className="h-6 w-6 text-muted-foreground" />
-                                    )}
-                                  </div>
-                                  <div className="flex-1 min-w-0">
-                                    <h4 className="font-semibold truncate">{activeHost.display_name || session.host_name}</h4>
-                                    {activeHost.affiliation && <p className="text-sm text-muted-foreground truncate">{activeHost.affiliation}</p>}
-                                  </div>
-                                </div>
-                                {activeHost.bio && <p className="text-sm text-muted-foreground mb-3 line-clamp-3">{activeHost.bio}</p>}
-                                {activeHost.building && (
-                                  <div className="text-sm mb-3"><span className="text-muted-foreground">Building: </span><span>{activeHost.building}</span></div>
-                                )}
-                                {activeHost.interests?.length > 0 && (
-                                  <div className="flex flex-wrap gap-1 mb-3">
-                                    {activeHost.interests.slice(0, 4).map((interest: string) => (
-                                      <Badge key={interest} variant="secondary" className="text-xs">{interest}</Badge>
-                                    ))}
-                                    {activeHost.interests.length > 4 && <Badge variant="outline" className="text-xs">+{activeHost.interests.length - 4}</Badge>}
-                                  </div>
-                                )}
-                                {activeHost.telegram && (
-                                  <a href={`https://t.me/${activeHost.telegram.replace('@', '')}`} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1.5 text-sm text-primary hover:underline">
-                                    <ExternalLink className="h-3.5 w-3.5" />@{activeHost.telegram.replace('@', '')}
-                                  </a>
-                                )}
-                                {activeHost.ens && (
-                                  <a href={`https://app.ens.domains/${activeHost.ens}`} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1.5 text-sm text-primary hover:underline">
-                                    <Hexagon className="h-3.5 w-3.5" />{activeHost.ens}
-                                  </a>
-                                )}
-                                {activeHost.id && (
-                                  <Link href={`/e/${event.slug}/participants?highlight=${activeHost.id}`} className="block mt-3 pt-3 border-t text-sm text-center text-primary hover:underline" onClick={() => setShowHostCard(null)}>
-                                    View full profile
-                                  </Link>
-                                )}
+                    {showHostCard && (() => {
+                      const active = hosts.find((h) => h.key === showHostCard) || hosts[0]
+                      return (
+                        <>
+                          <div className="fixed inset-0 bg-black/50 z-40 md:hidden" onClick={() => setShowHostCard(null)} />
+                          <div className="fixed md:absolute inset-x-4 bottom-4 md:inset-x-auto md:bottom-auto md:left-0 md:top-full md:mt-2 md:w-80 bg-card border rounded-xl shadow-xl z-50 overflow-hidden">
+                            <button onClick={() => setShowHostCard(null)} className="absolute top-2 right-2 p-1.5 rounded-full hover:bg-muted transition-colors hidden md:flex" aria-label="Close">
+                              <X className="h-4 w-4 text-muted-foreground" />
+                            </button>
+                            {hosts.length > 1 && (
+                              <div className="flex border-b">
+                                {hosts.map((host) => (
+                                  <button
+                                    key={host.key}
+                                    onClick={() => setShowHostCard(host.key)}
+                                    className={`flex-1 px-3 py-2 text-sm truncate transition-colors ${showHostCard === host.key ? 'border-b-2 border-primary font-medium' : 'text-muted-foreground hover:text-foreground'}`}
+                                  >
+                                    {host.display_name || host.role}
+                                  </button>
+                                ))}
                               </div>
-
-                              <button onClick={() => setShowHostCard(null)} className="md:hidden w-full py-3 border-t text-sm font-medium text-muted-foreground hover:bg-muted transition-colors">Close</button>
+                            )}
+                            <div className="p-4 pr-10">
+                              <div className="flex items-start gap-3 mb-3">
+                                <div className="h-12 w-12 rounded-full bg-muted flex items-center justify-center overflow-hidden shrink-0">
+                                  {active.avatar_url ? (
+                                    <img src={active.avatar_url} alt={active.display_name || ''} className="h-full w-full object-cover" />
+                                  ) : (
+                                    <User className="h-6 w-6 text-muted-foreground" />
+                                  )}
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                  <h4 className="font-semibold truncate">{active.display_name || 'A participant'}</h4>
+                                  {active.handle && <p className="text-xs text-muted-foreground truncate">@{active.handle}</p>}
+                                  {active.affiliation && <p className="text-sm text-muted-foreground truncate">{active.affiliation}</p>}
+                                </div>
+                              </div>
+                              <p className="text-xs uppercase tracking-wide text-muted-foreground mb-2">{active.role}</p>
+                              {active.bio && <p className="text-sm text-muted-foreground mb-3 line-clamp-3">{active.bio}</p>}
                             </div>
-                          </>
-                        )
-                      })()}
-                    </div>
-                  )
-                })()}
-                </div>
+                            <button onClick={() => setShowHostCard(null)} className="md:hidden w-full py-3 border-t text-sm font-medium text-muted-foreground hover:bg-muted transition-colors">Close</button>
+                          </div>
+                        </>
+                      )
+                    })()}
+                  </div>
+                )}
+              </div>
 
-              {/* Tags */}
-              {session.topic_tags && session.topic_tags.length > 0 && (
+              {session.topic_tags.length > 0 && (
                 <div className="flex flex-wrap gap-2">
-                  {session.topic_tags.map((tag: string) => (
-                    <Badge key={tag} variant="secondary">
-                      {tag}
-                    </Badge>
+                  {session.topic_tags.map((tag) => (
+                    <Badge key={tag} variant="secondary">{tag}</Badge>
                   ))}
                 </div>
               )}
             </Card>
 
-            {/* Venue & Schedule */}
             {(session.venue || session.time_slot || session.is_self_hosted) && (
               <Card className="p-6 bg-primary/5 border-primary/20">
                 <div className="grid sm:grid-cols-2 gap-6">
@@ -728,20 +364,14 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
                         <div className="flex items-center gap-1.5 text-sm text-muted-foreground mb-1">
                           <Clock className="h-4 w-4" />
                           <span>
-                            {new Date(session.self_hosted_start_time).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
-                            {' '}
-                            {new Date(session.self_hosted_start_time).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}
-                            {session.self_hosted_end_time && (
-                              <> - {new Date(session.self_hosted_end_time).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}</>
-                            )}
+                            {formatInZone(session.self_hosted_start_time, event.timezone, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
+                            {session.self_hosted_end_time && <> - {formatInZone(session.self_hosted_end_time, event.timezone, { hour: 'numeric', minute: '2-digit' })}</>}
                           </span>
                         </div>
                       )}
                       {session.custom_location ? (
                         <>
-                          <p className="text-muted-foreground whitespace-pre-wrap">
-                            {session.custom_location}
-                          </p>
+                          <p className="text-muted-foreground whitespace-pre-wrap">{session.custom_location}</p>
                           <a
                             href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(session.custom_location)}`}
                             target="_blank"
@@ -752,10 +382,16 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
                             Get Directions
                           </a>
                         </>
+                      ) : session.has_private_location ? (
+                        <div className="space-y-1">
+                          {session.public_place && <p className="text-muted-foreground">{session.public_place}</p>}
+                          <p className="text-sm text-muted-foreground flex items-start gap-1.5">
+                            <Lock className="h-4 w-4 mt-0.5 shrink-0" />
+                            The exact location is shared with confirmed attendees.
+                          </p>
+                        </div>
                       ) : (
-                        <p className="text-sm text-muted-foreground italic">
-                          Location details will be provided by the host
-                        </p>
+                        <p className="text-sm text-muted-foreground italic">Location details will be provided by the host</p>
                       )}
                     </div>
                   ) : session.venue && (
@@ -765,11 +401,7 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
                         <h3 className="font-semibold">Location</h3>
                       </div>
                       <p className="text-lg font-medium">{session.venue.name}</p>
-                      {session.venue.capacity && (
-                        <p className="text-sm text-muted-foreground">
-                          Capacity: {session.venue.capacity} people
-                        </p>
-                      )}
+                      {session.venue.capacity && <p className="text-sm text-muted-foreground">Capacity: {session.venue.capacity} people</p>}
                       {session.venue.address && (
                         <a
                           href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(session.venue.address)}`}
@@ -781,12 +413,10 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
                           Get Directions
                         </a>
                       )}
-                      {session.venue.features && session.venue.features.length > 0 && (
+                      {session.venue.features.length > 0 && (
                         <div className="flex gap-1 mt-2 flex-wrap">
-                          {session.venue.features.map((feature: string, i: number) => (
-                            <Badge key={i} variant="outline" className="text-xs">
-                              {feature}
-                            </Badge>
+                          {session.venue.features.map((feature) => (
+                            <Badge key={feature} variant="outline" className="text-xs">{feature}</Badge>
                           ))}
                         </div>
                       )}
@@ -800,48 +430,21 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
                         <h3 className="font-semibold">Schedule</h3>
                       </div>
                       <p className="text-lg font-medium">
-                        {new Date(session.time_slot.start_time).toLocaleDateString([], {
-                          weekday: 'long',
-                          month: 'long',
-                          day: 'numeric',
-                        })}
+                        {formatInZone(session.time_slot.start_time, event.timezone, { weekday: 'long', month: 'long', day: 'numeric' })}
                       </p>
                       <p className="text-muted-foreground">
-                        {new Date(session.time_slot.start_time).toLocaleTimeString([], {
-                          hour: '2-digit',
-                          minute: '2-digit',
-                        })}
+                        {formatInZone(session.time_slot.start_time, event.timezone, { hour: 'numeric', minute: '2-digit' })}
                         {' - '}
-                        {new Date(session.time_slot.end_time).toLocaleTimeString([], {
-                          hour: '2-digit',
-                          minute: '2-digit',
-                        })}
+                        {formatInZone(session.time_slot.end_time, event.timezone, { hour: 'numeric', minute: '2-digit' })}
                       </p>
-                      {session.time_slot.label && (
-                        <Badge variant="outline" className="mt-2">
-                          {session.time_slot.label}
-                        </Badge>
-                      )}
+                      {session.time_slot.label && <Badge variant="outline" className="mt-2">{session.time_slot.label}</Badge>}
                     </div>
                   )}
                 </div>
-                {session.telegram_group_url && (
-                  <a
-                    href={session.telegram_group_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center gap-2 mt-4 px-4 py-2.5 bg-[#0088cc] hover:bg-[#006699] text-white rounded-lg transition-colors text-sm font-medium"
-                  >
-                    <Send className="h-4 w-4" />
-                    Join Telegram Group
-                    <ExternalLink className="h-3.5 w-3.5 ml-auto" />
-                  </a>
-                )}
               </Card>
             )}
 
-            {/* Telegram fallback when no venue/schedule card */}
-            {!session.venue && !session.time_slot && !session.is_self_hosted && session.telegram_group_url && (
+            {session.telegram_group_url ? (
               <Card className="p-4">
                 <a
                   href={session.telegram_group_url}
@@ -854,17 +457,19 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
                   <ExternalLink className="h-3.5 w-3.5 ml-auto" />
                 </a>
               </Card>
-            )}
+            ) : session.has_telegram_group && !confirmed ? (
+              <Card className="p-4 text-sm text-muted-foreground flex items-center gap-2">
+                <Lock className="h-4 w-4 shrink-0" />
+                This session has a Telegram group for confirmed attendees.
+              </Card>
+            ) : null}
 
-            {/* Description */}
             <Card className="p-6 overflow-hidden">
               <h2 className="text-xl font-semibold mb-4">About This Session</h2>
               <div className="prose prose-sm max-w-none break-words">
                 {session.description ? (
-                  session.description.split('\n').map((paragraph: string, i: number) => (
-                    <p key={i} className="text-muted-foreground mb-3">
-                      {paragraph}
-                    </p>
+                  session.description.split('\n').map((paragraph, i) => (
+                    <p key={i} className="text-muted-foreground mb-3">{paragraph}</p>
                   ))
                 ) : (
                   <p className="text-muted-foreground italic">No description provided.</p>
@@ -872,7 +477,6 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
               </div>
             </Card>
 
-            {/* Format Info */}
             <Card className="p-6">
               <h2 className="text-xl font-semibold mb-4">Session Format</h2>
               <div className="flex items-start gap-4">
@@ -881,341 +485,153 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
                 </div>
                 <div>
                   <h3 className="font-medium capitalize">{session.format}</h3>
-                  <p className="text-sm text-muted-foreground">
-                    {formatDescriptions[session.format] || 'Interactive session'}
-                  </p>
+                  <p className="text-sm text-muted-foreground">{formatDescriptions[session.format ?? ''] || 'Interactive session'}</p>
                 </div>
               </div>
             </Card>
 
-            {/* Post-session feedback - only once the session has started */}
-            {sessionHasStarted && (
-              <SessionFeedback sessionId={sessionId} eventSlug={event.slug} />
-            )}
+            {sessionHasStarted && <SessionFeedback sessionId={sessionId} eventSlug={event.slug} />}
           </div>
 
-          {/* Sidebar */}
           <div className="space-y-6">
-            {/* Voting Card */}
-            <Card className="p-6">
-              <h3 className="font-semibold mb-4">{votingClosed ? 'Community support' : 'Cast your votes'}</h3>
-              {votingClosed && <p className="text-sm text-muted-foreground mb-4">Voting is not open right now.</p>}
-              <div className="space-y-4">
-                <div className="flex items-center justify-between text-sm">
-                  <span className="text-muted-foreground">Total votes</span>
-                  <div className="flex items-center gap-1">
-                    <Vote className="h-4 w-4" />
-                    <span className="font-medium">{session.total_votes || 0}</span>
-                  </div>
-                </div>
-                <div className="flex items-center justify-between text-sm">
-                  <span className="text-muted-foreground">Total voters</span>
-                  <span className="font-medium">{session.voter_count || 0}</span>
-                </div>
-                <div className="flex items-center justify-between text-sm">
-                  <span className="text-muted-foreground">Credits allocated</span>
-                  <span className="font-medium">{session.total_credits || 0}</span>
-                </div>
+            {votingOpen && session.status !== 'rejected' && session.status !== 'pending' && (
+              <Card className="p-6">
+                <h3 className="font-semibold mb-4">Your votes</h3>
+                <VoteControl eventSlug={event.slug} sessionId={sessionId} sessionTitle={session.title} />
+              </Card>
+            )}
 
-                {user && !votingClosed && (
-                  <div className="pt-4 border-t">
-                    <div className="flex items-center justify-between mb-3">
-                      <span className="text-sm text-muted-foreground">Your votes</span>
-                      <span className="font-semibold">{userVotes}</span>
-                    </div>
-                    <div className="flex items-center justify-center gap-4">
-                      <Button
-                        variant="outline"
-                        size="icon"
-                        aria-label="Remove a vote"
-                        onClick={() => handleVote(-1)}
-                        disabled={userVotes === 0}
-                      >
-                        <Minus className="h-4 w-4" />
-                      </Button>
-                      <div className="min-w-[60px] text-center">
-                        <div className="text-2xl font-bold">{userVotes}</div>
-                        <div className="text-xs text-muted-foreground">
-                          {votesToCredits(userVotes, event.votingMechanism)} credits
-                        </div>
-                      </div>
-                      <Button
-                        variant="outline"
-                        size="icon"
-                        aria-label="Add a vote"
-                        onClick={() => handleVote(1)}
-                        disabled={!canAddVote}
-                      >
-                        <Plus className="h-4 w-4" />
-                      </Button>
-                    </div>
-                    {!canAddVote && userVotes > 0 && (
-                      <p className="text-xs text-muted-foreground text-center mt-2">
-                        {isApproval
-                          ? 'Already approved this session'
-                          : `Next vote costs ${costToAddVote} credits`}
-                      </p>
-                    )}
-                    <p className="text-xs text-muted-foreground text-center mt-3 pt-3 border-t">
-                      Votes save automatically
-                    </p>
-                  </div>
-                )}
-
-                {!user && !votingClosed && (
-                  <div className="pt-4 border-t text-center">
-                    <p className="text-sm text-muted-foreground mb-3">
-                      Sign in to vote on this session
-                    </p>
-                    <Button asChild className="w-full">
-                      <Link href={`/login?returnTo=${encodeURIComponent(`/e/${event.slug}/sessions/${sessionId}`)}`}>Sign in</Link>
-                    </Button>
-                  </div>
-                )}
-              </div>
-            </Card>
-
-            {/* Quick Actions */}
             <Card className="p-6">
               <h3 className="font-semibold mb-4">Quick Actions</h3>
               <div className="space-y-2">
-                {/* Edit button for session host, co-host, or admin */}
-                {user && (session.host_id === user.id || session.cohosts?.some((c: any) => c.user_id === user.id) || isAdmin) && (
-                  <Button
-                    className="w-full justify-start"
-                    variant="outline"
-                    onClick={() => setShowEditModal(true)}
-                  >
+                {viewer.can_edit && (
+                  <Button className="w-full justify-start" variant="outline" onClick={() => setShowEditModal(true)}>
                     <Pencil className="h-4 w-4 mr-2" />
                     Edit Session
                   </Button>
                 )}
-                <Button
-                  className="w-full justify-start"
-                  variant={isFavorited ? "default" : "outline"}
-                  onClick={handleToggleFavorite}
-                >
-                  <Heart className={`h-4 w-4 mr-2 ${isFavorited ? 'fill-current' : ''}`} />
-                  {isFavorited ? 'Saved to My Schedule' : 'Add to My Schedule'}
+                <Button className="w-full justify-start" variant={session.is_favorite ? 'default' : 'outline'} onClick={handleToggleFavorite}>
+                  <Heart className={`h-4 w-4 mr-2 ${session.is_favorite ? 'fill-current' : ''}`} />
+                  {session.is_favorite ? 'Saved to My Schedule' : 'Add to My Schedule'}
                 </Button>
                 <Button className="w-full justify-start" variant="outline" onClick={handleShare}>
                   <Share2 className="h-4 w-4 mr-2" />
                   Share Session
                 </Button>
-                {session.time_slot && (
+                {session.status === 'scheduled' && startsAt && (
                   <AddToCalendar
-                    session={session}
+                    session={{
+                      id: session.id,
+                      title: session.title,
+                      description: session.description,
+                      hostLabel: session.host?.display_name ?? null,
+                      is_self_hosted: session.is_self_hosted,
+                      self_hosted_start_time: session.self_hosted_start_time,
+                      self_hosted_end_time: session.self_hosted_end_time,
+                      time_slot: session.time_slot,
+                      venue: session.venue,
+                    }}
                     eventSlug={event.slug}
                     eventLocation={event.locationName}
                     variant="outline"
                     size="default"
                   />
                 )}
-                {/* RSVP button for scheduled sessions */}
                 {session.status === 'scheduled' && (
                   <RSVPButton
                     sessionId={sessionId}
-                    rsvpCount={session.rsvp_count || 0}
-                    waitlistCount={session.waitlist_count || 0}
-                    capacity={session.venue?.capacity || null}
-                    initialStatus={userRsvpStatus}
-                    initialWaitlistPosition={userWaitlistPosition}
+                    rsvpCount={session.rsvp_count}
+                    waitlistCount={session.waitlist_count}
+                    capacity={session.venue?.capacity ?? null}
+                    initialStatus={session.my_rsvp?.status ?? null}
+                    initialWaitlistPosition={session.my_rsvp?.waitlist_position ?? null}
                     variant="outline"
-                    showCapacity={true}
-                    onRSVPChange={(status) => setUserRsvpStatus(status)}
+                    showCapacity
+                    onRSVPChange={() => refresh()}
                   />
                 )}
-                {/* Add Telegram Group button for host, co-host, or admin (when no group URL set) */}
-                {user && !session.telegram_group_url && (session.host_id === user.id || session.cohosts?.some((c: any) => c.user_id === user.id) || isAdmin) && (
-                  <Button
-                    className="w-full justify-start gap-2"
-                    variant="outline"
-                    onClick={() => setShowEditModal(true)}
-                  >
+                {viewer.can_edit && !session.telegram_group_url && (
+                  <Button className="w-full justify-start gap-2" variant="outline" onClick={() => setShowEditModal(true)}>
                     <Send className="h-4 w-4" />
                     Add Telegram Group
                   </Button>
                 )}
-                {/* Delete button for session host or admin */}
-                {user && (session.host_id === user.id || isAdmin) && (
+                {viewer.is_host && (
                   <Button
                     className="w-full justify-start text-destructive hover:text-destructive hover:bg-destructive/10"
                     variant="outline"
-                    onClick={() => setShowDeleteConfirm(true)}
+                    onClick={() => setShowWithdrawConfirm(true)}
                   >
                     <Trash2 className="h-4 w-4 mr-2" />
-                    Delete Session
+                    Withdraw Proposal
                   </Button>
                 )}
               </div>
             </Card>
 
-            {/* Session resources (slides, recordings, notes, links) */}
-            <SessionResources
-              sessionId={sessionId}
-              eventSlug={event.slug}
-              canManage={canManageSession}
-            />
+            <SessionResources sessionId={sessionId} eventSlug={event.slug} canManage={viewer.can_manage} />
 
-            {/* ATProto: the session on the network + participant-side actions */}
             <AtprotoSessionActions
               sessionId={sessionId}
               eventSlug={event.slug}
               signedIn={!!user}
-              userRsvpStatus={userRsvpStatus}
+              userRsvpStatus={session.my_rsvp?.status ?? null}
             />
 
-            {/* Delete Confirmation Modal */}
-            {showDeleteConfirm && (
-              <div
-                className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm p-4"
-                onClick={() => setShowDeleteConfirm(false)}
-              >
-                <div
-                  className="w-full max-w-md bg-card border rounded-xl shadow-xl p-6"
-                  onClick={(e) => e.stopPropagation()}
-                >
+            {(viewer.is_host || viewer.is_cohost || viewer.is_organizer) && (
+              <ManageCohostsSection
+                sessionId={sessionId}
+                cohosts={session.cohosts}
+                isHost={viewer.is_host}
+                isOrganizer={viewer.is_organizer}
+                onCohostsChange={refresh}
+              />
+            )}
+
+            {showWithdrawConfirm && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm p-4" onClick={() => setShowWithdrawConfirm(false)}>
+                <div role="dialog" aria-modal="true" aria-labelledby="withdraw-title" className="w-full max-w-md bg-card border rounded-xl shadow-xl p-6" onClick={(e) => e.stopPropagation()}>
                   <div className="flex items-center gap-3 mb-4">
                     <div className="p-3 rounded-full bg-destructive/10">
                       <AlertTriangle className="h-6 w-6 text-destructive" />
                     </div>
                     <div>
-                      <h3 className="font-semibold text-lg">Delete Session</h3>
-                      <p className="text-sm text-muted-foreground">This action cannot be undone</p>
+                      <h3 id="withdraw-title" className="font-semibold text-lg">Withdraw proposal</h3>
+                      <p className="text-sm text-muted-foreground">This cannot be undone</p>
                     </div>
                   </div>
                   <p className="text-muted-foreground mb-6">
-                    Are you sure you want to delete "<span className="font-medium text-foreground">{session.title}</span>"?
-                    All votes and favorites for this session will also be removed.
+                    Withdraw &ldquo;<span className="font-medium text-foreground">{session.title}</span>&rdquo;? Its public record is deleted
+                    from your repository (copies may persist on the network).{' '}
+                    {session.status === 'scheduled'
+                      ? 'It is already on the schedule, so the organizers will decide what happens to its slot.'
+                      : 'The session, its favorites and RSVPs are removed from this gathering.'}
                   </p>
                   <div className="flex gap-3">
-                    <Button
-                      variant="outline"
-                      className="flex-1"
-                      onClick={() => setShowDeleteConfirm(false)}
-                      disabled={isDeleting}
-                    >
-                      Cancel
-                    </Button>
-                    <Button
-                      variant="destructive"
-                      className="flex-1"
-                      onClick={handleDelete}
-                      disabled={isDeleting}
-                    >
-                      {isDeleting ? (
-                        <>
-                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                          Deleting...
-                        </>
-                      ) : (
-                        <>
-                          <Trash2 className="h-4 w-4 mr-2" />
-                          Delete
-                        </>
-                      )}
+                    <Button variant="outline" className="flex-1" onClick={() => setShowWithdrawConfirm(false)} disabled={isWithdrawing}>Cancel</Button>
+                    <Button variant="destructive" className="flex-1" onClick={handleWithdraw} disabled={isWithdrawing}>
+                      {isWithdrawing ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Trash2 className="h-4 w-4 mr-2" />}
+                      Withdraw
                     </Button>
                   </div>
                 </div>
               </div>
             )}
 
-            {/* Share Toast */}
             {showShareToast && (
-              <div className="fixed bottom-4 right-4 bg-primary text-primary-foreground px-4 py-2 rounded-lg shadow-lg text-sm animate-in fade-in slide-in-from-bottom-2">
+              <div className="fixed bottom-4 right-4 bg-primary text-primary-foreground px-4 py-2 rounded-lg shadow-lg text-sm">
                 Link copied to clipboard!
               </div>
             )}
 
-            {/* Edit Session Modal */}
-            {session && (
+            {viewer.can_edit && (
               <EditSessionModal
                 isOpen={showEditModal}
                 onClose={() => setShowEditModal(false)}
-                isAdmin={isAdmin}
-                session={{
-                  id: session.id,
-                  title: session.title,
-                  description: session.description,
-                  format: session.format,
-                  topic_tags: session.topic_tags,
-                  track_id: session.track_id,
-                  is_self_hosted: session.is_self_hosted,
-                  custom_location: session.custom_location,
-                  self_hosted_start_time: session.self_hosted_start_time,
-                  self_hosted_end_time: session.self_hosted_end_time,
-                  telegram_group_url: session.telegram_group_url,
-                }}
-                hostId={session.host_id}
-                hostName={session.host_name}
-                host={session.host}
-                cohosts={session.cohosts}
-                onSave={async () => {
-                  // Refresh session data
-                  const response = await fetch(
-                    `${SUPABASE_URL}/rest/v1/sessions?id=eq.${sessionId}&event_id=eq.${event.id}&select=*,venue:venues(*),time_slot:time_slots(*),host:profiles!host_id(id,display_name,bio,avatar_url,affiliation,building,telegram,ens,interests),cohosts:session_cohosts(user_id,display_order,profile:profiles(id,display_name,bio,avatar_url,affiliation,building,telegram,ens,interests)),track:tracks(id,name,color)`,
-                    {
-                      headers: {
-                        'apikey': SUPABASE_KEY,
-                        'Authorization': `Bearer ${SUPABASE_KEY}`,
-                      },
-                    }
-                  )
-                  if (response.ok) {
-                    const data = await response.json()
-                    if (data.length > 0) {
-                      setSession(data[0])
-                    }
-                  }
-                }}
+                session={session}
+                onSave={(updated) => setSession(updated)}
               />
             )}
-
-            {/* Manage Co-Hosts - shown to primary host, co-host, or admin */}
-            {user && (session.host_id === user.id || session.cohosts?.some((c: any) => c.user_id === user.id) || isAdmin) && (
-              <ManageCohostsSection
-                sessionId={sessionId}
-                hostId={session.host_id}
-                userId={user.id}
-                isAdmin={isAdmin}
-                cohosts={session.cohosts || []}
-                onCohostsChange={async () => {
-                  // Refresh session data
-                  const response = await fetch(
-                    `${SUPABASE_URL}/rest/v1/sessions?id=eq.${sessionId}&event_id=eq.${event.id}&select=*,venue:venues(*),time_slot:time_slots(*),host:profiles!host_id(id,display_name,bio,avatar_url,affiliation,building,telegram,ens,interests),cohosts:session_cohosts(user_id,display_order,profile:profiles(id,display_name,bio,avatar_url,affiliation,building,telegram,ens,interests)),track:tracks(id,name,color)`,
-                    {
-                      headers: {
-                        'apikey': SUPABASE_KEY,
-                        'Authorization': `Bearer ${SUPABASE_KEY}`,
-                      },
-                    }
-                  )
-                  if (response.ok) {
-                    const data = await response.json()
-                    if (data.length > 0) setSession(data[0])
-                  }
-                }}
-              />
-            )}
-
-            {/* Stats Card */}
-            <Card className="p-6 bg-muted/30">
-              <h3 className="font-semibold mb-4">Session Stats</h3>
-              <div className="space-y-3">
-                <div className="flex justify-between items-center">
-                  <span className="text-sm text-muted-foreground">Total Votes</span>
-                  <span className="font-bold text-lg">{session.total_votes || 0}</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-sm text-muted-foreground">Unique Voters</span>
-                  <span className="font-bold text-lg">{session.voter_count || 0}</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-sm text-muted-foreground">Credits Committed</span>
-                  <span className="font-bold text-lg">{session.total_credits || 0}</span>
-                </div>
-              </div>
-            </Card>
           </div>
         </div>
       </div>

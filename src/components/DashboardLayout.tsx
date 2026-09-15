@@ -25,26 +25,9 @@ import { NotificationBell } from '@/components/NotificationBell'
 import { OnboardingModal } from '@/components/auth/OnboardingModal'
 import { SettingsModal } from '@/components/SettingsModal'
 import { useAuth } from '@/hooks/useAuth'
-import { cn, votesToCredits } from '@/lib/utils'
+import { cn } from '@/lib/utils'
+import { useVoting, VotingProvider } from '@/hooks/useVoting'
 import { useEvent, useEventRole } from '@/contexts/EventContext'
-
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-
-function getAccessToken(): string | null {
-  if (typeof window === 'undefined') return null
-  const storageKey = `sb-${new URL(SUPABASE_URL).hostname.split('.')[0]}-auth-token`
-  const stored = localStorage.getItem(storageKey)
-  if (stored) {
-    try {
-      const session = JSON.parse(stored)
-      return session?.access_token || null
-    } catch {
-      return null
-    }
-  }
-  return null
-}
 
 interface DashboardLayoutProps {
   children: React.ReactNode
@@ -61,63 +44,30 @@ function getNavItems(eventSlug: string) {
   ]
 }
 
-// Cache key for storing votes in sessionStorage
-const VOTES_CACHE_KEY = 'schelling-point-user-votes'
-const VOTES_USER_KEY = 'schelling-point-user-id'
-
-function getCachedVotes(eventId: string, userId?: string): Record<string, number> | null {
-  if (typeof window === 'undefined') return null
-  try {
-    if (!userId || sessionStorage.getItem(VOTES_USER_KEY) !== `${eventId}:${userId}`) return null
-    const cached = sessionStorage.getItem(`${VOTES_CACHE_KEY}:${eventId}`)
-    if (cached) return JSON.parse(cached)
-  } catch {}
-  return null
-}
-
-function getCachedUserId(): string | null {
-  if (typeof window === 'undefined') return null
-  try { return sessionStorage.getItem(VOTES_USER_KEY) } catch {}
-  return null
-}
-
-function setCachedVotes(eventId: string, userId: string, votes: Record<string, number>) {
-  if (typeof window === 'undefined') return
-  try {
-    sessionStorage.setItem(`${VOTES_CACHE_KEY}:${eventId}`, JSON.stringify(votes))
-    sessionStorage.setItem(VOTES_USER_KEY, `${eventId}:${userId}`)
-  } catch {}
-}
-
-function clearCachedVotes() {
-  if (typeof window === 'undefined') return
-  try {
-    sessionStorage.removeItem(VOTES_CACHE_KEY)
-    sessionStorage.removeItem(VOTES_USER_KEY)
-  } catch {}
-}
-
 // ============================================================================
 // Credit Gauge — compact sidebar widget
 // ============================================================================
 
-function CreditGauge({ total, spent }: { total: number; spent: number }) {
-  const remaining = Math.max(0, total - spent)
-  const pct = total > 0 ? ((total - spent) / total) * 100 : 0
+function CreditGauge({ eventSlug }: { eventSlug: string }) {
+  const voting = useVoting(eventSlug)
+  if (!voting.signedIn || voting.status !== 'open' || voting.loading) return null
+  const { budget, spent, remaining, mechanism } = voting
+  const pct = budget > 0 ? (remaining / budget) * 100 : 0
+  const noun = mechanism === 'approval' ? 'Approvals' : 'Voting credits'
 
   return (
     <div className="px-4 py-3 border-t border-border">
       <div className="flex items-baseline justify-between mb-1.5">
-        <span className="text-xs text-muted-foreground">
-          Voting credits
+        <span className="text-xs text-muted-foreground" id={`credit-gauge-${eventSlug}`}>
+          {noun}
         </span>
         <span className="text-sm font-bold tabular-nums text-primary">
-          {remaining}<span className="text-muted-foreground font-normal">/{total}</span>
+          {remaining}<span className="text-muted-foreground font-normal">/{budget}</span>
         </span>
       </div>
-      <Progress value={pct} className="h-1.5" />
+      <Progress value={pct} className="h-1.5" aria-labelledby={`credit-gauge-${eventSlug}`} aria-valuetext={`${remaining} of ${budget} left, ${spent} used`} />
       <p className="text-xs text-muted-foreground mt-1">
-        Support the ideas you want to see.
+        {voting.canVote ? 'Support the ideas you want to see.' : voting.reason}
       </p>
     </div>
   )
@@ -128,13 +78,22 @@ function CreditGauge({ total, spent }: { total: number; spent: number }) {
 // ============================================================================
 
 export function DashboardLayout({ children }: DashboardLayoutProps) {
+  const event = useEvent()
+  // One ballot fetch per event for everything rendered in the workspace (gauge, cards, My Votes).
+  return (
+    <VotingProvider eventSlug={event.slug}>
+      <DashboardShell>{children}</DashboardShell>
+    </VotingProvider>
+  )
+}
+
+function DashboardShell({ children }: DashboardLayoutProps) {
   const pathname = usePathname()
   const router = useRouter()
   const { user, profile, signOut, needsOnboarding, refreshProfile } = useAuth()
 
   const event = useEvent()
   const proposalsOpen = isParticipationOpen(event, 'propose')
-  const votingOpen = isParticipationOpen(event, 'vote')
   const { isAdmin, voteCredits } = useEventRole()
 
   const navItems = React.useMemo(() => getNavItems(event.slug), [event.slug])
@@ -157,57 +116,6 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
       window.history.replaceState(null, '', url.pathname + (url.search || '') + url.hash)
     }
   }, [])
-
-  // Vote state with caching
-  const [userVotes, setUserVotes] = React.useState<Record<string, number>>(() => {
-    return getCachedVotes(event.id, user?.id) || {}
-  })
-  const [votesLoaded, setVotesLoaded] = React.useState(() => getCachedVotes(event.id, user?.id) !== null)
-
-  const creditsSpent = React.useMemo(() => {
-    return Object.values(userVotes).reduce(
-      (sum, votes) => sum + votesToCredits(votes, event.votingMechanism),
-      0
-    )
-  }, [userVotes, event.votingMechanism])
-
-  React.useEffect(() => {
-    if (!user) {
-      setUserVotes({})
-      clearCachedVotes()
-      setVotesLoaded(true)
-      return
-    }
-    const cachedUserId = getCachedUserId()
-    if (cachedUserId !== `${event.id}:${user.id}`) {
-      clearCachedVotes()
-      setUserVotes({})
-    }
-    const fetchUserVotes = async () => {
-      const token = getAccessToken()
-      if (!token) { setVotesLoaded(true); return }
-      try {
-        const response = await fetch(
-          `${SUPABASE_URL}/rest/v1/votes?user_id=eq.${user.id}&event_id=eq.${event.id}&select=session_id,vote_count`,
-          { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${token}` } }
-        )
-        if (response.ok) {
-          const data = await response.json()
-          const votesMap: Record<string, number> = {}
-          data.forEach((v: { session_id: string; vote_count: number }) => { votesMap[v.session_id] = v.vote_count })
-          setUserVotes(votesMap)
-          setCachedVotes(event.id, user.id, votesMap)
-        }
-      } catch (err) { console.error('Error fetching user votes:', err) }
-      finally { setVotesLoaded(true) }
-    }
-    fetchUserVotes()
-    const handleVoteChange = (e: Event) => {
-      if ((e as CustomEvent<{ eventId: string }>).detail?.eventId === event.id) fetchUserVotes()
-    }
-    window.addEventListener('schelling:votes-changed', handleVoteChange)
-    return () => window.removeEventListener('schelling:votes-changed', handleVoteChange)
-  }, [user, event.id])
 
   React.useEffect(() => {
     if (needsOnboarding) setShowOnboarding(true)
@@ -303,7 +211,7 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
         </nav>
 
         {/* Credit gauge */}
-        {user && votingOpen && <CreditGauge total={voteCredits} spent={creditsSpent} />}
+        {user && <CreditGauge eventSlug={event.slug} />}
 
         {/* User section */}
         <div className="p-3 border-t border-border">
@@ -408,8 +316,8 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
             )}
             {user ? (
               <>
-                <div className="pt-2 border-t border-border mt-2">
-                  {votingOpen && <CreditGauge total={voteCredits} spent={creditsSpent} />}
+                <div className="mt-2">
+                  <CreditGauge eventSlug={event.slug} />
                 </div>
                 <div className="flex items-center justify-between pt-2 border-t border-border mt-2 px-3">
                   <button

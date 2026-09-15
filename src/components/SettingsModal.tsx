@@ -1,6 +1,7 @@
 'use client'
 
 import * as React from 'react'
+import { useParams } from 'next/navigation'
 import {
   Loader2,
   User,
@@ -14,6 +15,7 @@ import {
   Plus,
   Camera,
   AtSign,
+  BadgeCheck,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -21,24 +23,6 @@ import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import { useAuth } from '@/hooks/useAuth'
 import { apiFetch, ApiError } from '@/lib/api/client'
-
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-
-function getAccessToken(): string | null {
-  if (typeof window === 'undefined') return null
-  const storageKey = `sb-${new URL(SUPABASE_URL).hostname.split('.')[0]}-auth-token`
-  const stored = localStorage.getItem(storageKey)
-  if (stored) {
-    try {
-      const session = JSON.parse(stored)
-      return session?.access_token || null
-    } catch {
-      return null
-    }
-  }
-  return null
-}
 
 interface SettingsModalProps {
   isOpen: boolean
@@ -57,32 +41,110 @@ interface AtIdentity {
   publishProposals: boolean
 }
 
-const DEFAULT_INTERESTS = [
-  'Governance',
-  'DeFi',
-  'DAOs',
-  'NFTs',
-  'Layer 2',
-  'Privacy',
-  'Security',
-  'UX/UI',
-  'Public Goods',
-  'ReFi',
-  'AI/ML',
-  'Developer Tools',
-]
+/** Shape of GET/PATCH /api/me/profile → profile. */
+export interface OwnProfile {
+  id: string
+  did: string
+  handle: string | null
+  email: string | null
+  display_name: string | null
+  bio: string | null
+  avatar_url: string | null
+  affiliation: string | null
+  building: string | null
+  telegram: string | null
+  interests: string[] | null
+  ens: string | null
+  ens_verified_at: string | null
+  show_ens: boolean
+  onboarding_completed: boolean
+  publish_proposals: boolean
+}
+
+/** Limits enforced by PATCH /api/me/profile (src/app/api/me/profile/validate.ts). */
+export const PROFILE_INPUT_LIMITS = {
+  displayName: 80,
+  bio: 1000,
+  affiliation: 120,
+  building: 500,
+  telegram: 40,
+  interests: 10,
+  interestLength: 40,
+} as const
+
+const AVATAR_MAX_BYTES = 2 * 1024 * 1024
+
+/**
+ * Upload a profile photo through the app's upload endpoint (package A: `POST /api/uploads`,
+ * multipart, returns `{ url }`). Throws an Error with a message fit to show.
+ */
+export async function uploadAvatar(file: File): Promise<string> {
+  if (!file.type.startsWith('image/')) throw new Error('Choose an image file.')
+  if (file.size > AVATAR_MAX_BYTES) throw new Error('That image is larger than 2 MB.')
+  const form = new FormData()
+  form.append('file', file)
+  form.append('purpose', 'avatar')
+  try {
+    const res = await apiFetch<{ url: string }>('/api/uploads', { method: 'POST', body: form })
+    if (!res?.url) throw new Error('Upload did not return a URL.')
+    return res.url
+  } catch (err) {
+    if (err instanceof ApiError && (err.status === 404 || err.status === 405)) {
+      throw new Error('Photo uploads are not available yet.')
+    }
+    throw err instanceof Error ? err : new Error('Upload failed.')
+  }
+}
+
+/** Interest suggestions for the profile editors: GET /api/me/profile/interests. */
+export function useInterestSuggestions(enabled: boolean, eventSlug: string | null): string[] {
+  const [list, setList] = React.useState<string[]>([])
+  React.useEffect(() => {
+    if (!enabled) return
+    let cancelled = false
+    const qs = eventSlug ? `?event=${encodeURIComponent(eventSlug)}` : ''
+    apiFetch<{ suggested: string[]; existing: string[] }>(`/api/me/profile/interests${qs}`, { cache: 'no-store' })
+      .then((res) => {
+        if (!cancelled) setList([...res.suggested, ...res.existing])
+      })
+      .catch((err) => console.error('Could not load interest suggestions:', err instanceof Error ? err.message : err))
+    return () => {
+      cancelled = true
+    }
+  }, [enabled, eventSlug])
+  return list
+}
+
+interface EthereumProvider {
+  request(args: { method: string; params?: unknown[] }): Promise<unknown>
+}
+
+function injectedWallet(): EthereumProvider | null {
+  if (typeof window === 'undefined') return null
+  const eth = (window as unknown as { ethereum?: EthereumProvider }).ethereum
+  return eth && typeof eth.request === 'function' ? eth : null
+}
+
+function utf8Hex(text: string): string {
+  return `0x${Array.from(new TextEncoder().encode(text), (b) => b.toString(16).padStart(2, '0')).join('')}`
+}
 
 export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
-  const { user, profile, refreshProfile } = useAuth()
+  const { user, refreshProfile } = useAuth()
+  const userId = user?.id ?? null
+  const params = useParams<{ slug?: string }>()
+  const eventSlug = typeof params?.slug === 'string' ? params.slug : null
   const fileInputRef = React.useRef<HTMLInputElement>(null)
   const interestInputRef = React.useRef<HTMLInputElement>(null)
+
+  const [profile, setProfile] = React.useState<OwnProfile | null>(null)
+  const [loadError, setLoadError] = React.useState<string | null>(null)
 
   const [displayName, setDisplayName] = React.useState('')
   const [bio, setBio] = React.useState('')
   const [affiliation, setAffiliation] = React.useState('')
   const [building, setBuilding] = React.useState('')
   const [telegram, setTelegram] = React.useState('')
-  const [ens, setEns] = React.useState('')
   const [avatarUrl, setAvatarUrl] = React.useState('')
   const [interests, setInterests] = React.useState<string[]>([])
   const [newInterest, setNewInterest] = React.useState('')
@@ -91,57 +153,40 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const [isUploading, setIsUploading] = React.useState(false)
   const [saveMessage, setSaveMessage] = React.useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
-  // Autocomplete state
-  const [allInterests, setAllInterests] = React.useState<string[]>([])
   const [showSuggestions, setShowSuggestions] = React.useState(false)
   const [highlightedIndex, setHighlightedIndex] = React.useState(-1)
+  const allInterests = useInterestSuggestions(isOpen && Boolean(userId), eventSlug)
 
-  // Fetch all unique interests from profiles
-  React.useEffect(() => {
-    if (isOpen) {
-      const fetchAllInterests = async () => {
-        try {
-          const response = await fetch(
-            `${SUPABASE_URL}/rest/v1/profiles?select=interests`,
-            {
-              headers: {
-                'apikey': SUPABASE_KEY,
-                'Authorization': `Bearer ${SUPABASE_KEY}`,
-              },
-            }
-          )
-          if (response.ok) {
-            const profiles = await response.json()
-            const interestSet = new Set<string>(DEFAULT_INTERESTS)
-            profiles.forEach((p: { interests: string[] | null }) => {
-              p.interests?.forEach((i) => interestSet.add(i))
-            })
-            setAllInterests(Array.from(interestSet).sort())
-          }
-        } catch (err) {
-          console.error('Error fetching interests:', err)
-        }
-      }
-      fetchAllInterests()
-    }
-  }, [isOpen])
+  const applyProfile = React.useCallback((p: OwnProfile) => {
+    setProfile(p)
+    setDisplayName(p.display_name || '')
+    setBio(p.bio || '')
+    setAffiliation(p.affiliation || '')
+    setBuilding(p.building || '')
+    setTelegram(p.telegram ? `@${p.telegram}` : '')
+    setAvatarUrl(p.avatar_url || '')
+    setInterests(p.interests || [])
+  }, [])
 
-  // Load profile data into form when modal opens
+  // Load the canonical profile each time the modal opens.
   React.useEffect(() => {
-    if (isOpen && profile) {
-      setDisplayName(profile.display_name || '')
-      setBio(profile.bio || '')
-      setAffiliation(profile.affiliation || '')
-      setBuilding(profile.building || '')
-      setTelegram(profile.telegram || '')
-      setEns(profile.ens || '')
-      setAvatarUrl(profile.avatar_url || '')
-      setInterests(profile.interests || [])
-      setSaveMessage(null)
-      setNewInterest('')
-      setShowSuggestions(false)
+    if (!isOpen || !userId) return
+    let cancelled = false
+    setSaveMessage(null)
+    setLoadError(null)
+    setNewInterest('')
+    setShowSuggestions(false)
+    apiFetch<{ profile: OwnProfile }>('/api/me/profile', { cache: 'no-store' })
+      .then((res) => {
+        if (!cancelled) applyProfile(res.profile)
+      })
+      .catch((err) => {
+        if (!cancelled) setLoadError(err instanceof Error ? err.message : 'Could not load your profile')
+      })
+    return () => {
+      cancelled = true
     }
-  }, [isOpen, profile])
+  }, [isOpen, userId, applyProfile])
 
   // ATProto identity. Loaded from /api/atproto/me (session cookie) when the modal opens.
   const [atInfo, setAtInfo] = React.useState<AtIdentity | null>(null)
@@ -167,19 +212,13 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     }
   }, [isOpen, loadAtIdentity])
 
-  // Filter suggestions based on input
   const filteredSuggestions = React.useMemo(() => {
-    if (!newInterest.trim()) return []
-    const query = newInterest.toLowerCase()
-    return allInterests
-      .filter((i) =>
-        i.toLowerCase().includes(query) &&
-        !interests.includes(i)
-      )
-      .slice(0, 8)
+    const query = newInterest.trim().toLowerCase()
+    if (!query) return []
+    const chosen = new Set(interests.map((i) => i.toLowerCase()))
+    return allInterests.filter((i) => i.toLowerCase().includes(query) && !chosen.has(i.toLowerCase())).slice(0, 8)
   }, [newInterest, allInterests, interests])
 
-  // Close on escape key
   React.useEffect(() => {
     const handleEscape = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose()
@@ -194,31 +233,32 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     }
   }, [isOpen, onClose])
 
-  const handleAvatarUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleAvatarUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
+    e.target.value = ''
     if (!file) return
-
     setIsUploading(true)
-    const reader = new FileReader()
-    reader.onloadend = () => {
-      setAvatarUrl(reader.result as string)
+    setSaveMessage(null)
+    try {
+      setAvatarUrl(await uploadAvatar(file))
+    } catch (err) {
+      setSaveMessage({ type: 'error', text: err instanceof Error ? err.message : 'Upload failed.' })
+    } finally {
       setIsUploading(false)
     }
-    reader.onerror = () => {
-      setSaveMessage({ type: 'error', text: 'Failed to read image.' })
-      setIsUploading(false)
-    }
-    reader.readAsDataURL(file)
   }
 
   const handleAddInterest = (interest?: string) => {
-    const toAdd = interest || newInterest.trim()
-    if (toAdd && !interests.includes(toAdd)) {
-      setInterests([...interests, toAdd])
-      setNewInterest('')
-      setShowSuggestions(false)
-      setHighlightedIndex(-1)
+    const toAdd = (interest || newInterest).trim().slice(0, PROFILE_INPUT_LIMITS.interestLength)
+    if (!toAdd || interests.some((i) => i.toLowerCase() === toAdd.toLowerCase())) return
+    if (interests.length >= PROFILE_INPUT_LIMITS.interests) {
+      setSaveMessage({ type: 'error', text: `Choose at most ${PROFILE_INPUT_LIMITS.interests} interests.` })
+      return
     }
+    setInterests([...interests, toAdd])
+    setNewInterest('')
+    setShowSuggestions(false)
+    setHighlightedIndex(-1)
   }
 
   const handleRemoveInterest = (interest: string) => {
@@ -228,9 +268,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const handleInterestKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'ArrowDown') {
       e.preventDefault()
-      setHighlightedIndex((prev) =>
-        prev < filteredSuggestions.length - 1 ? prev + 1 : prev
-      )
+      setHighlightedIndex((prev) => (prev < filteredSuggestions.length - 1 ? prev + 1 : prev))
     } else if (e.key === 'ArrowUp') {
       e.preventDefault()
       setHighlightedIndex((prev) => (prev > 0 ? prev - 1 : -1))
@@ -242,62 +280,39 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
         handleAddInterest()
       }
     } else if (e.key === 'Escape') {
+      e.stopPropagation()
       setShowSuggestions(false)
       setHighlightedIndex(-1)
     }
   }
 
   const handleSave = async () => {
-    if (!user) return
-
-    const token = getAccessToken()
-    if (!token) {
-      setSaveMessage({ type: 'error', text: 'Not authenticated. Please sign in again.' })
+    if (!userId || !profile) return
+    if (displayName.trim().length === 0) {
+      setSaveMessage({ type: 'error', text: 'Display name cannot be empty.' })
       return
     }
-
     setIsSaving(true)
     setSaveMessage(null)
-
     try {
-      const response = await fetch(
-        `${SUPABASE_URL}/rest/v1/profiles?id=eq.${user.id}`,
-        {
-          method: 'PATCH',
-          headers: {
-            'apikey': SUPABASE_KEY,
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json',
-            'Prefer': 'return=minimal',
-          },
-          body: JSON.stringify({
-            display_name: displayName.trim() || null,
-            bio: bio.trim() || null,
-            affiliation: affiliation.trim() || null,
-            building: building.trim() || null,
-            telegram: telegram.trim() || null,
-            ens: ens.trim() || null,
-            avatar_url: avatarUrl.trim() || null,
-            interests: interests.length > 0 ? interests : null,
-          }),
-        }
-      )
-
-      if (response.ok) {
-        setSaveMessage({ type: 'success', text: 'Saved!' })
-        refreshProfile()
-        // Auto-close after success
-        setTimeout(() => {
-          onClose()
-        }, 1000)
-      } else {
-        const error = await response.text()
-        console.error('Save error:', error)
-        setSaveMessage({ type: 'error', text: 'Failed to save. Please try again.' })
-      }
+      const res = await apiFetch<{ profile: OwnProfile }>('/api/me/profile', {
+        method: 'PATCH',
+        json: {
+          display_name: displayName,
+          bio,
+          affiliation,
+          building,
+          telegram,
+          avatar_url: avatarUrl || null,
+          interests,
+        },
+      })
+      applyProfile(res.profile)
+      setSaveMessage({ type: 'success', text: 'Saved!' })
+      await refreshProfile()
+      setTimeout(() => onClose(), 1000)
     } catch (err) {
-      console.error('Save error:', err)
-      setSaveMessage({ type: 'error', text: 'An error occurred. Please try again.' })
+      setSaveMessage({ type: 'error', text: err instanceof Error ? err.message : 'Failed to save. Please try again.' })
     } finally {
       setIsSaving(false)
     }
@@ -346,199 +361,221 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       onClick={onClose}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="settings-modal-title"
         className="w-full max-w-lg max-h-[90vh] overflow-y-auto bg-card border border-border rounded-2xl shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
         <div className="sticky top-0 z-10 flex items-center justify-between p-4 border-b bg-card/95 backdrop-blur-sm rounded-t-2xl">
-          <h2 className="text-lg font-semibold">Edit Profile</h2>
-          <Button variant="ghost" size="icon" onClick={onClose}>
+          <h2 id="settings-modal-title" className="text-lg font-semibold">Edit Profile</h2>
+          <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close">
             <X className="h-4 w-4" />
           </Button>
         </div>
 
         {/* Content */}
         <div className="p-6 space-y-6">
-          {/* Avatar */}
-          <div className="flex flex-col items-center gap-4">
-            <div className="relative group">
-              <div className="h-24 w-24 rounded-full bg-muted flex items-center justify-center overflow-hidden border-2 border-border">
-                {avatarUrl ? (
-                  <img
-                    src={avatarUrl}
-                    alt={displayName || ''}
-                    className="h-full w-full object-cover"
-                    onError={() => setAvatarUrl('')}
-                  />
-                ) : (
-                  <User className="h-12 w-12 text-muted-foreground" />
-                )}
-              </div>
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                disabled={isUploading}
-                className="absolute inset-0 rounded-full bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"
-              >
-                {isUploading ? (
-                  <Loader2 className="h-6 w-6 text-white animate-spin" />
-                ) : (
-                  <Camera className="h-6 w-6 text-white" />
-                )}
-              </button>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/*"
-                onChange={handleAvatarUpload}
-                className="hidden"
-              />
+          {loadError && (
+            <div className="rounded-lg bg-destructive/10 border border-destructive/20 p-3 text-sm text-destructive">{loadError}</div>
+          )}
+          {!profile && !loadError && (
+            <div className="flex justify-center py-6">
+              <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
             </div>
-            <p className="text-xs text-muted-foreground">Click to upload a photo</p>
-          </div>
+          )}
 
-          {/* Display Name */}
-          <div className="space-y-2">
-            <label className="text-sm font-medium flex items-center gap-2">
-              <User className="h-4 w-4 text-muted-foreground" />
-              Display Name
-            </label>
-            <Input
-              placeholder="Your name"
-              value={displayName}
-              onChange={(e) => setDisplayName(e.target.value)}
-            />
-          </div>
-
-          {/* Bio */}
-          <div className="space-y-2">
-            <label className="text-sm font-medium">Bio</label>
-            <Textarea
-              placeholder="Tell us about yourself..."
-              value={bio}
-              onChange={(e) => setBio(e.target.value)}
-              rows={2}
-            />
-          </div>
-
-          {/* Affiliation */}
-          <div className="space-y-2">
-            <label className="text-sm font-medium flex items-center gap-2">
-              <Building2 className="h-4 w-4 text-muted-foreground" />
-              Organization
-            </label>
-            <Input
-              placeholder="Your company or organization"
-              value={affiliation}
-              onChange={(e) => setAffiliation(e.target.value)}
-            />
-          </div>
-
-          {/* Building */}
-          <div className="space-y-2">
-            <label className="text-sm font-medium flex items-center gap-2">
-              <Rocket className="h-4 w-4 text-muted-foreground" />
-              What are you building?
-            </label>
-            <Textarea
-              placeholder="Describe your current project..."
-              value={building}
-              onChange={(e) => setBuilding(e.target.value)}
-              rows={2}
-            />
-          </div>
-
-          {/* Telegram */}
-          <div className="space-y-2">
-            <label className="text-sm font-medium flex items-center gap-2">
-              <Send className="h-4 w-4 text-muted-foreground" />
-              Telegram
-            </label>
-            <Input
-              placeholder="@username"
-              value={telegram}
-              onChange={(e) => setTelegram(e.target.value)}
-            />
-          </div>
-
-          {/* ENS */}
-          <div className="space-y-2">
-            <label className="text-sm font-medium flex items-center gap-2">
-              <Hexagon className="h-4 w-4 text-muted-foreground" />
-              ENS Name
-            </label>
-            <Input
-              placeholder="yourname.eth"
-              value={ens}
-              onChange={(e) => setEns(e.target.value)}
-            />
-          </div>
-
-          {/* Interests */}
-          <div className="space-y-2">
-            <label className="text-sm font-medium flex items-center gap-2">
-              <Hash className="h-4 w-4 text-muted-foreground" />
-              Interests
-            </label>
-            <div className="relative">
-              <div className="flex gap-2">
-                <Input
-                  ref={interestInputRef}
-                  placeholder="Type to search interests..."
-                  value={newInterest}
-                  onChange={(e) => {
-                    setNewInterest(e.target.value)
-                    setShowSuggestions(true)
-                    setHighlightedIndex(-1)
-                  }}
-                  onFocus={() => setShowSuggestions(true)}
-                  onBlur={() => {
-                    // Delay to allow click on suggestion
-                    setTimeout(() => setShowSuggestions(false), 150)
-                  }}
-                  onKeyDown={handleInterestKeyDown}
-                />
-                <Button type="button" variant="outline" size="icon" onClick={() => handleAddInterest()}>
-                  <Plus className="h-4 w-4" />
-                </Button>
-              </div>
-              {/* Autocomplete dropdown */}
-              {showSuggestions && filteredSuggestions.length > 0 && (
-                <div className="absolute z-20 top-full left-0 right-12 mt-1 bg-card border rounded-lg shadow-lg overflow-hidden">
-                  {filteredSuggestions.map((suggestion, index) => (
-                    <button
-                      key={suggestion}
-                      type="button"
-                      className={`w-full px-3 py-2 text-left text-sm hover:bg-muted transition-colors ${
-                        index === highlightedIndex ? 'bg-muted' : ''
-                      }`}
-                      onMouseDown={(e) => {
-                        e.preventDefault()
-                        handleAddInterest(suggestion)
-                      }}
-                      onMouseEnter={() => setHighlightedIndex(index)}
-                    >
-                      {suggestion}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-            {interests.length > 0 && (
-              <div className="flex flex-wrap gap-2 pt-2">
-                {interests.map((interest) => (
-                  <Badge
-                    key={interest}
-                    variant="secondary"
-                    className="cursor-pointer hover:bg-destructive/20 group"
-                    onClick={() => handleRemoveInterest(interest)}
+          {profile && (
+            <>
+              {/* Avatar */}
+              <div className="flex flex-col items-center gap-4">
+                <div className="relative group">
+                  <div className="h-24 w-24 rounded-full bg-muted flex items-center justify-center overflow-hidden border-2 border-border">
+                    {avatarUrl ? (
+                      <img
+                        src={avatarUrl}
+                        alt=""
+                        className="h-full w-full object-cover"
+                        referrerPolicy="no-referrer"
+                        onError={() => setAvatarUrl('')}
+                      />
+                    ) : (
+                      <User className="h-12 w-12 text-muted-foreground" />
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={isUploading}
+                    aria-label="Upload a profile photo"
+                    className="absolute inset-0 rounded-full bg-black/50 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity flex items-center justify-center"
                   >
-                    {interest}
-                    <X className="h-3 w-3 ml-1 group-hover:text-destructive" />
-                  </Badge>
-                ))}
+                    {isUploading ? <Loader2 className="h-6 w-6 text-white animate-spin" /> : <Camera className="h-6 w-6 text-white" />}
+                  </button>
+                  <input ref={fileInputRef} type="file" accept="image/*" onChange={handleAvatarUpload} className="hidden" />
+                </div>
+                <div className="flex items-center gap-3">
+                  <p className="text-xs text-muted-foreground">Click to upload a photo</p>
+                  {avatarUrl && (
+                    <button type="button" className="text-xs underline text-muted-foreground" onClick={() => setAvatarUrl('')}>
+                      Remove
+                    </button>
+                  )}
+                </div>
               </div>
-            )}
-          </div>
+
+              {/* Display Name */}
+              <div className="space-y-2">
+                <label htmlFor="settings-display-name" className="text-sm font-medium flex items-center gap-2">
+                  <User className="h-4 w-4 text-muted-foreground" />
+                  Display Name
+                </label>
+                <Input
+                  id="settings-display-name"
+                  placeholder="Your name"
+                  value={displayName}
+                  maxLength={PROFILE_INPUT_LIMITS.displayName}
+                  onChange={(e) => setDisplayName(e.target.value)}
+                />
+              </div>
+
+              {/* Bio */}
+              <div className="space-y-2">
+                <label htmlFor="settings-bio" className="text-sm font-medium">Bio</label>
+                <Textarea
+                  id="settings-bio"
+                  placeholder="Tell us about yourself..."
+                  value={bio}
+                  maxLength={PROFILE_INPUT_LIMITS.bio}
+                  onChange={(e) => setBio(e.target.value)}
+                  rows={2}
+                />
+              </div>
+
+              {/* Affiliation */}
+              <div className="space-y-2">
+                <label htmlFor="settings-affiliation" className="text-sm font-medium flex items-center gap-2">
+                  <Building2 className="h-4 w-4 text-muted-foreground" />
+                  Organization
+                </label>
+                <Input
+                  id="settings-affiliation"
+                  placeholder="Your company or organization"
+                  value={affiliation}
+                  maxLength={PROFILE_INPUT_LIMITS.affiliation}
+                  onChange={(e) => setAffiliation(e.target.value)}
+                />
+              </div>
+
+              {/* Building */}
+              <div className="space-y-2">
+                <label htmlFor="settings-building" className="text-sm font-medium flex items-center gap-2">
+                  <Rocket className="h-4 w-4 text-muted-foreground" />
+                  What are you building?
+                </label>
+                <Textarea
+                  id="settings-building"
+                  placeholder="Describe your current project..."
+                  value={building}
+                  maxLength={PROFILE_INPUT_LIMITS.building}
+                  onChange={(e) => setBuilding(e.target.value)}
+                  rows={2}
+                />
+              </div>
+
+              {/* Telegram */}
+              <div className="space-y-2">
+                <label htmlFor="settings-telegram" className="text-sm font-medium flex items-center gap-2">
+                  <Send className="h-4 w-4 text-muted-foreground" />
+                  Telegram
+                </label>
+                <Input
+                  id="settings-telegram"
+                  placeholder="@username"
+                  value={telegram}
+                  maxLength={PROFILE_INPUT_LIMITS.telegram}
+                  onChange={(e) => setTelegram(e.target.value)}
+                />
+                <p className="text-xs text-muted-foreground">Shown only to fellow members of gatherings you join.</p>
+              </div>
+
+              {/* Interests */}
+              <div className="space-y-2">
+                <label htmlFor="settings-interest" className="text-sm font-medium flex items-center gap-2">
+                  <Hash className="h-4 w-4 text-muted-foreground" />
+                  Interests
+                </label>
+                <div className="relative">
+                  <div className="flex gap-2">
+                    <Input
+                      id="settings-interest"
+                      ref={interestInputRef}
+                      placeholder="Type to search interests..."
+                      value={newInterest}
+                      maxLength={PROFILE_INPUT_LIMITS.interestLength}
+                      role="combobox"
+                      aria-expanded={showSuggestions && filteredSuggestions.length > 0}
+                      aria-controls="settings-interest-suggestions"
+                      onChange={(e) => {
+                        setNewInterest(e.target.value)
+                        setShowSuggestions(true)
+                        setHighlightedIndex(-1)
+                      }}
+                      onFocus={() => setShowSuggestions(true)}
+                      onBlur={() => setTimeout(() => setShowSuggestions(false), 150)}
+                      onKeyDown={handleInterestKeyDown}
+                    />
+                    <Button type="button" variant="outline" size="icon" onClick={() => handleAddInterest()} aria-label="Add interest">
+                      <Plus className="h-4 w-4" />
+                    </Button>
+                  </div>
+                  {showSuggestions && filteredSuggestions.length > 0 && (
+                    <div
+                      id="settings-interest-suggestions"
+                      role="listbox"
+                      className="absolute z-20 top-full left-0 right-12 mt-1 bg-card border rounded-lg shadow-lg overflow-hidden"
+                    >
+                      {filteredSuggestions.map((suggestion, index) => (
+                        <button
+                          key={suggestion}
+                          type="button"
+                          role="option"
+                          aria-selected={index === highlightedIndex}
+                          className={`w-full px-3 py-2 text-left text-sm hover:bg-muted transition-colors ${index === highlightedIndex ? 'bg-muted' : ''}`}
+                          onMouseDown={(e) => {
+                            e.preventDefault()
+                            handleAddInterest(suggestion)
+                          }}
+                          onMouseEnter={() => setHighlightedIndex(index)}
+                        >
+                          {suggestion}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                {interests.length > 0 && (
+                  <div className="flex flex-wrap gap-2 pt-2">
+                    {interests.map((interest) => (
+                      <Badge
+                        key={interest}
+                        variant="secondary"
+                        className="cursor-pointer hover:bg-destructive/20 group"
+                        onClick={() => handleRemoveInterest(interest)}
+                      >
+                        {interest}
+                        <X className="h-3 w-3 ml-1 group-hover:text-destructive" />
+                      </Badge>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* ENS saves on its own; setProfile (not applyProfile) keeps unsaved edits to the fields above. */}
+              <EnsSection profile={profile} onProfile={setProfile} />
+            </>
+          )}
 
           {/* ATProto identity */}
           {atInfo?.linked && (
@@ -625,11 +662,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
         <div className="sticky bottom-0 flex items-center justify-between gap-4 p-4 border-t bg-card/95 backdrop-blur-sm rounded-b-2xl">
           <div className="flex-1">
             {saveMessage && (
-              <p
-                className={`text-sm ${
-                  saveMessage.type === 'success' ? 'text-green-500' : 'text-destructive'
-                }`}
-              >
+              <p role="status" className={`text-sm ${saveMessage.type === 'success' ? 'text-green-500' : 'text-destructive'}`}>
                 {saveMessage.text}
               </p>
             )}
@@ -638,17 +671,190 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
             <Button variant="outline" onClick={onClose}>
               Cancel
             </Button>
-            <Button onClick={handleSave} disabled={isSaving} className="btn-primary-glow">
-              {isSaving ? (
-                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-              ) : (
-                <Save className="h-4 w-4 mr-2" />
-              )}
+            <Button onClick={handleSave} disabled={isSaving || isUploading || !profile} className="btn-primary-glow">
+              {isSaving ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Save className="h-4 w-4 mr-2" />}
               Save
             </Button>
           </div>
         </div>
       </div>
+    </div>
+  )
+}
+
+/**
+ * ENS: self-written, verified by a wallet signature, shown to fellow members only when verified
+ * and opted in (spec §7). Saves immediately, separately from the rest of the form.
+ */
+function EnsSection({ profile, onProfile }: { profile: OwnProfile; onProfile: (p: OwnProfile) => void }) {
+  const [name, setName] = React.useState(profile.ens || '')
+  const [busy, setBusy] = React.useState(false)
+  const [message, setMessage] = React.useState<{ type: 'success' | 'error'; text: string } | null>(null)
+  const [manual, setManual] = React.useState<{ name: string; message: string } | null>(null)
+  const [pasted, setPasted] = React.useState('')
+
+  React.useEffect(() => {
+    setName(profile.ens || '')
+  }, [profile.ens])
+
+  const verified = Boolean(profile.ens && profile.ens_verified_at && profile.ens === name.trim().toLowerCase())
+
+  const reload = async () => {
+    const res = await apiFetch<{ profile: OwnProfile }>('/api/me/profile', { cache: 'no-store' })
+    onProfile(res.profile)
+  }
+
+  const submitSignature = async (ensName: string, signature: string) => {
+    await apiFetch('/api/me/ens/verify', { method: 'POST', json: { name: ensName, signature } })
+    setManual(null)
+    setPasted('')
+    await reload()
+    setMessage({ type: 'success', text: `${ensName} is verified.` })
+  }
+
+  const startVerify = async () => {
+    setBusy(true)
+    setMessage(null)
+    try {
+      const challenge = await apiFetch<{ name: string; message: string }>('/api/me/ens/challenge', {
+        method: 'POST',
+        json: { name },
+      })
+      const wallet = injectedWallet()
+      if (!wallet) {
+        setManual({ name: challenge.name, message: challenge.message })
+        return
+      }
+      const accounts = (await wallet.request({ method: 'eth_requestAccounts' })) as string[]
+      if (!accounts?.[0]) throw new Error('No wallet account selected.')
+      const signature = (await wallet.request({
+        method: 'personal_sign',
+        params: [utf8Hex(challenge.message), accounts[0]],
+      })) as string
+      await submitSignature(challenge.name, signature)
+    } catch (err) {
+      const text = err instanceof Error ? err.message : 'Verification failed.'
+      setMessage({ type: 'error', text: /user rejected|denied/i.test(text) ? 'Signature request was declined.' : text })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const removeEns = async () => {
+    setBusy(true)
+    setMessage(null)
+    try {
+      const res = await apiFetch<{ profile: OwnProfile }>('/api/me/profile', { method: 'PATCH', json: { ens: null, show_ens: false } })
+      onProfile(res.profile)
+      setName('')
+    } catch (err) {
+      setMessage({ type: 'error', text: err instanceof Error ? err.message : 'Could not remove the name.' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const toggleShow = async (show: boolean) => {
+    setBusy(true)
+    setMessage(null)
+    try {
+      const res = await apiFetch<{ profile: OwnProfile }>('/api/me/profile', { method: 'PATCH', json: { show_ens: show } })
+      onProfile(res.profile)
+    } catch (err) {
+      setMessage({ type: 'error', text: err instanceof Error ? err.message : 'Could not save that setting.' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="space-y-2">
+      <label htmlFor="settings-ens" className="text-sm font-medium flex items-center gap-2">
+        <Hexagon className="h-4 w-4 text-muted-foreground" />
+        ENS Name
+        {verified && (
+          <Badge variant="outline" className="text-[10px] gap-1">
+            <BadgeCheck className="h-3 w-3" /> verified
+          </Badge>
+        )}
+      </label>
+      <div className="flex gap-2">
+        <Input
+          id="settings-ens"
+          placeholder="yourname.eth"
+          value={name}
+          maxLength={255}
+          onChange={(e) => {
+            setName(e.target.value)
+            setManual(null)
+          }}
+          disabled={busy}
+        />
+        {verified ? (
+          <Button type="button" variant="outline" onClick={removeEns} disabled={busy}>
+            Remove
+          </Button>
+        ) : (
+          <Button type="button" variant="outline" onClick={startVerify} disabled={busy || !name.trim()}>
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Verify'}
+          </Button>
+        )}
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Verify by signing a message with the wallet your name resolves to. No transaction, no cost. Your address is not stored.
+      </p>
+
+      {manual && (
+        <div className="rounded-lg border border-border p-3 space-y-2">
+          <p className="text-xs text-muted-foreground">
+            No browser wallet found. Sign this exact message with <code>personal_sign</code> from the wallet{' '}
+            <strong>{manual.name}</strong> resolves to, then paste the signature.
+          </p>
+          <pre className="text-[11px] whitespace-pre-wrap bg-muted/40 rounded p-2 select-all">{manual.message}</pre>
+          <Input placeholder="0x…" value={pasted} onChange={(e) => setPasted(e.target.value.trim())} />
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={busy || !pasted}
+            onClick={async () => {
+              setBusy(true)
+              setMessage(null)
+              try {
+                await submitSignature(manual.name, pasted)
+              } catch (err) {
+                setMessage({ type: 'error', text: err instanceof Error ? err.message : 'Verification failed.' })
+              } finally {
+                setBusy(false)
+              }
+            }}
+          >
+            Submit signature
+          </Button>
+        </div>
+      )}
+
+      <label className="flex items-start gap-3 text-sm cursor-pointer">
+        <input
+          type="checkbox"
+          className="mt-0.5 h-4 w-4"
+          checked={profile.show_ens}
+          disabled={busy || !profile.ens_verified_at}
+          onChange={(e) => toggleShow(e.target.checked)}
+        />
+        <span>
+          <span className="font-medium">Show my verified ENS name to fellow members</span>
+          <span className="block text-xs text-muted-foreground mt-0.5">
+            Visible only in the member directory of gatherings you belong to. Never published to the network.
+          </span>
+        </span>
+      </label>
+
+      {message && (
+        <p role="status" className={`text-xs ${message.type === 'success' ? 'text-green-500' : 'text-destructive'}`}>
+          {message.text}
+        </p>
+      )}
     </div>
   )
 }

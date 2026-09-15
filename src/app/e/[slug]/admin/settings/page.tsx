@@ -3,7 +3,7 @@
 import * as React from 'react'
 import Link from 'next/link'
 import { ArrowUpRight, Loader2 } from 'lucide-react'
-import { useEvent, useEventRole } from '@/contexts/EventContext'
+import { useEvent, useEventNetwork, useEventRole } from '@/contexts/EventContext'
 import { useAuth } from '@/hooks/useAuth'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -16,18 +16,24 @@ import { VotingSection } from './_components/VotingSection'
 import { BrandingSection } from './_components/BrandingSection'
 import { LifecycleSection } from './_components/LifecycleSection'
 import { DangerZone } from './_components/DangerZone'
+import { NetworkSection } from './_components/NetworkSection'
+import { SafeguardsSection } from './_components/SafeguardsSection'
+import { DEFAULT_POLICY_THRESHOLDS } from '@/lib/events/policy'
 
 const SECTIONS = [
   { id: 'lifecycle', label: 'Lifecycle' },
+  { id: 'network', label: 'Network identity' },
   { id: 'basics', label: 'Basics' },
   { id: 'dates', label: 'Dates' },
   { id: 'participation', label: 'Participation' },
   { id: 'voting', label: 'Voting' },
+  { id: 'safeguards', label: 'Safeguards' },
   { id: 'branding', label: 'Branding' },
 ]
 
 export default function EventSettingsPage() {
   const event = useEvent()
+  const network = useEventNetwork()
   const { can, isOwner, isLoading } = useEventRole()
   const { user, isLoading: authLoading } = useAuth()
   // The phase drives which lifecycle moves and danger-zone actions are offered.
@@ -53,12 +59,14 @@ export default function EventSettingsPage() {
         {isOwner ? <li><a href="#danger" className="inline-block whitespace-nowrap rounded-full border border-destructive/40 bg-card px-3 py-1.5 text-sm text-destructive hover:bg-destructive/5">Danger zone</a></li> : null}
       </ul>
     </nav>
-    <LifecycleSection event={event} status={status} onChanged={setStatus} />
+    <LifecycleSection event={event} status={status} onChanged={setStatus} hasIdentity={Boolean(network?.did)} />
+    <React.Suspense fallback={null}><NetworkSection event={event} network={network} /></React.Suspense>
     <BasicsSection event={event} />
     <DatesSection event={event} />
     <ParticipationSection event={event} />
     <VotingSection event={event} />
+    <SafeguardsSection event={event} thresholds={network?.thresholds ?? DEFAULT_POLICY_THRESHOLDS} />
     <BrandingSection event={event} />
-    {isOwner ? <DangerZone event={event} status={status} /> : null}
+    {isOwner ? <DangerZone event={event} status={status} published={Boolean(network?.publishedAt)} /> : null}
   </div>
 }

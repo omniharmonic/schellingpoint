@@ -258,13 +258,13 @@ test('buildSessionCalendarEvent emits only fields community.lexicon.calendar.eve
   expect(inPerson.mode).toBe(`${NSID.event}#inperson`)
   expect(inPerson.status).toBe(`${NSID.event}#scheduled`)
   expect(inPerson.locations).toEqual([venueAddress])
-  expect(inPerson.uris).toEqual([{ uri: 'https://schellingpoint.app/e/ethboulder/sessions/abc', name: 'Schelling Point' }])
+  expect(inPerson.uris).toEqual([{ uri: 'https://schellingpoint.app/e/ethboulder/sessions/abc', name: 'Session page' }])
 
   const virtual = buildSessionCalendarEvent({
     name: 'Call',
     startsAt: '2026-02-21T16:00:00Z',
     endsAt: '2026-02-21T17:00:00Z',
-    customLocation: 'https://meet.jit.si/ethboulder',
+    virtual: true,
     venueAddress,
     cancelled: true,
     sessionUrl: 'https://schellingpoint.app/e/ethboulder/sessions/def',
@@ -291,11 +291,11 @@ test('buildProposalRecord never carries host, cohost or schedule fields', () => 
       is_self_hosted: true,
       self_hosted_start_time: '2026-02-21T20:00:00Z',
       self_hosted_end_time: '2026-02-21T21:30:00Z',
-      custom_location: 'Pearl Street',
+      public_place: 'Near Pearl Street',
       created_at: NOW,
       imported_from: 'schellingpoint-supabase',
       // Fields a row carries that must NOT reach the record:
-      ...({ host_name: 'Alice Smith', host_id: 'uuid', venue_id: 'uuid', total_votes: 99 } as object),
+      ...({ host_name: 'Alice Smith', host_id: 'uuid', venue_id: 'uuid', total_votes: 99, custom_location: '1234 Secret Lane' } as object),
     },
   })
   expect(record).toEqual({
@@ -308,11 +308,152 @@ test('buildProposalRecord never carries host, cohost or schedule fields', () => 
     selfHosted: true,
     startsAt: '2026-02-21T20:00:00.000Z',
     endsAt: '2026-02-21T21:30:00.000Z',
-    place: 'Pearl Street',
+    place: 'Near Pearl Street',
     imported: true,
     importedFrom: 'schellingpoint-supabase',
     createdAt: NOW,
   })
-  expect(JSON.stringify(record)).not.toMatch(/Alice|host_name|host_id|venue_id|total_votes|uuid|99/)
+  expect(JSON.stringify(record)).not.toMatch(/Alice|host_name|host_id|venue_id|total_votes|uuid|99|Secret|1234/)
   expect(() => assertValidRecord(NSID.proposal, record)).not.toThrow()
+})
+
+/* ───────────────────────── wave 1: F additions ───────────────────────── */
+
+import {
+  buildApprovalRecord,
+  buildListingRecord,
+  buildMembershipRecord,
+  buildOccurrenceRecord,
+  buildSeriesRecord,
+  buildTimePreferenceRecord,
+  decideListingEdit,
+  membershipClaimRkey,
+  normalizeTags,
+  routesOnTags,
+  rruleFor,
+  venueLocation,
+} from '../src/lib/atproto/records'
+
+test('a self-hosted session’s exact address never reaches the proposal or the calendar event', () => {
+  const exact = '1234 Secret Lane, Apt 5, Boulder CO 80302'
+  // The builder takes no exact-address input at all; a row that carries one leaks nothing.
+  const row = {
+    title: 'Kitchen table cryptography',
+    format: 'workshop',
+    duration: 60,
+    is_self_hosted: true,
+    self_hosted_start_time: '2026-02-21T20:00:00Z',
+    self_hosted_end_time: '2026-02-21T21:00:00Z',
+    created_at: NOW,
+    ...({ custom_location: exact } as object),
+  }
+  const withoutLabel = buildProposalRecord({ gatheringUri: GATHERING_URI, session: row })
+  expect(withoutLabel.place).toBeUndefined()
+  const withLabel = buildProposalRecord({ gatheringUri: GATHERING_URI, session: { ...row, public_place: 'North Boulder' } })
+  expect(withLabel.place).toBe('North Boulder')
+  const event = buildSessionCalendarEvent({
+    name: row.title,
+    startsAt: row.self_hosted_start_time,
+    endsAt: row.self_hosted_end_time,
+    venueAddress: null,
+    sessionUrl: 'https://unconference.events/e/demo/sessions/x',
+    createdAt: NOW,
+  })
+  for (const record of [withoutLabel, withLabel, event]) {
+    const json = JSON.stringify(record)
+    for (const part of ['1234', 'Secret', 'Apt 5', '80302']) expect(json).not.toContain(part)
+  }
+})
+
+test('venueLocation coarsens a private residence to its locality', () => {
+  const home = venueLocation({ name: 'Sam’s living room', street: '77 Maple Ave', locality: 'Whittier', region: 'CO', postalCode: '80205', country: 'US', privateResidence: true })
+  expect(home).toEqual({ $type: NSID.locationAddress, country: 'US', locality: 'Whittier', region: 'CO' })
+  expect(JSON.stringify(home)).not.toMatch(/Maple|80205|Sam/)
+  expect(venueLocation({ street: '77 Maple Ave', privateResidence: true })).toBeNull()
+  const hall = venueLocation({ name: 'Main Hall', street: '2032 14th St', locality: 'Boulder', country: 'US' })
+  expect(hall?.street).toBe('2032 14th St')
+  expect(() => assertValidRecord(NSID.venue, buildVenueRecord({ name: 'Home', locations: [home!], createdAt: NOW }))).not.toThrow()
+})
+
+test('listing, membership, approval, time preference and series records are valid and name no one', () => {
+  const listing = buildListingRecord({ event: EVENT_REF, gatheringDid: GATHERING_DID, tags: ['Skill Share', 'skill share', 'regen'], createdAt: NOW })
+  expect(listing.tags).toEqual(['skill-share', 'regen'])
+  expect(() => assertValidRecord(NSID.eventListing, listing)).not.toThrow()
+  expect(() => assertNoUnknownFields(NSID.eventListing, listing)).not.toThrow()
+  expect(() => assertNoForeignDid(listing, GATHERING_DID, { gatheringDid: GATHERING_DID })).not.toThrow()
+  expect(() => buildListingRecord({ event: { uri: EVENT_REF.uri, cid: '' }, gatheringDid: GATHERING_DID, createdAt: NOW })).toThrow(/uri and cid/)
+
+  const claim = buildMembershipRecord({ subjectDid: PROPOSER_DID, role: 20, gatheringDid: GATHERING_DID, createdAt: NOW })
+  expect(() => assertValidRecord(NSID.membership, claim)).not.toThrow()
+  expect(() => assertNoForeignDid(claim, GATHERING_DID, { gatheringDid: GATHERING_DID })).toThrow(ForeignDidError)
+  expect(() => assertNoForeignDid(claim, GATHERING_DID, { gatheringDid: GATHERING_DID, consentedSubjectDid: PROPOSER_DID })).not.toThrow()
+  expect(() => assertNoForeignDid({ ...claim, note: COHOST_DID }, GATHERING_DID, { gatheringDid: GATHERING_DID, consentedSubjectDid: PROPOSER_DID })).toThrow(ForeignDidError)
+  const rkey = membershipClaimRkey(GATHERING_DID, PROPOSER_DID)
+  expect(rkey).toMatch(/^[a-z2-7]{13}$/)
+  expect(membershipClaimRkey(GATHERING_DID, PROPOSER_DID)).toBe(rkey)
+  expect(membershipClaimRkey(GATHERING_DID, COHOST_DID)).not.toBe(rkey)
+
+  const approval = buildApprovalRecord({ proposal: `at://${GATHERING_DID}/${NSID.slot}/3lbxyzabc2k2z`, action: 'other', subjectRecord: EVENT_REF.uri, reason: 'Speaker flight delayed', createdAt: NOW })
+  expect(() => assertValidRecord(NSID.approval, approval)).not.toThrow()
+  expect(() => assertNoUnknownFields(NSID.approval, approval)).not.toThrow()
+  expect(approval).not.toHaveProperty('subjectDid')
+  expect(() => assertNoForeignDid(approval, COHOST_DID)).not.toThrow()
+
+  const pref = buildTimePreferenceRecord({
+    proposal: PROPOSAL_REF,
+    windows: [{ startsAt: '2026-02-21T16:00:00Z', endsAt: '2026-02-21T18:00:00Z', preference: 1 }],
+    blackouts: [{ startsAt: '2026-02-22T16:00:00Z', endsAt: '2026-02-22T23:00:00Z' }],
+    createdAt: NOW,
+  })
+  expect(pref.windows![0]!.startsAt).toBe('2026-02-21T16:00:00.000Z')
+  expect(() => assertValidRecord(NSID.timePreference, pref)).not.toThrow()
+
+  expect(rruleFor({ freq: 'weekly', interval: 2, byDay: ['TU'], count: 8 })).toBe('FREQ=WEEKLY;INTERVAL=2;BYDAY=TU;COUNT=8')
+  expect(() => rruleFor({ freq: 'weekly', count: 2, until: NOW })).toThrow(/count or until/)
+  const series = buildSeriesRecord({ firstEvent: EVENT_REF, freq: 'monthly', timezone: 'America/Denver', until: '2027-01-01T00:00:00Z', createdAt: NOW })
+  expect(series.rrule).toBe('FREQ=MONTHLY;UNTIL=20270101T000000Z')
+  expect(() => assertValidRecord(NSID.series, series)).not.toThrow()
+  expect(() => assertNoUnknownFields(NSID.series, series)).not.toThrow()
+  const occurrence = buildOccurrenceRecord({ event: EVENT_REF, series: { uri: `at://${GATHERING_DID}/${NSID.series}/3lbxyzabc2k2y`, cid: CID }, originalStartsAt: NOW, sequence: 2, createdAt: NOW })
+  expect(() => assertValidRecord(NSID.occurrence, occurrence)).not.toThrow()
+})
+
+test('listing routing: tags intersect, removal is sticky, a changed event re-pins', () => {
+  expect(normalizeTags([' Free School ', 'free-school', '', null, 'X'.repeat(80)])).toEqual(['free-school', 'x'.repeat(64)])
+  expect(routesOnTags(['Skillshare'], ['skillshare', 'regen'])).toBe(true)
+  expect(routesOnTags(['ethereum'], ['skillshare'])).toBe(false)
+  expect(routesOnTags(['ethereum'], [])).toBe(false)
+  expect(decideListingEdit({ everListed: false, isActivelyListed: false, routesNow: true })).toBe('create')
+  expect(decideListingEdit({ everListed: true, isActivelyListed: false, routesNow: true })).toBe('none')
+  expect(decideListingEdit({ everListed: true, isActivelyListed: true, routesNow: false })).toBe('remove')
+  expect(decideListingEdit({ everListed: true, isActivelyListed: true, routesNow: true, cidChanged: true })).toBe('update')
+  expect(decideListingEdit({ everListed: false, isActivelyListed: false, routesNow: false })).toBe('none')
+})
+
+test('the default policy needs two organisers for a destructive change', () => {
+  const policy = buildPolicyRecord({ title: 'Rules', version: '1', effectiveAt: NOW, createdAt: NOW })
+  expect(policy.thresholds).toMatchObject({ destructiveActionStewards: 2, feedbackK: 3, publishRoles: false })
+  expect(policy.text).toContain('requires 2 organiser approval(s)')
+})
+
+import { expandRecurrence } from '../src/lib/atproto/recurrence'
+
+test('recurrence keeps wall-clock time across DST, honours count, until, exdates and short months', () => {
+  const tz = 'America/Denver'
+  // Monday 19 Oct 2026 18:00 MDT; US DST ends 1 Nov 2026.
+  const weekly = expandRecurrence('2026-10-20T00:00:00Z', { freq: 'weekly', count: 3, timezone: tz }, '2027-01-01T00:00:00Z')
+  expect(weekly).toEqual([
+    { sequence: 1, startsAt: '2026-10-20T00:00:00.000Z' },
+    { sequence: 2, startsAt: '2026-10-27T00:00:00.000Z' },
+    { sequence: 3, startsAt: '2026-11-03T01:00:00.000Z' },
+  ])
+  const skipped = expandRecurrence('2026-10-20T00:00:00Z', { freq: 'weekly', count: 3, exdates: ['2026-10-27T00:00:00Z'], timezone: tz }, '2027-01-01T00:00:00Z')
+  expect(skipped.map((o) => o.sequence)).toEqual([1, 3])
+  const twiceWeekly = expandRecurrence('2026-10-20T00:00:00Z', { freq: 'weekly', byDay: ['MO', 'TH'], until: '2026-10-31T00:00:00Z', timezone: tz }, '2027-01-01T00:00:00Z')
+  expect(twiceWeekly.map((o) => o.startsAt)).toEqual(['2026-10-20T00:00:00.000Z', '2026-10-23T00:00:00.000Z', '2026-10-27T00:00:00.000Z', '2026-10-30T00:00:00.000Z'])
+  const monthly = expandRecurrence('2027-01-31T17:00:00Z', { freq: 'monthly', count: 3, timezone: tz }, '2028-01-01T00:00:00Z')
+  expect(monthly.map((o) => o.startsAt.slice(0, 10))).toEqual(['2027-01-31', '2027-03-31', '2027-05-31'])
+  const horizon = expandRecurrence('2026-10-20T00:00:00Z', { freq: 'daily', interval: 2, timezone: tz }, '2026-10-25T00:00:00Z')
+  expect(horizon).toHaveLength(3)
+  expect(() => expandRecurrence(NOW, { freq: 'daily', count: 2, until: NOW, timezone: tz }, NOW)).toThrow(/count or until/)
 })

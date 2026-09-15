@@ -1,408 +1,198 @@
 import { test, expect } from '@playwright/test'
-import { execSync } from 'node:child_process'
 import { loadEnvConfig } from '@next/env'
-import { createClient } from '@supabase/supabase-js'
-import type { Agent } from '@atproto/api'
-import { NSID } from '../src/lib/atproto/nsids'
-import { assertNoForeignDid } from '../src/lib/atproto/records'
-import { assertValidRecord } from '../src/lib/atproto/validate'
-import {
-  endorse,
-  ParticipantError,
-  publicRsvp,
-  publishCohost,
-  publishProposal,
-  unendorse,
-  withdrawProposal,
-  type ParticipantDeps,
-  type ParticipantIndex,
-} from '../src/lib/atproto/participant'
-import type { DeleteRecordInput, PutRecordInput, WriteResult } from '../src/lib/atproto/write'
+import Module from 'node:module'
+import path from 'node:path'
+import postgres from 'postgres'
 
-/**
- * Participant-side ATProto writes (proposal / cohost / endorsement / rsvp)
- * against the local Supabase with the network faked: `put`/`del` are recorded
- * instead of reaching a PDS. The seeded `ethboulder-2026` event is used with a
- * throwaway session and throwaway users, all removed afterwards.
- */
-
+// Participant-side records in a PERSON's own repo, against the real local PDS: two custodial
+// accounts are minted through the W0 custody module, one proposes, the other endorses, co-hosts and
+// RSVPs publicly; the proposer publishes (then withdraws) time preferences and the proposal. The
+// OAuth-door linkage gate and window validation are checked against the database alone.
 loadEnvConfig(process.cwd(), true)
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!
-const ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001'
-const DATABASE_URL = process.env.TEST_DATABASE_URL || 'postgresql://postgres:postgres@127.0.0.1:54322/postgres'
-const EVENT_SLUG = 'ethboulder-2026'
 
-const local = !!SUPABASE_URL && ['127.0.0.1', 'localhost'].includes(new URL(SUPABASE_URL).hostname)
-test.skip(!local, 'ATProto participant tests only run against local Supabase')
-// The tests build on each other's state (publish → cohost → endorse → withdraw);
-// serial mode re-runs the whole file from beforeAll on a retry.
-test.describe.configure({ mode: 'serial' })
+const migrationUrl = process.env.DATABASE_MIGRATION_URL || ''
+const pds = (process.env.PDS_INTERNAL_URL || process.env.PDS_URL || '').replace(/\/+$/, '')
+const adminPassword = process.env.PDS_ADMIN_PASSWORD || ''
+const configured = Boolean(migrationUrl && pds && adminPassword && process.env.DATABASE_URL && process.env.PDS_HANDLE_DOMAIN && process.env.ATPROTO_CUSTODY_KEY)
 
-const db = createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false, autoRefreshToken: false } })
-
-const AUTHOR_DID = 'did:plc:testauthor'
-const COHOST_DID = 'did:plc:testcohost'
-const ENDORSER_DID = 'did:plc:testendorser'
-const GATHERING_DID = 'did:plc:testgathering'
-const TEST_GATHERING_URI = `at://${GATHERING_DID}/${NSID.gathering}/self`
-const PASSWORD = 'atproto-participant-test-pw-1!'
-
-/* ───────────────────────────── fake network ───────────────────────────── */
-
-interface PutCall extends PutRecordInput {
-  result: WriteResult
+type Resolver = (request: string, ...rest: unknown[]) => string
+const moduleWithResolver = Module as unknown as { _resolveFilename: Resolver }
+const originalResolve = moduleWithResolver._resolveFilename
+const stub = path.join(path.dirname(require.resolve('next/package.json')), 'dist/compiled/server-only/empty.js')
+moduleWithResolver._resolveFilename = function (request: string, ...rest: unknown[]) {
+  return request === 'server-only' ? stub : originalResolve.call(this, request, ...rest)
 }
 
-const puts: PutCall[] = []
-const dels: DeleteRecordInput[] = []
-const didByUser = new Map<string, string>()
-let cidCounter = 0
+const RUN = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`
+const FAKE_GATHERING = `did:plc:${`partgather${RUN}`.replace(/[^a-z2-7]/g, 'q').padEnd(24, 'q').slice(0, 24)}`
+const CID = 'bafyreigdcnuvcw5cwtnfn7tmd3cwmqyaqqfj2yzjvz7sjclp33sdnylmqe'
 
-/** A distinct, parseable CIDv1 per write: vary digest characters of a real CID. */
-const BASE_CID = 'bafyreigdcnuvcw5cwtnfn7tmd3cwmqyaqqfj2yzjvz7sjclp33sdnylmqe'
-function fakeCid(n: number): string {
-  const alphabet = 'abcdefghijklmnopqrstuvwxyz234567'
-  let suffix = ''
-  let v = n
-  for (let i = 0; i < 5; i++) {
-    suffix = alphabet[v % 32] + suffix
-    v = Math.floor(v / 32)
-  }
-  return BASE_CID.slice(0, 20) + suffix + BASE_CID.slice(25)
+async function live(uri: string): Promise<{ status: number; body: { cid?: string; value?: Record<string, unknown> } }> {
+  const m = /^at:\/\/([^/]+)\/([^/]+)\/([^/]+)$/.exec(uri)!
+  const res = await fetch(`${pds}/xrpc/com.atproto.repo.getRecord?repo=${m[1]}&collection=${m[2]}&rkey=${m[3]}`)
+  return { status: res.status, body: await res.json() }
 }
 
-const fakeIndex: ParticipantIndex = {
-  // Same shape as index-store.upsertIndexedRecord, written with the test's service client.
-  upsert: async (input) => {
-    const m = /^at:\/\/([^/]+)\/([^/]+)\/([^/]+)$/.exec(input.uri)!
-    const { error } = await db
-      .from('at_records')
-      .upsert(
-        { uri: input.uri, did: m[1], collection: m[2], rkey: m[3], cid: input.cid ?? null, record: input.record, source: input.source ?? null, indexed_at: new Date().toISOString() },
-        { onConflict: 'uri' },
-      )
-    if (error) throw new Error(error.message)
-  },
-  remove: async (uri) => {
-    const { error } = await db.from('at_records').delete().eq('uri', uri)
-    if (error) throw new Error(error.message)
-  },
-}
+test.describe.configure({ mode: 'serial', retries: 0 })
 
-const deps: ParticipantDeps = {
-  agentFor: async (userId) => {
-    const did = didByUser.get(userId)
-    if (!did) {
-      const err = new Error(`profile ${userId} has no linked DID`)
-      err.name = 'ProfileNotLinkedError'
-      throw err
+test.describe('participant records', () => {
+  test.skip(!configured, 'the local stack env is not set')
+  test.setTimeout(120_000)
+
+  let raw: postgres.Sql
+  let participant: typeof import('../src/lib/atproto/participant')
+  let custody: typeof import('../src/lib/auth/custody')
+  let db: typeof import('../src/lib/db')
+  let eventId = ''
+  let sessionId = ''
+  const people: Record<'proposer' | 'friend', { id: string; did: string }> = {} as never
+  const oauthDid = `did:plc:${`oauthpart${RUN}`.replace(/[^a-z2-7]/g, 'q').padEnd(24, 'q').slice(0, 24)}`
+  let oauthId = ''
+
+  test.beforeAll(async () => {
+    /* eslint-disable @typescript-eslint/no-require-imports */
+    participant = require('../src/lib/atproto/participant')
+    custody = require('../src/lib/auth/custody')
+    db = require('../src/lib/db')
+    /* eslint-enable @typescript-eslint/no-require-imports */
+    raw = postgres(migrationUrl, { max: 2, onnotice: () => {} })
+    const [event] = await raw<{ id: string }[]>`
+      insert into events (slug, name, start_date, end_date, status, actor_did, allowed_formats, allowed_durations, timezone)
+      values (${`f-part-${RUN}`}, 'F participant test', '2026-10-01', '2026-10-02', 'proposals_open', ${FAKE_GATHERING},
+              ${['talk', 'workshop']}, ${[30, 60]}, 'America/Denver')
+      returning id
+    `
+    eventId = event!.id
+    for (const role of ['proposer', 'friend'] as const) {
+      const minted = await custody.mintCustodialAccount(`f-part-${role}-${RUN}@example.test`)
+      people[role] = { id: minted.accountId, did: minted.did }
+      await raw`insert into event_members (event_id, user_id, role) values (${eventId}, ${minted.accountId}, 'attendee')`
     }
-    return { did } as unknown as Agent
-  },
-  put: async (agent, input) => {
-    expect(input.repo).toBe((agent as unknown as { did: string }).did)
-    const result = { uri: `at://${input.repo}/${input.collection}/${input.rkey}`, cid: fakeCid(++cidCounter) }
-    puts.push({ ...input, result })
-    return result
-  },
-  del: async (_agent, input) => {
-    dels.push(input)
-  },
-  index: fakeIndex,
-  db,
-}
+    const [oauth] = await raw<{ id: string }[]>`insert into accounts (did, handle, kind) values (${oauthDid}, null, 'oauth') returning id`
+    oauthId = oauth!.id
+    const [session] = await raw<{ id: string }[]>`
+      insert into sessions (event_id, title, description, format, duration, host_id, status, is_self_hosted, custom_location, public_place,
+                            self_hosted_start_time, self_hosted_end_time)
+      values (${eventId}, 'Seed saving circle', 'Bring a jar.', 'workshop', 60, ${people.proposer.id}, 'approved', true,
+              '1234 Hidden Garden Rd, Longmont CO 80501', 'East Longmont', '2026-10-01T16:00:00Z', '2026-10-01T17:00:00Z')
+      returning id
+    `
+    sessionId = session!.id
+  })
 
-/* ───────────────────────────── fixtures ───────────────────────────── */
-
-let eventId: string
-let restoreGatheringUri = false
-let sessionId: string
-let authorId: string
-let cohostId: string
-let endorserId: string
-let unlinkedId: string
-const userIds: string[] = []
-
-async function createUser(tag: string, did: string | null): Promise<string> {
-  const email = `atproto-${tag}-${Date.now()}-${Math.floor(Math.random() * 1e6)}@example.com`
-  // Local GoTrue auto-confirms password signups; the `sb_secret_` service key
-  // is not accepted as a bearer on the admin API, so sign up as the user.
-  const anon = createClient(SUPABASE_URL, ANON_KEY, { auth: { persistSession: false, autoRefreshToken: false } })
-  const { data, error } = await anon.auth.signUp({ email, password: PASSWORD })
-  if (error || !data.user) throw new Error(`signUp: ${error?.message}`)
-  const id = data.user.id
-  userIds.push(id)
-  // The on_auth_user_created trigger creates the profile; make sure it is there before linking.
-  await db.from('profiles').upsert({ id, email, display_name: `Test ${tag}` }, { onConflict: 'id' })
-  if (did) {
-    const { error: linkError } = await db.from('profiles').update({ did, atproto_handle: `${tag}.test`, atproto_linked_at: new Date().toISOString() }).eq('id', id)
-    if (linkError) throw new Error(`link profile: ${linkError.message}`)
-    didByUser.set(id, did)
-  }
-  return id
-}
-
-async function tokenFor(userId: string): Promise<string> {
-  const { data: profile } = await db.from('profiles').select('email').eq('id', userId).single()
-  const anon = createClient(SUPABASE_URL, ANON_KEY, { auth: { persistSession: false, autoRefreshToken: false } })
-  const { data, error } = await anon.auth.signInWithPassword({ email: profile!.email, password: PASSWORD })
-  if (error || !data.session) throw new Error(`signIn: ${error?.message}`)
-  return data.session.access_token
-}
-
-async function sessionRow() {
-  const { data, error } = await db
-    .from('sessions')
-    .select('proposal_uri, proposal_cid, host_did, calendar_event_uri')
-    .eq('id', sessionId)
-    .single()
-  if (error) throw new Error(error.message)
-  return data
-}
-
-test.beforeAll(async () => {
-  // Any stale DID links from an earlier aborted run would collide on the unique index.
-  await db.from('profiles').update({ did: null, atproto_handle: null }).in('did', [AUTHOR_DID, COHOST_DID, ENDORSER_DID])
-  await db.from('at_records').delete().in('did', [AUTHOR_DID, COHOST_DID, ENDORSER_DID])
-
-  const { data: event } = await db.from('events').select('id, gathering_uri').eq('slug', EVENT_SLUG).single()
-  if (!event) throw new Error(`seeded event ${EVENT_SLUG} missing`)
-  eventId = event.id
-  if (!event.gathering_uri) {
-    await db.from('events').update({ gathering_uri: TEST_GATHERING_URI, actor_did: GATHERING_DID }).eq('id', eventId)
-    restoreGatheringUri = true
-  }
-
-  authorId = await createUser('author', AUTHOR_DID)
-  cohostId = await createUser('cohost', COHOST_DID)
-  endorserId = await createUser('endorser', ENDORSER_DID)
-  unlinkedId = await createUser('unlinked', null)
-
-  // The seeded event is `completed`; `enforce_event_proposal_rules` only lets
-  // owners/admins insert sessions outside the proposal window.
-  const { error: memberError } = await db.from('event_members').insert([
-    { event_id: eventId, user_id: authorId, role: 'admin' },
-    { event_id: eventId, user_id: unlinkedId, role: 'admin' },
-  ])
-  if (memberError) throw new Error(`event_members insert: ${memberError.message}`)
-
-  const { data: session, error } = await db
-    .from('sessions')
-    .insert({
-      event_id: eventId,
-      host_id: authorId,
-      host_name: 'Test Author Person',
-      title: 'Participant test session',
-      description: 'A throwaway session for the participant tests.',
-      format: 'talk',
-      duration: 30,
-      topic_tags: ['testing', 'atproto'],
-      expected_attendance: 25,
-      status: 'approved',
-    })
-    .select('id')
-    .single()
-  if (error || !session) throw new Error(`insert session: ${error?.message}`)
-  sessionId = session.id
-})
-
-test.afterAll(async () => {
-  if (sessionId) await db.from('sessions').delete().eq('id', sessionId)
-  await db.from('at_records').delete().in('did', [AUTHOR_DID, COHOST_DID, ENDORSER_DID])
-  if (restoreGatheringUri) await db.from('events').update({ gathering_uri: null, actor_did: null }).eq('id', eventId)
-  // The admin API rejects the local `sb_secret_` key, so remove the throwaway
-  // users straight from the database (profiles cascade). Best-effort.
-  if (userIds.length) {
-    await db.from('event_members').delete().eq('event_id', eventId).in('user_id', userIds)
-    await db.from('profiles').update({ did: null, atproto_handle: null }).in('id', userIds)
-    try {
-      const ids = userIds.map((id) => `'${id}'`).join(',')
-      execSync(`psql "${DATABASE_URL}" -q -c "delete from auth.users where id in (${ids})"`, { stdio: 'ignore' })
-    } catch (e) {
-      console.warn('could not delete throwaway auth users:', e instanceof Error ? e.message : e)
+  test.afterAll(async () => {
+    if (raw) {
+      await raw`delete from events where id = ${eventId}`
+      const ids = [people.proposer?.id, people.friend?.id, oauthId].filter(Boolean) as string[]
+      const dids = [people.proposer?.did, people.friend?.did].filter(Boolean) as string[]
+      await raw`delete from at_records where did = any(${[...dids, oauthDid]}::text[])`
+      for (const did of dids) {
+        await fetch(`${pds}/xrpc/com.atproto.admin.deleteAccount`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Basic ${Buffer.from(`admin:${adminPassword}`).toString('base64')}` },
+          body: JSON.stringify({ did }),
+        })
+      }
+      if (ids.length) await raw`delete from accounts where id = any(${ids}::uuid[])`
+      await raw.end({ timeout: 5 })
     }
-  }
-})
-
-/* ─────────────────────────────── proposal ─────────────────────────────── */
-
-test('publishProposal writes a valid, DID-free proposal into the author repo and persists the pointer', async () => {
-  puts.length = 0
-  const result = await publishProposal({ sessionId, userId: authorId }, deps)
-
-  expect(puts).toHaveLength(1)
-  const call = puts[0]
-  expect(call.repo).toBe(AUTHOR_DID)
-  expect(call.collection).toBe(NSID.proposal)
-  expect(call.swapRecord).toBeUndefined()
-  expect(result.uri).toBe(`at://${AUTHOR_DID}/${NSID.proposal}/${call.rkey}`)
-
-  expect(() => assertValidRecord(NSID.proposal, call.record)).not.toThrow()
-  expect(() => assertNoForeignDid(call.record, AUTHOR_DID, { gatheringDid: GATHERING_DID })).not.toThrow()
-  const json = JSON.stringify(call.record)
-  expect(json).not.toContain('Test Author Person')
-  expect(json).not.toContain('host_name')
-  expect(json).not.toContain(COHOST_DID)
-  expect(call.record.gathering).toBe(TEST_GATHERING_URI)
-  expect(call.record.imported).toBeUndefined()
-  expect(call.record.importedFrom).toBeUndefined()
-
-  const row = await sessionRow()
-  expect(row.proposal_uri).toBe(result.uri)
-  expect(row.proposal_cid).toBe(result.cid)
-  expect(row.host_did).toBe(AUTHOR_DID)
-})
-
-test('a second publish updates the same rkey with swapRecord set to the stored cid', async () => {
-  const before = await sessionRow()
-  puts.length = 0
-  const result = await publishProposal({ sessionId, userId: authorId }, deps)
-  expect(puts).toHaveLength(1)
-  expect(puts[0].rkey).toBe(before.proposal_uri!.split('/').pop())
-  expect(puts[0].swapRecord).toBe(before.proposal_cid)
-  expect(result.uri).toBe(before.proposal_uri)
-  const after = await sessionRow()
-  expect(after.proposal_cid).toBe(result.cid)
-  expect(after.proposal_cid).not.toBe(before.proposal_cid)
-})
-
-test('only the author can publish, and only a linked profile can', async () => {
-  await expect(publishProposal({ sessionId, userId: endorserId }, deps)).rejects.toMatchObject({ code: 'forbidden', status: 403 })
-  const { data: unlinkedSession } = await db
-    .from('sessions')
-    .insert({ event_id: eventId, host_id: unlinkedId, host_name: 'Nobody', title: 'Unlinked session', format: 'talk', duration: 15, status: 'approved' })
-    .select('id')
-    .single()
-  try {
-    await expect(publishProposal({ sessionId: unlinkedSession!.id, userId: unlinkedId }, deps)).rejects.toMatchObject({ code: 'link_atproto_first', status: 409 })
-  } finally {
-    await db.from('sessions').delete().eq('id', unlinkedSession!.id)
-  }
-})
-
-/* ──────────────────────────────── cohost ──────────────────────────────── */
-
-test('publishCohost strongRefs the proposal cid and persists cohost_uri', async () => {
-  await expect(publishCohost({ sessionId, userId: cohostId }, deps)).rejects.toMatchObject({ code: 'not_cohost', status: 403 })
-
-  const { error } = await db.from('session_cohosts').insert({ session_id: sessionId, user_id: cohostId, event_id: eventId, display_order: 1 })
-  expect(error).toBeNull()
-
-  const proposal = await sessionRow()
-  puts.length = 0
-  const result = await publishCohost({ sessionId, userId: cohostId }, deps)
-  expect(puts).toHaveLength(1)
-  expect(puts[0].repo).toBe(COHOST_DID)
-  expect(puts[0].collection).toBe(NSID.cohost)
-  expect(puts[0].record.proposal).toEqual({ uri: proposal.proposal_uri, cid: proposal.proposal_cid })
-  expect(() => assertValidRecord(NSID.cohost, puts[0].record)).not.toThrow()
-  expect(() => assertNoForeignDid(puts[0].record, COHOST_DID)).not.toThrow()
-
-  const { data: row } = await db.from('session_cohosts').select('cohost_uri').eq('session_id', sessionId).eq('user_id', cohostId).single()
-  expect(row?.cohost_uri).toBe(result.uri)
-})
-
-/* ───────────────────────────── endorsement ───────────────────────────── */
-
-test('endorse / unendorse round trip, visible in the public index and the GET count', async () => {
-  await expect(endorse({ sessionId, userId: authorId }, deps)).rejects.toMatchObject({ code: 'forbidden' })
-  await expect(endorse({ sessionId, userId: endorserId, note: 'x'.repeat(151) }, deps)).rejects.toMatchObject({ code: 'invalid_note', status: 400 })
-
-  puts.length = 0
-  const result = await endorse({ sessionId, userId: endorserId, note: 'Would love to see this.' }, deps)
-  expect(puts[0].repo).toBe(ENDORSER_DID)
-  expect(puts[0].collection).toBe(NSID.endorsement)
-  expect(() => assertValidRecord(NSID.endorsement, puts[0].record)).not.toThrow()
-
-  const { data: indexed } = await db.from('at_records').select('did, collection, record').eq('uri', result.uri).single()
-  expect(indexed?.did).toBe(ENDORSER_DID)
-  expect(indexed?.collection).toBe(NSID.endorsement)
-
-  const res = await fetch(`${BASE_URL}/api/v1/events/${EVENT_SLUG}/sessions/${sessionId}/atproto`)
-  expect(res.status).toBe(200)
-  const body = await res.json()
-  expect(body.endorsements).toBe(1)
-
-  // Endorsing again rewrites the same record rather than adding a second one.
-  puts.length = 0
-  const again = await endorse({ sessionId, userId: endorserId, note: 'Updated note' }, deps)
-  expect(again.uri).toBe(result.uri)
-
-  dels.length = 0
-  const removed = await unendorse({ sessionId, userId: endorserId }, deps)
-  expect(removed.uri).toBe(result.uri)
-  expect(dels).toHaveLength(1)
-  expect(dels[0]).toMatchObject({ repo: ENDORSER_DID, collection: NSID.endorsement })
-  const { data: gone } = await db.from('at_records').select('uri').eq('uri', result.uri).maybeSingle()
-  expect(gone).toBeNull()
-  await expect(unendorse({ sessionId, userId: endorserId }, deps)).rejects.toMatchObject({ code: 'nothing_to_withdraw' })
-})
-
-/* ──────────────────────────────── rsvp ──────────────────────────────── */
-
-test('publicRsvp requires a published calendar event (409 otherwise)', async () => {
-  await db.from('session_rsvps').upsert({ session_id: sessionId, user_id: endorserId, event_id: eventId, status: 'confirmed' }, { onConflict: 'session_id,user_id' })
-  await expect(publicRsvp({ sessionId, userId: endorserId, status: 'going' }, deps)).rejects.toMatchObject({ code: 'calendar_event_not_published', status: 409 })
-
-  const token = await tokenFor(endorserId)
-  const res = await fetch(`${BASE_URL}/api/v1/events/${EVENT_SLUG}/sessions/${sessionId}/atproto`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action: 'rsvp-public', status: 'going' }),
+    await db?.sql.end({ timeout: 5 }).catch(() => undefined)
+    moduleWithResolver._resolveFilename = originalResolve
   })
-  expect(res.status).toBe(409)
-  const body = await res.json()
-  expect(body.error).toBe('calendar_event_not_published')
-})
 
-/* ─────────────────────────────── route ─────────────────────────────── */
-
-test('GET …/atproto returns the public shape, plus viewer state when signed in', async () => {
-  const anon = await fetch(`${BASE_URL}/api/v1/events/${EVENT_SLUG}/sessions/${sessionId}/atproto`)
-  expect(anon.status).toBe(200)
-  const body = await anon.json()
-  expect(body.proposal).toMatchObject({ uri: expect.stringContaining(`at://${AUTHOR_DID}/${NSID.proposal}/`), handle: 'author.test' })
-  expect(body.calendarEvent).toBeNull()
-  expect(typeof body.endorsements).toBe('number')
-  expect(body.viewer).toBeUndefined()
-
-  const token = await tokenFor(authorId)
-  const signed = await fetch(`${BASE_URL}/api/v1/events/${EVENT_SLUG}/sessions/${sessionId}/atproto`, { headers: { Authorization: `Bearer ${token}` } })
-  expect(signed.status).toBe(200)
-  const viewer = (await signed.json()).viewer
-  expect(viewer).toMatchObject({ linked: true, isAuthor: true, isCohost: false, hasProposalRecord: true, endorsed: false, publicRsvp: null })
-})
-
-test('POST …/atproto unauthenticated -> 401; unknown action -> 400', async () => {
-  const res = await fetch(`${BASE_URL}/api/v1/events/${EVENT_SLUG}/sessions/${sessionId}/atproto`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action: 'publish-proposal' }),
+  test('an OAuth-door account must confirm public linkage; custodial accounts need not', async () => {
+    await expect(participant.publishingIdentity(oauthId)).rejects.toMatchObject({ code: 'confirm_public_linkage', status: 409 })
+    await expect(participant.publishingIdentity(oauthId, { confirmPublicLinkage: true })).resolves.toMatchObject({ did: oauthDid, kind: 'oauth' })
+    await expect(participant.publishingIdentity(oauthId, { requireLinkage: false })).resolves.toMatchObject({ did: oauthDid })
+    await expect(participant.publishingIdentity(people.proposer.id)).resolves.toMatchObject({ did: people.proposer.did, kind: 'custodial' })
   })
-  expect(res.status).toBe(401)
 
-  const token = await tokenFor(authorId)
-  const bad = await fetch(`${BASE_URL}/api/v1/events/${EVENT_SLUG}/sessions/${sessionId}/atproto`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action: 'nope' }),
+  test('time windows must be real, ordered instants', () => {
+    expect(participant.normalizeWindows([{ startsAt: '2026-10-01T18:00:00-06:00', endsAt: '2026-10-01T20:00:00-06:00', preference: 1 }], 'windows')).toEqual([
+      { startsAt: '2026-10-02T00:00:00.000Z', endsAt: '2026-10-02T02:00:00.000Z', preference: 1 },
+    ])
+    expect(() => participant.normalizeWindows([{ startsAt: 'tuesday_am', endsAt: 'tuesday_pm' }], 'windows')).toThrow(/ISO 8601/)
+    expect(() => participant.normalizeWindows([{ startsAt: '2026-10-01T20:00:00Z', endsAt: '2026-10-01T18:00:00Z' }], 'windows')).toThrow(/before/)
+    expect(() => participant.normalizeWindows([{ startsAt: '2026-10-01T18:00:00Z', endsAt: '2026-10-01T20:00:00Z', preference: 4 }], 'windows')).toThrow(/preference/)
+    expect(() => participant.normalizeWindows(new Array(41).fill({ startsAt: '2026-10-01T18:00:00Z', endsAt: '2026-10-01T20:00:00Z' }), 'windows')).toThrow(/40/)
   })
-  expect(bad.status).toBe(400)
-})
 
-test('withdrawProposal deletes the record and clears the pointer, keeping the session', async () => {
-  dels.length = 0
-  const before = await sessionRow()
-  const removed = await withdrawProposal({ sessionId, userId: authorId }, deps)
-  expect(removed.uri).toBe(before.proposal_uri)
-  expect(dels).toHaveLength(1)
-  expect(dels[0]).toMatchObject({ repo: AUTHOR_DID, collection: NSID.proposal, rkey: before.proposal_uri!.split('/').pop() })
-  const after = await sessionRow()
-  expect(after.proposal_uri).toBeNull()
-  expect(after.proposal_cid).toBeNull()
-  await expect(withdrawProposal({ sessionId, userId: authorId }, deps)).rejects.toBeInstanceOf(ParticipantError)
-  const { data: still } = await db.from('sessions').select('id, status').eq('id', sessionId).single()
-  expect(still?.status).toBe('approved')
+  test('the proposal is written in the author’s repo, carries the public place label and never the exact address', async () => {
+    await expect(participant.publishProposal({ sessionId, userId: people.friend.id })).rejects.toMatchObject({ code: 'forbidden' })
+    const res = await participant.publishProposal({ sessionId, userId: people.proposer.id })
+    expect(res.uri.startsWith(`at://${people.proposer.did}/schellingpoint.draft.proposal/`)).toBe(true)
+    const record = await live(res.uri)
+    expect(record.body.cid).toBe(res.cid)
+    expect(record.body.value).toMatchObject({ title: 'Seed saving circle', place: 'East Longmont', selfHosted: true, gathering: `at://${FAKE_GATHERING}/schellingpoint.draft.gathering/self` })
+    expect(JSON.stringify(record.body.value)).not.toMatch(/1234|Hidden Garden|80501/)
+
+    // An update is a CAS rewrite of the same record.
+    await raw`update sessions set description = 'Bring a jar and a pencil.' where id = ${sessionId}`
+    const again = await participant.publishProposal({ sessionId, userId: people.proposer.id })
+    expect(again.uri).toBe(res.uri)
+    expect(again.cid).not.toBe(res.cid)
+  })
+
+  test('an endorsement is the endorser’s own record, one per proposal, removable', async () => {
+    await expect(participant.endorse({ sessionId, userId: people.proposer.id })).rejects.toMatchObject({ code: 'forbidden' })
+    const first = await participant.endorse({ sessionId, userId: people.friend.id, note: 'Yes please' })
+    expect(first.uri.startsWith(`at://${people.friend.did}/schellingpoint.draft.endorsement/`)).toBe(true)
+    const second = await participant.endorse({ sessionId, userId: people.friend.id, note: 'Still yes' })
+    expect(second.uri).toBe(first.uri)
+    expect(await participant.countEndorsements((await raw<{ proposal_uri: string }[]>`select proposal_uri from sessions where id = ${sessionId}`)[0]!.proposal_uri)).toBe(1)
+    await participant.unendorse({ sessionId, userId: people.friend.id })
+    expect((await live(first.uri)).status).toBe(400)
+  })
+
+  test('a co-host writes their own record; nobody else can', async () => {
+    await expect(participant.publishCohost({ sessionId, userId: people.friend.id })).rejects.toMatchObject({ code: 'not_cohost' })
+    await raw`insert into session_cohosts (session_id, user_id, event_id) values (${sessionId}, ${people.friend.id}, ${eventId})`
+    const res = await participant.publishCohost({ sessionId, userId: people.friend.id })
+    expect(res.uri.startsWith(`at://${people.friend.did}/schellingpoint.draft.cohost/`)).toBe(true)
+    const record = await live(res.uri)
+    const [s] = await raw<{ proposal_uri: string; proposal_cid: string }[]>`select proposal_uri, proposal_cid from sessions where id = ${sessionId}`
+    expect(record.body.value!.proposal).toEqual({ uri: s!.proposal_uri, cid: s!.proposal_cid })
+    await participant.withdrawCohost({ sessionId, userId: people.friend.id })
+    expect((await live(res.uri)).status).toBe(400)
+  })
+
+  test('a public RSVP is opt-in, strongRefs the calendar event and can be retracted', async () => {
+    const eventUri = `at://${FAKE_GATHERING}/community.lexicon.calendar.event/3lbxyzabc2k2b`
+    await expect(participant.publicRsvp({ sessionId, userId: people.friend.id, status: 'going' })).rejects.toMatchObject({ code: 'calendar_event_not_published' })
+    await raw`update sessions set calendar_event_uri = ${eventUri}, calendar_event_cid = ${CID} where id = ${sessionId}`
+    await expect(participant.publicRsvp({ sessionId, userId: people.friend.id, status: 'going' })).rejects.toMatchObject({ code: 'no_rsvp' })
+    await raw`update sessions set status = 'scheduled' where id = ${sessionId}`
+    await raw`insert into session_rsvps (event_id, session_id, user_id, status) values (${eventId}, ${sessionId}, ${people.friend.id}, 'confirmed')`
+    const res = await participant.publicRsvp({ sessionId, userId: people.friend.id, status: 'interested' })
+    const record = await live(res.uri)
+    expect(record.body.value).toEqual({ $type: 'community.lexicon.calendar.rsvp', subject: { uri: eventUri, cid: CID }, status: 'community.lexicon.calendar.rsvp#interested' })
+    await participant.retractPublicRsvp({ sessionId, userId: people.friend.id })
+    expect((await live(res.uri)).status).toBe(400)
+  })
+
+  test('time preferences stay app-side unless published, and unpublishing deletes the record', async () => {
+    const windows = [{ startsAt: '2026-10-01T16:00:00Z', endsAt: '2026-10-01T18:00:00Z', preference: 1 as const }]
+    const privateOnly = await participant.publishTimePreference({ sessionId, userId: people.proposer.id, windows })
+    expect(privateOnly.record).toBeNull()
+    const published = await participant.publishTimePreference({ sessionId, userId: people.proposer.id, windows, blackouts: [], publish: true })
+    expect(published.record!.uri.startsWith(`at://${people.proposer.did}/schellingpoint.draft.timePreference/`)).toBe(true)
+    const record = await live(published.record!.uri)
+    expect((record.body.value!.windows as unknown[])[0]).toEqual({ startsAt: '2026-10-01T16:00:00.000Z', endsAt: '2026-10-01T18:00:00.000Z', preference: 1 })
+    await participant.publishTimePreference({ sessionId, userId: people.proposer.id, windows, publish: false })
+    expect((await live(published.record!.uri)).status).toBe(400)
+    const [row] = await raw<{ publish: boolean; record_uri: string | null; windows: unknown[] }[]>`select publish, record_uri, windows from time_preferences where session_id = ${sessionId}`
+    expect(row).toMatchObject({ publish: false, record_uri: null })
+    expect(row!.windows).toHaveLength(1)
+    await expect(participant.publishTimePreference({ sessionId, userId: people.friend.id, windows })).rejects.toMatchObject({ code: 'forbidden' })
+  })
+
+  test('withdrawing deletes the author’s record and flags the session without changing it', async () => {
+    const [before] = await raw<{ proposal_uri: string; status: string }[]>`select proposal_uri, status from sessions where id = ${sessionId}`
+    await participant.withdrawProposal({ sessionId, userId: people.proposer.id })
+    expect((await live(before!.proposal_uri)).status).toBe(400)
+    const [after] = await raw<{ status: string; proposal_withdrawn_at: string | null }[]>`select status, proposal_withdrawn_at from sessions where id = ${sessionId}`
+    expect(after!.status).toBe(before!.status)
+    expect(after!.proposal_withdrawn_at).not.toBeNull()
+    await expect(participant.withdrawProposal({ sessionId, userId: people.proposer.id })).rejects.toMatchObject({ code: 'nothing_to_withdraw' })
+  })
 })

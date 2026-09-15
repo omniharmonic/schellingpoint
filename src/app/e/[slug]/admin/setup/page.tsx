@@ -1,77 +1,43 @@
 'use client'
 
-import { parseTimeInTimezone } from '@/lib/events/timezone'
-import { requireSavedRows } from '@/lib/api/saved-rows'
 import * as React from 'react'
 import Link from 'next/link'
-import { useRouter } from 'next/navigation'
 import {
-  Loader2,
-  MapPin,
-  Clock,
-  Plus,
-  Trash2,
-  Edit2,
-  Check,
   Building,
-  Users as UsersIcon,
+  Calendar,
+  Check,
   ChevronDown,
   ChevronUp,
-  Calendar,
+  Clock,
+  Edit2,
+  Globe,
+  Loader2,
+  MapPin,
+  Plus,
+  Trash2,
+  Users as UsersIcon,
   Zap,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
-import { useAuth } from '@/hooks/useAuth'
 import { useEvent, useEventRole } from '@/contexts/EventContext'
-import { getEventDays, getEventDayLabel } from '@/lib/events/dates'
+import { apiFetch, ApiError } from '@/lib/api/client'
+import { getEventDayLabel, getEventDays } from '@/lib/events/dates'
 import { cn } from '@/lib/utils'
 import { BulkSlotGenerator, type GeneratedSlot } from '@/components/admin/BulkSlotGenerator'
+import { networkNotice, type AdminTimeSlot, type AdminVenue, type NetworkSync } from '@/components/admin/types'
 
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-
-function getAccessToken(): string | null {
-  const storageKey = `sb-${new URL(SUPABASE_URL).hostname.split('.')[0]}-auth-token`
-  const stored = localStorage.getItem(storageKey)
-  if (stored) {
-    try {
-      const session = JSON.parse(stored)
-      return session?.access_token || null
-    } catch {
-      return null
-    }
-  }
-  return null
+/** Form values: wall-clock times ("HH:mm") on an event day, in the event timezone. */
+interface SlotInput {
+  venueId: string
+  dayDate: string
+  startTime: string
+  endTime: string
+  label: string
+  slotType: string
 }
-
-interface Venue {
-  id: string
-  name: string
-  slug: string | null
-  capacity: number | null
-  features: string[] | null
-  style: string | null
-  address: string | null
-  is_primary: boolean
-}
-
-interface TimeSlot {
-  id: string
-  label: string | null
-  start_time: string
-  end_time: string
-  is_break: boolean
-  venue_id: string | null
-  day_date: string | null
-  slot_type: string | null
-}
-
-// Form-level slot values: wall-clock times ("HH:mm") on an event day, in the event timezone.
-type SlotInput = GeneratedSlot & { slotType?: string }
 
 const SLOT_TYPE_OPTIONS = [
   { value: 'session', label: 'Session' },
@@ -81,698 +47,480 @@ const SLOT_TYPE_OPTIONS = [
   { value: 'checkin', label: 'Check-in' },
 ]
 
-// Wall-clock parts of a UTC instant in the event timezone; the inverse of parseTimeInTimezone.
+interface VenueForm {
+  name: string
+  slug: string
+  capacity: string
+  features: string
+  address: string
+  locality: string
+  region: string
+  postal_code: string
+  country: string
+  is_private_residence: boolean
+  is_primary: boolean
+}
+
+const EMPTY_VENUE: VenueForm = {
+  name: '', slug: '', capacity: '', features: '', address: '', locality: '', region: '', postal_code: '', country: '',
+  is_private_residence: false, is_primary: false,
+}
+
+/** Wall-clock parts of an instant in the event timezone. */
 function toEventLocalParts(iso: string, timezone: string): { date: string; time: string } {
   const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
   }).formatToParts(new Date(iso))
   const part = (type: string) => parts.find((p) => p.type === type)?.value ?? '00'
   return { date: `${part('year')}-${part('month')}-${part('day')}`, time: `${part('hour')}:${part('minute')}` }
 }
 
+const slotBody = (slot: SlotInput) => ({
+  venue_id: slot.venueId,
+  day_date: slot.dayDate,
+  start: slot.startTime,
+  end: slot.endTime,
+  label: slot.label || null,
+  slot_type: slot.slotType,
+})
+
+const errorText = (e: unknown, fallback: string) => (e instanceof ApiError ? e.message : fallback)
+
 export default function AdminSetupPage() {
-  const router = useRouter()
-  const { user, isLoading: authLoading } = useAuth()
   const event = useEvent()
-  const { isAdmin, isLoading: roleLoading, can } = useEventRole()
+  const { can } = useEventRole()
+  const canManage = can('manageVenues')
+  const base = `/api/v1/events/${event.slug}/admin`
 
-  // Generate event days dynamically from event dates
-  const eventDays = React.useMemo(() => {
-    return getEventDays(event.startDate, event.endDate).map((date) => ({
-      date,
-      label: getEventDayLabel(date, event.timezone),
-    }))
-  }, [event.startDate, event.endDate, event.timezone])
+  const eventDays = React.useMemo(
+    () => getEventDays(event.startDate, event.endDate).map((date) => ({ date, label: getEventDayLabel(date, event.timezone) })),
+    [event.startDate, event.endDate, event.timezone],
+  )
 
-  const [saveError, setSaveError] = React.useState<string | null>(null)
-  const [isSaving, setIsSaving] = React.useState(false)
-  const [venues, setVenues] = React.useState<Venue[]>([])
-  const [timeSlots, setTimeSlots] = React.useState<TimeSlot[]>([])
+  const [venues, setVenues] = React.useState<AdminVenue[]>([])
+  const [timeSlots, setTimeSlots] = React.useState<AdminTimeSlot[]>([])
   const [isLoading, setIsLoading] = React.useState(true)
+  const [isSaving, setIsSaving] = React.useState(false)
+  const [error, setError] = React.useState<string | null>(null)
+  const [status, setStatus] = React.useState<string | null>(null)
 
-  // New venue form state
   const [showVenueForm, setShowVenueForm] = React.useState(false)
-  const [editingVenue, setEditingVenue] = React.useState<Venue | null>(null)
-  const [venueName, setVenueName] = React.useState('')
-  const [venueSlug, setVenueSlug] = React.useState('')
-  const [venueCapacity, setVenueCapacity] = React.useState('')
-  const [venueFeatures, setVenueFeatures] = React.useState('')
-  const [venueAddress, setVenueAddress] = React.useState('')
-  const [venueIsPrimary, setVenueIsPrimary] = React.useState(false)
-
-  // Expanded venues for availability editing
+  const [editingVenue, setEditingVenue] = React.useState<AdminVenue | null>(null)
+  const [venueForm, setVenueForm] = React.useState<VenueForm>(EMPTY_VENUE)
+  const [venueError, setVenueError] = React.useState<string | null>(null)
+  const [confirmDeleteVenue, setConfirmDeleteVenue] = React.useState<string | null>(null)
   const [expandedVenues, setExpandedVenues] = React.useState<Set<string>>(new Set())
-
-  // Bulk slot generator
   const [showBulkGenerator, setShowBulkGenerator] = React.useState(false)
 
-  // Redirect if not admin
   React.useEffect(() => {
-    if (!authLoading && !roleLoading && (!user || !isAdmin)) {
-      router.push(`/e/${event.slug}/sessions`)
-    }
-  }, [user, isAdmin, authLoading, roleLoading, router, event.slug])
+    if (!status) return
+    const timer = window.setTimeout(() => setStatus(null), 5000)
+    return () => window.clearTimeout(timer)
+  }, [status])
 
-  // Fetch data
-  React.useEffect(() => {
-    const fetchData = async () => {
-      const token = getAccessToken()
-      const authHeader = token ? `Bearer ${token}` : `Bearer ${SUPABASE_KEY}`
-
-      try {
-        const [venuesRes, timeSlotsRes] = await Promise.all([
-          fetch(`${SUPABASE_URL}/rest/v1/venues?event_id=eq.${event.id}&select=*&order=is_primary.desc,name`, {
-            headers: {
-              'apikey': SUPABASE_KEY,
-              'Authorization': authHeader,
-            },
-          }),
-          fetch(`${SUPABASE_URL}/rest/v1/time_slots?event_id=eq.${event.id}&select=*&order=start_time`, {
-            headers: {
-              'apikey': SUPABASE_KEY,
-              'Authorization': authHeader,
-            },
-          }),
-        ])
-
-        if (!venuesRes.ok || !timeSlotsRes.ok) throw new Error('Could not load rooms and availability. Refresh to try again.')
-        if (venuesRes.ok) {
-          setVenues(await venuesRes.json())
-        }
-        if (timeSlotsRes.ok) {
-          setTimeSlots(await timeSlotsRes.json())
-        }
-      } catch (err) {
-        setSaveError(err instanceof Error ? err.message : 'Could not load rooms and availability.')
-      } finally {
-        setIsLoading(false)
-      }
-    }
-
-    fetchData()
-  }, [event.id])
-
-  // Get time slots for a venue
-  const getVenueSlots = (venueId: string) => {
-    return timeSlots.filter((slot) => slot.venue_id === venueId)
+  const reportNetwork = (sync: NetworkSync | undefined, success: string) => {
+    const warning = networkNotice(sync)
+    if (warning) setError(warning)
+    else setStatus(success)
   }
 
-  // Venue CRUD operations
-  const handleSaveVenue = async () => {
-    const token = getAccessToken()
-    if (!token) { setSaveError('Please sign in again to save changes.'); return false }
-
-    if (isSaving) return
-    if (!venueName.trim() || (venueCapacity && (!Number.isInteger(Number(venueCapacity)) || Number(venueCapacity) <= 0))) { setSaveError('Enter a room name and a positive whole-number capacity.'); return }
-    setIsSaving(true)
-    setSaveError(null)
-    const features = venueFeatures
-      .split(',')
-      .map((f) => f.trim())
-      .filter((f) => f.length > 0)
-
-    const slug = venueSlug || venueName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')
-
-    const venueData = {
-      name: venueName,
-      slug,
-      capacity: venueCapacity ? parseInt(venueCapacity) : null,
-      features: features.length > 0 ? features : null,
-      address: venueAddress || null,
-      is_primary: venueIsPrimary,
-      event_id: event.id,
-    }
-
+  const load = React.useCallback(async () => {
     try {
-      if (editingVenue) {
-        const response = await fetch(`${SUPABASE_URL}/rest/v1/venues?id=eq.${editingVenue.id}&event_id=eq.${event.id}`, {
-          method: 'PATCH',
-          headers: {
-            'apikey': SUPABASE_KEY,
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json',
-            'Prefer': 'return=representation',
-          },
-          body: JSON.stringify(venueData),
-        })
-
-        const [updated] = await requireSavedRows<Venue>(response)
-        setVenues((prev) => prev.map((v) => (v.id === editingVenue.id ? updated : v)))
-      } else {
-        const response = await fetch(`${SUPABASE_URL}/rest/v1/venues`, {
-          method: 'POST',
-          headers: {
-            'apikey': SUPABASE_KEY,
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json',
-            'Prefer': 'return=representation',
-          },
-          body: JSON.stringify(venueData),
-        })
-
-        const [created] = await requireSavedRows<Venue>(response)
-        setVenues((prev) => [...prev, created])
-      }
-
-      resetVenueForm()
-    } catch (err) {
-      setSaveError(err instanceof Error ? err.message : 'Could not save this room.')
-    } finally { setIsSaving(false) }
-  }
-
-  const handleDeleteVenue = async (id: string) => {
-    const token = getAccessToken()
-    if (!token) { setSaveError('Please sign in again to save changes.'); return false }
-
-    if (!confirm('Delete this venue? All time slots and scheduled sessions will be affected.')) return
-
-    try {
-      const response = await fetch(`${SUPABASE_URL}/rest/v1/venues?id=eq.${id}&event_id=eq.${event.id}`, {
-        method: 'DELETE',
-        headers: {
-          'apikey': SUPABASE_KEY,
-          'Authorization': `Bearer ${token}`,
-          'Prefer': 'return=representation',
-        },
-      })
-
-      await requireSavedRows<Venue>(response)
-      {
-        setVenues((prev) => prev.filter((v) => v.id !== id))
-        setTimeSlots((prev) => prev.filter((s) => s.venue_id !== id))
-      }
-    } catch (err) {
-      setSaveError(err instanceof Error ? err.message : 'Could not remove this room.')
+      const [v, t] = await Promise.all([
+        apiFetch<{ venues: AdminVenue[] }>(`${base}/venues`),
+        apiFetch<{ timeSlots: AdminTimeSlot[] }>(`${base}/time-slots`),
+      ])
+      setVenues(v.venues)
+      setTimeSlots(t.timeSlots)
+    } catch (e) {
+      setError(errorText(e, 'Could not load rooms and availability. Refresh to try again.'))
+    } finally {
+      setIsLoading(false)
     }
-  }
+  }, [base])
 
-  const startEditVenue = (venue: Venue) => {
-    setEditingVenue(venue)
-    setVenueName(venue.name)
-    setVenueSlug(venue.slug || '')
-    setVenueCapacity(venue.capacity?.toString() || '')
-    setVenueFeatures(venue.features?.join(', ') || '')
-    setVenueAddress(venue.address || '')
-    setVenueIsPrimary(venue.is_primary)
-    setShowVenueForm(true)
+  React.useEffect(() => { void load() }, [load])
+
+  const refreshVenues = async () => {
+    const v = await apiFetch<{ venues: AdminVenue[] }>(`${base}/venues`)
+    setVenues(v.venues)
   }
 
   const resetVenueForm = () => {
     setShowVenueForm(false)
     setEditingVenue(null)
-    setVenueName('')
-    setVenueSlug('')
-    setVenueCapacity('')
-    setVenueFeatures('')
-    setVenueAddress('')
-    setVenueIsPrimary(false)
+    setVenueForm(EMPTY_VENUE)
+    setVenueError(null)
   }
 
-  // Time Slot CRUD operations
-  // Validate form input and convert it to a time_slots row (times in the event timezone).
-  const buildTimeSlotRow = (slot: SlotInput) => {
-    if (!venues.some(v => v.id === slot.venueId) || !eventDays.some(day => day.date === slot.dayDate) || !slot.startTime || !slot.endTime || slot.endTime <= slot.startTime) throw new Error('Choose a room, an event day, and an end time after the start time.')
-    const start = parseTimeInTimezone(slot.startTime, slot.dayDate, event.timezone)
-    const end = parseTimeInTimezone(slot.endTime, slot.dayDate, event.timezone)
-    return { venue_id: slot.venueId, event_id: event.id, day_date: slot.dayDate, label: slot.label || null, start_time: start.toISOString(), end_time: end.toISOString(), is_break: slot.isBreak, slot_type: slot.slotType || (slot.isBreak ? 'break' : 'session') }
-  }
-
-  const overlapsSameVenue = (row: Pick<TimeSlot, 'venue_id' | 'start_time' | 'end_time'>, others: Pick<TimeSlot, 'venue_id' | 'start_time' | 'end_time'>[]) =>
-    others.some(other => other.venue_id === row.venue_id && Date.parse(other.start_time) < Date.parse(row.end_time) && Date.parse(row.start_time) < Date.parse(other.end_time))
-
-  const sortByStart = (slots: TimeSlot[]) => [...slots].sort((a, b) => Date.parse(a.start_time) - Date.parse(b.start_time))
-
-  const handleSaveTimeSlots = async (slots: SlotInput[]) => {
-    const token = getAccessToken()
-    if (!token) { setSaveError('Please sign in again to save changes.'); return false }
-    if (isSaving) return false
-    setIsSaving(true)
-    setSaveError(null)
-    try {
-      const rows = slots.map(buildTimeSlotRow)
-      rows.forEach((row,index) => {
-        if (overlapsSameVenue(row, [...timeSlots,...rows.slice(0,index)])) throw new Error('These slots overlap existing availability in the same room. Adjust the times before saving.')
-      })
-      // A single PostgREST insert is transactional: the whole batch succeeds or fails.
-      const response = await fetch(`${SUPABASE_URL}/rest/v1/time_slots`, {
-        method: 'POST', headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Prefer: 'return=representation' },
-        body: JSON.stringify(rows),
-      })
-      const created = await requireSavedRows<TimeSlot>(response)
-      setTimeSlots(prev => sortByStart([...prev,...created]))
-      return true
-    } catch (err) {
-      setSaveError(err instanceof Error ? err.message : 'Could not save this availability.')
-      return false
-    } finally { setIsSaving(false) }
-  }
-
-  const handleAddTimeSlot = (venueId: string, dayDate: string, startTime: string, endTime: string, label: string, slotType: string, isBreak: boolean) =>
-    handleSaveTimeSlots([{venueId,dayDate,startTime,endTime,label,slotType,isBreak}])
-
-  // Update one slot. Resolves to null on success or an error message the form shows inline.
-  const handleUpdateTimeSlot = async (id: string, slot: SlotInput): Promise<string | null> => {
-    const token = getAccessToken()
-    if (!token) return 'Please sign in again to save changes.'
-    if (isSaving) return 'Another change is still saving. Try again in a moment.'
-    setIsSaving(true)
-    try {
-      const row = buildTimeSlotRow(slot)
-      if (overlapsSameVenue(row, timeSlots.filter(s => s.id !== id))) throw new Error('This slot would overlap existing availability in the same room. Adjust the times before saving.')
-      const response = await fetch(`${SUPABASE_URL}/rest/v1/time_slots?id=eq.${id}&event_id=eq.${event.id}`, {
-        method: 'PATCH',
-        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Prefer: 'return=representation' },
-        body: JSON.stringify(row),
-      })
-      const [updated] = await requireSavedRows<TimeSlot>(response)
-      if (updated.id !== id || updated.venue_id !== row.venue_id || Date.parse(updated.start_time) !== Date.parse(row.start_time) || Date.parse(updated.end_time) !== Date.parse(row.end_time)) {
-        throw new Error('The saved slot does not match what you entered. Refresh and try again.')
-      }
-      setTimeSlots(prev => sortByStart(prev.map(s => (s.id === id ? updated : s))))
-      return null
-    } catch (err) {
-      return err instanceof Error ? err.message : 'Could not update this availability.'
-    } finally { setIsSaving(false) }
-  }
-
-  // Number of sessions scheduled in a slot, or null when it could not be checked.
-  const fetchSlotSessionCount = async (slotId: string): Promise<number | null> => {
-    const token = getAccessToken()
-    if (!token) return null
-    try {
-      const response = await fetch(`${SUPABASE_URL}/rest/v1/sessions?time_slot_id=eq.${slotId}&event_id=eq.${event.id}&select=id`, {
-        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${token}` },
-      })
-      if (!response.ok) return null
-      const rows = await response.json()
-      return Array.isArray(rows) ? rows.length : null
-    } catch {
-      return null
-    }
-  }
-
-  const handleDeleteTimeSlot = async (id: string) => {
-    const token = getAccessToken()
-    if (!token) { setSaveError('Please sign in again to save changes.'); return false }
-
-    const sessionCount = await fetchSlotSessionCount(id)
-    if (sessionCount === null) {
-      if (!confirm('Could not check whether sessions are scheduled in this slot. Remove it anyway? Any sessions scheduled here will lose their time.')) return
-    } else if (sessionCount > 0) {
-      if (!confirm(`${sessionCount} ${sessionCount === 1 ? 'session is' : 'sessions are'} scheduled in this slot and will lose ${sessionCount === 1 ? 'its' : 'their'} time if you remove it. Remove this slot?`)) return
-    }
-
-    try {
-      const response = await fetch(`${SUPABASE_URL}/rest/v1/time_slots?id=eq.${id}&event_id=eq.${event.id}`, {
-        method: 'DELETE',
-        headers: {
-          'apikey': SUPABASE_KEY,
-          'Authorization': `Bearer ${token}`,
-          'Prefer': 'return=representation',
-        },
-      })
-
-      await requireSavedRows<TimeSlot>(response)
-      {
-        setTimeSlots((prev) => prev.filter((s) => s.id !== id))
-      }
-    } catch (err) {
-      setSaveError(err instanceof Error ? err.message : 'Could not remove this availability.')
-    }
-  }
-
-  const toggleVenueExpanded = (venueId: string) => {
-    setExpandedVenues((prev) => {
-      const next = new Set(prev)
-      if (next.has(venueId)) {
-        next.delete(venueId)
-      } else {
-        next.add(venueId)
-      }
-      return next
+  const startEditVenue = (venue: AdminVenue) => {
+    setEditingVenue(venue)
+    setVenueForm({
+      name: venue.name,
+      slug: venue.slug ?? '',
+      capacity: venue.capacity?.toString() ?? '',
+      features: venue.features.join(', '),
+      address: venue.address ?? '',
+      locality: venue.locality ?? '',
+      region: venue.region ?? '',
+      postal_code: venue.postal_code ?? '',
+      country: venue.country ?? '',
+      is_private_residence: venue.is_private_residence,
+      is_primary: venue.is_primary,
     })
+    setVenueError(null)
+    setShowVenueForm(true)
   }
 
-  // Bulk generate time slots
+  const saveVenue = async () => {
+    if (isSaving) return
+    setVenueError(null)
+    if (!venueForm.name.trim()) { setVenueError('Enter a room name.'); return }
+    if (venueForm.capacity && (!Number.isInteger(Number(venueForm.capacity)) || Number(venueForm.capacity) <= 0)) {
+      setVenueError('Capacity must be a positive whole number.')
+      return
+    }
+    setIsSaving(true)
+    const body = {
+      name: venueForm.name.trim(),
+      slug: venueForm.slug.trim() || null,
+      capacity: venueForm.capacity ? Number(venueForm.capacity) : null,
+      features: venueForm.features.split(',').map((f) => f.trim()).filter(Boolean),
+      address: venueForm.address.trim() || null,
+      locality: venueForm.locality.trim() || null,
+      region: venueForm.region.trim() || null,
+      postal_code: venueForm.postal_code.trim() || null,
+      country: venueForm.country.trim() || null,
+      is_private_residence: venueForm.is_private_residence,
+      is_primary: venueForm.is_primary,
+    }
+    try {
+      const res = editingVenue
+        ? await apiFetch<{ venue: AdminVenue; network: NetworkSync }>(`${base}/venues/${editingVenue.id}`, { method: 'PATCH', json: body })
+        : await apiFetch<{ venue: AdminVenue; network: NetworkSync }>(`${base}/venues`, { method: 'POST', json: body })
+      await refreshVenues()
+      resetVenueForm()
+      reportNetwork(res.network, editingVenue ? 'Room updated.' : 'Room added.')
+    } catch (e) {
+      setVenueError(errorText(e, 'Could not save this room.'))
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  const deleteVenue = async (id: string) => {
+    setConfirmDeleteVenue(null)
+    setIsSaving(true)
+    setError(null)
+    try {
+      const res = await apiFetch<{ unscheduled: number; network: { venues: NetworkSync; grids: NetworkSync } }>(`${base}/venues/${id}`, { method: 'DELETE' })
+      setVenues((prev) => prev.filter((v) => v.id !== id))
+      setTimeSlots((prev) => prev.filter((t) => t.venue_id !== id))
+      reportNetwork(res.network.venues.error ? res.network.venues : res.network.grids, res.unscheduled
+        ? `Room removed. ${res.unscheduled} session${res.unscheduled === 1 ? '' : 's'} went back to the unscheduled tray.`
+        : 'Room removed.')
+    } catch (e) {
+      setError(errorText(e, 'Could not remove this room.'))
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  const createSlots = async (slots: SlotInput[]): Promise<string | null> => {
+    if (isSaving) return 'Another change is still saving.'
+    setIsSaving(true)
+    setError(null)
+    try {
+      const res = await apiFetch<{ timeSlots: AdminTimeSlot[]; network: NetworkSync }>(`${base}/time-slots`, {
+        method: 'POST',
+        json: { slots: slots.map(slotBody) },
+      })
+      setTimeSlots((prev) => [...prev, ...res.timeSlots].sort((a, b) => Date.parse(a.start_time) - Date.parse(b.start_time)))
+      await refreshVenues()
+      reportNetwork(res.network, `Saved ${res.timeSlots.length} time slot${res.timeSlots.length === 1 ? '' : 's'}.`)
+      return null
+    } catch (e) {
+      return errorText(e, 'Could not save this availability.')
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  /** Resolves to null on success, or a message; `needsConfirm` carries the sessions that would move. */
+  const updateSlot = async (id: string, slot: SlotInput, confirmAssigned: boolean): Promise<{ error: string | null; needsConfirm?: boolean }> => {
+    if (isSaving) return { error: 'Another change is still saving.' }
+    setIsSaving(true)
+    try {
+      const res = await apiFetch<{ timeSlot: AdminTimeSlot; network: NetworkSync }>(`${base}/time-slots/${id}`, {
+        method: 'PATCH',
+        json: { ...slotBody(slot), confirm_assigned: confirmAssigned },
+      })
+      setTimeSlots((prev) => prev.map((t) => (t.id === id ? res.timeSlot : t)).sort((a, b) => Date.parse(a.start_time) - Date.parse(b.start_time)))
+      await refreshVenues()
+      reportNetwork(res.network, 'Time slot updated.')
+      return { error: null }
+    } catch (e) {
+      if (e instanceof ApiError && e.code === 'SlotHasSessions') return { error: e.message, needsConfirm: true }
+      return { error: errorText(e, 'Could not update this availability.') }
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  const deleteSlot = async (id: string, confirmed: boolean): Promise<{ error: string | null; needsConfirm?: boolean }> => {
+    if (isSaving) return { error: 'Another change is still saving.' }
+    setIsSaving(true)
+    try {
+      const res = await apiFetch<{ unscheduled: number; network: NetworkSync }>(`${base}/time-slots/${id}${confirmed ? '?confirm=1' : ''}`, { method: 'DELETE' })
+      setTimeSlots((prev) => prev.filter((t) => t.id !== id))
+      await refreshVenues()
+      reportNetwork(res.network, res.unscheduled ? `Slot removed; ${res.unscheduled} session${res.unscheduled === 1 ? '' : 's'} went back to the tray.` : 'Slot removed.')
+      return { error: null }
+    } catch (e) {
+      if (e instanceof ApiError && e.code === 'SlotHasSessions') return { error: e.message, needsConfirm: true }
+      return { error: errorText(e, 'Could not remove this availability.') }
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
   const handleBulkGenerate = async (slots: GeneratedSlot[]) => {
-    if (await handleSaveTimeSlots(slots)) setShowBulkGenerator(false)
+    const message = await createSlots(slots.map((s) => ({ venueId: s.venueId, dayDate: s.dayDate, startTime: s.startTime, endTime: s.endTime, label: s.label, slotType: s.isBreak ? 'break' : 'session' })))
+    if (message) setError(message)
+    else setShowBulkGenerator(false)
   }
 
-  if (authLoading || roleLoading || isLoading) {
-    return (
-      <div className="flex items-center justify-center py-12">
-        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-      </div>
-    )
+  if (isLoading) {
+    return <div className="flex items-center justify-center py-12" role="status" aria-label="Loading"><Loader2 className="h-8 w-8 animate-spin text-muted-foreground" /></div>
   }
 
-  if (!isAdmin) {
-    return null
-  }
+  const field = (key: keyof VenueForm, label: string, props: React.InputHTMLAttributes<HTMLInputElement> = {}) => (
+    <div className="space-y-2">
+      <label htmlFor={`venue-${key}`} className="text-sm font-medium">{label}</label>
+      <Input
+        id={`venue-${key}`}
+        value={venueForm[key] as string}
+        onChange={(e) => setVenueForm((f) => ({ ...f, [key]: e.target.value }))}
+        {...props}
+      />
+    </div>
+  )
 
   return (
-        <div className="space-y-6">
-      {saveError && <div role="alert" className="rounded-xl border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">{saveError}</div>}
+    <div className="space-y-6">
+      {error && <div role="alert" className="rounded-xl border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">{error}</div>}
+      {status && <div role="status" className="rounded-xl border border-primary/30 bg-card p-4 text-sm">{status}</div>}
 
-<div><h1 className="font-semibold">Spaces & times</h1><p className="text-muted-foreground mt-2">Give your gathering a place to happen.</p></div>
-          {/* Info Card */}
-          <Card className="bg-muted/30">
-            <CardContent className="py-4">
-              <p className="text-sm text-muted-foreground">
-                Configure venues and their availability windows. Each venue can have different time slots for each day.
-                Once configured, use the <Link href={`/e/${event.slug}/admin/schedule`} className="text-primary hover:underline font-medium">Schedule Builder</Link> to assign sessions to slots.
-              </p>
-            </CardContent>
-          </Card>
+      <div>
+        <h1 className="font-semibold">Spaces &amp; times</h1>
+        <p className="text-muted-foreground mt-2">Give your gathering a place to happen.</p>
+      </div>
 
-          {/* Add Venue Button */}
-          <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3">
-            <h2 className="text-lg font-semibold flex items-center gap-2">
-              <MapPin className="h-5 w-5" />
-              Venues & Availability
-            </h2>
-            {can('manageVenues') && (
-              <div className="flex gap-2">
-                <Button onClick={() => setShowVenueForm(true)} disabled={showVenueForm} className="flex-1 sm:flex-none">
-                  <Plus className="h-4 w-4 mr-2" />
-                  Add Venue
-                </Button>
-                {venues.length > 0 && (
-                  <Button
-                    variant="outline"
-                    onClick={() => setShowBulkGenerator(true)}
-                    disabled={showBulkGenerator}
-                    className="flex-1 sm:flex-none"
-                  >
-                    <Zap className="h-4 w-4 mr-2" />
-                    <span className="hidden sm:inline">Bulk Generate Slots</span>
-                    <span className="sm:hidden">Bulk Slots</span>
-                  </Button>
-                )}
-              </div>
+      <Card className="bg-muted/30">
+        <CardContent className="py-4">
+          <p className="text-sm text-muted-foreground">
+            Add rooms and their availability. Times are in the event&rsquo;s timezone ({event.timezone}). Then use the{' '}
+            <Link href={`/e/${event.slug}/admin/schedule`} className="text-primary hover:underline font-medium">Schedule builder</Link> to place sessions.
+          </p>
+        </CardContent>
+      </Card>
+
+      <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3">
+        <h2 className="text-lg font-semibold flex items-center gap-2"><MapPin className="h-5 w-5" />Rooms &amp; availability</h2>
+        {canManage && (
+          <div className="flex gap-2">
+            <Button onClick={() => { resetVenueForm(); setShowVenueForm(true) }} disabled={showVenueForm} className="flex-1 sm:flex-none"><Plus className="h-4 w-4 mr-2" />Add room</Button>
+            {venues.length > 0 && (
+              <Button variant="outline" onClick={() => setShowBulkGenerator(true)} disabled={showBulkGenerator} className="flex-1 sm:flex-none">
+                <Zap className="h-4 w-4 mr-2" />
+                <span className="hidden sm:inline">Generate slots</span>
+                <span className="sm:hidden">Slots</span>
+              </Button>
             )}
           </div>
+        )}
+      </div>
 
-          {/* Bulk Slot Generator */}
-          {showBulkGenerator && venues.length > 0 && (
-            <Card className="border-primary/50">
-              <CardHeader>
-                <CardTitle className="text-lg">Bulk Generate Time Slots</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <BulkSlotGenerator
-                  venues={venues.map(v => ({ id: v.id, name: v.name, capacity: v.capacity }))}
-                  eventDays={eventDays}
-                  onGenerate={handleBulkGenerate}
-                  isSaving={isSaving}
-                  onCancel={() => setShowBulkGenerator(false)}
-                />
-              </CardContent>
-            </Card>
-          )}
+      {showBulkGenerator && venues.length > 0 && (
+        <Card className="border-primary/50">
+          <CardHeader><CardTitle className="text-lg">Generate time slots</CardTitle></CardHeader>
+          <CardContent>
+            <BulkSlotGenerator
+              venues={venues.map((v) => ({ id: v.id, name: v.name, capacity: v.capacity }))}
+              eventDays={eventDays}
+              onGenerate={handleBulkGenerate}
+              isSaving={isSaving}
+              onCancel={() => setShowBulkGenerator(false)}
+            />
+          </CardContent>
+        </Card>
+      )}
 
-          {/* Venue Form */}
-          {showVenueForm && (
-            <Card className="border-primary/50">
-              <CardHeader>
-                <CardTitle className="text-lg">
-                  {editingVenue ? 'Edit Venue' : 'New Venue'}
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium">Name *</label>
-                    <Input
-                      placeholder="e.g., E-Town Hall"
-                      value={venueName}
-                      onChange={(e) => setVenueName(e.target.value)}
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium">Slug</label>
-                    <Input
-                      placeholder="e.g., etown (auto-generated if empty)"
-                      value={venueSlug}
-                      onChange={(e) => setVenueSlug(e.target.value)}
-                    />
-                  </div>
-                </div>
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium">Capacity</label>
-                    <Input
-                      type="number"
-                      placeholder="e.g., 100"
-                      value={venueCapacity}
-                      onChange={(e) => setVenueCapacity(e.target.value)}
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium">Type</label>
-                    <div className="flex items-center gap-3 h-10">
-                      <label className="flex items-center gap-2 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={venueIsPrimary}
-                          onChange={(e) => setVenueIsPrimary(e.target.checked)}
-                          className="rounded"
-                        />
-                        <span className="text-sm">Primary Venue (main stage)</span>
-                      </label>
+      {showVenueForm && (
+        <Card className="border-primary/50">
+          <CardHeader><CardTitle className="text-lg">{editingVenue ? 'Edit room' : 'New room'}</CardTitle></CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-4 sm:grid-cols-2">
+              {field('name', 'Name *', { placeholder: 'e.g., Main Hall', maxLength: 100 })}
+              {field('slug', 'Short name', { placeholder: 'Generated from the name if empty', maxLength: 60 })}
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              {field('capacity', 'Capacity', { type: 'number', min: 1, placeholder: 'e.g., 100' })}
+              <div className="space-y-2">
+                <span className="text-sm font-medium">Type</span>
+                <label className="flex items-center gap-2 h-10 cursor-pointer">
+                  <input type="checkbox" checked={venueForm.is_primary} onChange={(e) => setVenueForm((f) => ({ ...f, is_primary: e.target.checked }))} className="rounded" />
+                  <span className="text-sm">Primary room (main stage)</span>
+                </label>
+              </div>
+            </div>
+            {field('address', 'Street address', { placeholder: 'e.g., 1600 Walnut St', maxLength: 300 })}
+            <div className="grid gap-4 grid-cols-2 sm:grid-cols-4">
+              {field('locality', 'City or neighbourhood', { maxLength: 100 })}
+              {field('region', 'Region', { maxLength: 100 })}
+              {field('postal_code', 'Postal code', { maxLength: 20 })}
+              {field('country', 'Country (2 letters)', { maxLength: 2, placeholder: 'US' })}
+            </div>
+            <label className="flex items-start gap-2 text-sm cursor-pointer">
+              <input type="checkbox" checked={venueForm.is_private_residence} onChange={(e) => setVenueForm((f) => ({ ...f, is_private_residence: e.target.checked }))} className="rounded mt-0.5" />
+              <span>This is a private home. <span className="text-muted-foreground">The public calendar shows only the city or neighbourhood, never the street address.</span></span>
+            </label>
+            {field('features', 'Features (comma-separated)', { placeholder: 'e.g., projector, whiteboard, round tables' })}
+            {venueError && <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">{venueError}</p>}
+            <div className="flex gap-2 justify-end">
+              <Button variant="outline" onClick={resetVenueForm} disabled={isSaving}>Cancel</Button>
+              <Button onClick={() => void saveVenue()} disabled={!venueForm.name.trim() || isSaving}>
+                {isSaving ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Check className="h-4 w-4 mr-2" />}
+                {editingVenue ? 'Update' : 'Create'}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      <div className="space-y-4">
+        {venues.map((venue) => {
+          const venueSlots = timeSlots.filter((t) => t.venue_id === venue.id)
+          const isExpanded = expandedVenues.has(venue.id)
+          return (
+            <Card key={venue.id}>
+              <CardContent className="p-4">
+                <div className="space-y-3">
+                  <div className="space-y-2 flex-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <Building className="h-5 w-5 text-primary flex-shrink-0" aria-hidden />
+                      <h3 className="font-semibold">{venue.name}</h3>
+                      {venue.is_primary && <Badge variant="default" className="text-xs">Primary</Badge>}
+                      {venue.is_private_residence && <Badge variant="outline" className="text-xs">Private home</Badge>}
+                      {venue.network_published && <Badge variant="outline" className="text-xs gap-1"><Globe className="h-3 w-3" />On the network</Badge>}
                     </div>
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">Address</label>
-                  <Input
-                    placeholder="e.g., 1600 Walnut St, Boulder, CO 80302"
-                    value={venueAddress}
-                    onChange={(e) => setVenueAddress(e.target.value)}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">Features (comma-separated)</label>
-                  <Input
-                    placeholder="e.g., projector, whiteboard, round tables"
-                    value={venueFeatures}
-                    onChange={(e) => setVenueFeatures(e.target.value)}
-                  />
-                </div>
-                <div className="flex gap-2 justify-end">
-                  <Button variant="outline" onClick={resetVenueForm}>
-                    Cancel
-                  </Button>
-                  <Button onClick={handleSaveVenue} disabled={!venueName.trim() || isSaving}>
-                    <Check className="h-4 w-4 mr-2" />
-                    {editingVenue ? 'Update' : 'Create'}
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
-          )}
-
-          {/* Venues List with Availability */}
-          <div className="space-y-4">
-            {venues.map((venue) => {
-              const venueSlots = getVenueSlots(venue.id)
-              const isExpanded = expandedVenues.has(venue.id)
-
-              return (
-                <Card key={venue.id}>
-                  <CardContent className="p-4">
-                    <div className="space-y-3">
-                      <div className="space-y-2 flex-1">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <Building className="h-5 w-5 text-primary flex-shrink-0" />
-                          <h3 className="font-semibold">{venue.name}</h3>
-                          {venue.is_primary && (
-                            <Badge variant="default" className="text-xs">Primary</Badge>
-                          )}
-                          {venue.slug && (
-                            <Badge variant="outline" className="text-xs hidden sm:inline-flex">{venue.slug}</Badge>
-                          )}
-                        </div>
-                        <div className="flex items-center gap-3 sm:gap-4 text-sm text-muted-foreground flex-wrap">
-                          {venue.capacity && (
-                            <span className="flex items-center gap-1">
-                              <UsersIcon className="h-4 w-4" />
-                              {venue.capacity} cap
-                            </span>
-                          )}
-                          <span className="flex items-center gap-1">
-                            <Clock className="h-4 w-4" />
-                            {venueSlots.length} slots
-                          </span>
-                        </div>
-                        {venue.features && venue.features.length > 0 && (
-                          <div className="flex flex-wrap gap-1">
-                            {venue.features.map((feature) => (
-                              <Badge key={feature} variant="secondary" className="text-xs">
-                                {feature}
-                              </Badge>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                      <div className="flex gap-1 flex-wrap sm:flex-nowrap pt-2 border-t">
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => toggleVenueExpanded(venue.id)}
-                          className="flex-1 sm:flex-none"
-                        >
-                          <Calendar className="h-4 w-4 mr-1" />
-                          <span className="hidden sm:inline">Availability</span>
-                          <span className="sm:hidden">Slots</span>
-                          {isExpanded ? (
-                            <ChevronUp className="h-4 w-4 ml-1" />
-                          ) : (
-                            <ChevronDown className="h-4 w-4 ml-1" />
-                          )}
-                        </Button>
-                        {can('manageVenues') && (
-                          <>
-                            <Button size="icon" variant="ghost" onClick={() => startEditVenue(venue)} className="h-9 w-9">
-                              <Edit2 className="h-4 w-4" />
-                            </Button>
-                            <Button
-                              size="icon"
-                              variant="ghost"
-                              className="text-destructive hover:text-destructive h-9 w-9"
-                              onClick={() => handleDeleteVenue(venue.id)}
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </Button>
-                          </>
-                        )}
-                      </div>
+                    <div className="flex items-center gap-3 sm:gap-4 text-sm text-muted-foreground flex-wrap">
+                      {venue.capacity && <span className="flex items-center gap-1"><UsersIcon className="h-4 w-4" />{venue.capacity} cap</span>}
+                      <span className="flex items-center gap-1"><Clock className="h-4 w-4" />{venue.slot_count} slots</span>
+                      <span>{venue.scheduled_count} scheduled</span>
                     </div>
-
-                    {/* Expanded Availability Section */}
-                    {isExpanded && (
-                      <div className="mt-4 pt-4 border-t">
-                        <VenueAvailabilityEditor
-                          venue={venue}
-                          venues={venues}
-                          slots={venueSlots}
-                          eventDays={eventDays}
-                          canManage={can('manageVenues')}
-                          isSaving={isSaving}
-                          onAddSlot={handleAddTimeSlot}
-                          onUpdateSlot={handleUpdateTimeSlot}
-                          onDeleteSlot={handleDeleteTimeSlot}
-                          onCountSessions={fetchSlotSessionCount}
-                        />
-                      </div>
+                    {venue.features.length > 0 && (
+                      <div className="flex flex-wrap gap-1">{venue.features.map((feature) => <Badge key={feature} variant="secondary" className="text-xs">{feature}</Badge>)}</div>
                     )}
-                  </CardContent>
-                </Card>
-              )
-            })}
-          </div>
-
-          {venues.length === 0 && !showVenueForm && (
-            <Card>
-              <CardContent className="py-12 text-center">
-                <MapPin className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
-                <h3 className="font-semibold mb-2">No venues configured</h3>
-                <p className="text-muted-foreground mb-4">
-                  Add your first venue to start setting up the schedule
-                </p>
-                {can('manageVenues') && (
-                  <Button onClick={() => setShowVenueForm(true)}>
-                    <Plus className="h-4 w-4 mr-2" />
-                    Add Venue
-                  </Button>
+                  </div>
+                  {confirmDeleteVenue === venue.id ? (
+                    <div role="alertdialog" aria-label={`Remove ${venue.name}`} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm">
+                      <span>Remove {venue.name} and its {venue.slot_count} time slot{venue.slot_count === 1 ? '' : 's'}?{venue.scheduled_count ? ` ${venue.scheduled_count} scheduled session${venue.scheduled_count === 1 ? '' : 's'} will go back to the tray.` : ''}</span>
+                      <div className="flex gap-2">
+                        <Button size="sm" variant="outline" onClick={() => setConfirmDeleteVenue(null)}>Keep</Button>
+                        <Button size="sm" variant="destructive" onClick={() => void deleteVenue(venue.id)} disabled={isSaving}>Remove</Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex gap-1 flex-wrap sm:flex-nowrap pt-2 border-t">
+                      <Button size="sm" variant="ghost" onClick={() => setExpandedVenues((prev) => { const next = new Set(prev); if (next.has(venue.id)) next.delete(venue.id); else next.add(venue.id); return next })} className="flex-1 sm:flex-none" aria-expanded={isExpanded}>
+                        <Calendar className="h-4 w-4 mr-1" />
+                        Availability
+                        {isExpanded ? <ChevronUp className="h-4 w-4 ml-1" /> : <ChevronDown className="h-4 w-4 ml-1" />}
+                      </Button>
+                      {canManage && (
+                        <>
+                          <Button size="icon" variant="ghost" onClick={() => startEditVenue(venue)} className="h-9 w-9" aria-label={`Edit ${venue.name}`}><Edit2 className="h-4 w-4" /></Button>
+                          <Button size="icon" variant="ghost" className="text-destructive hover:text-destructive h-9 w-9" onClick={() => setConfirmDeleteVenue(venue.id)} aria-label={`Remove ${venue.name}`}><Trash2 className="h-4 w-4" /></Button>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+                {isExpanded && (
+                  <div className="mt-4 pt-4 border-t">
+                    <VenueAvailabilityEditor
+                      venue={venue}
+                      venues={venues}
+                      slots={venueSlots}
+                      eventDays={eventDays}
+                      timezone={event.timezone}
+                      canManage={canManage}
+                      isSaving={isSaving}
+                      onCreate={createSlots}
+                      onUpdate={updateSlot}
+                      onDelete={deleteSlot}
+                    />
+                  </div>
                 )}
               </CardContent>
             </Card>
-          )}
-        </div>
+          )
+        })}
+      </div>
+
+      {venues.length === 0 && !showVenueForm && (
+        <Card>
+          <CardContent className="py-12 text-center">
+            <MapPin className="h-12 w-12 mx-auto text-muted-foreground mb-4" aria-hidden />
+            <h3 className="font-semibold mb-2">No rooms yet</h3>
+            <p className="text-muted-foreground mb-4">Add your first room to start building the schedule</p>
+            {canManage && <Button onClick={() => setShowVenueForm(true)}><Plus className="h-4 w-4 mr-2" />Add room</Button>}
+          </CardContent>
+        </Card>
+      )}
+    </div>
   )
 }
 
-// Venue availability editor component
 function VenueAvailabilityEditor({
   venue,
   venues,
   slots,
   eventDays,
+  timezone,
   canManage,
   isSaving,
-  onAddSlot,
-  onUpdateSlot,
-  onDeleteSlot,
-  onCountSessions,
+  onCreate,
+  onUpdate,
+  onDelete,
 }: {
-  venue: Venue
-  venues: Venue[]
-  slots: TimeSlot[]
+  venue: AdminVenue
+  venues: AdminVenue[]
+  slots: AdminTimeSlot[]
   eventDays: { date: string; label: string }[]
+  timezone: string
   canManage: boolean
   isSaving: boolean
-  onAddSlot: (venueId: string, dayDate: string, startTime: string, endTime: string, label: string, slotType: string, isBreak: boolean) => Promise<boolean>
-  onUpdateSlot: (id: string, slot: SlotInput) => Promise<string | null>
-  onDeleteSlot: (id: string) => void
-  onCountSessions: (slotId: string) => Promise<number | null>
+  onCreate: (slots: SlotInput[]) => Promise<string | null>
+  onUpdate: (id: string, slot: SlotInput, confirmAssigned: boolean) => Promise<{ error: string | null; needsConfirm?: boolean }>
+  onDelete: (id: string, confirmed: boolean) => Promise<{ error: string | null; needsConfirm?: boolean }>
 }) {
-  const event = useEvent()
-  const [isAdding, setIsAdding] = React.useState(false)
   const [selectedDay, setSelectedDay] = React.useState(eventDays[0]?.date || '')
   const [showAddForm, setShowAddForm] = React.useState(false)
-  const [editingSlot, setEditingSlot] = React.useState<TimeSlot | null>(null)
-  const [editingSessionCount, setEditingSessionCount] = React.useState<number | null>(null)
+  const [addError, setAddError] = React.useState<string | null>(null)
+  const [editingSlot, setEditingSlot] = React.useState<AdminTimeSlot | null>(null)
   const [editError, setEditError] = React.useState<string | null>(null)
-  // Id of the slot whose session count is being fetched, so a late response is ignored.
-  const editingIdRef = React.useRef<string | null>(null)
+  const [editNeedsConfirm, setEditNeedsConfirm] = React.useState(false)
+  const [deleting, setDeleting] = React.useState<{ id: string; message: string | null; needsConfirm: boolean } | null>(null)
 
-  const daySlots = slots
-    .filter((s) => s.day_date === selectedDay)
-    .sort((a, b) => new Date(a.start_time).getTime() - new Date(b.start_time).getTime())
-
-  const handleAdd = async (input: SlotInput) => {
-    if (isAdding) return
-    setIsAdding(true)
-    const saved = await onAddSlot(input.venueId, input.dayDate, input.startTime, input.endTime, input.label, input.slotType || 'session', input.isBreak)
-    setIsAdding(false)
-    if (saved) setShowAddForm(false)
-  }
-
-  const startEditSlot = async (slot: TimeSlot) => {
-    setShowAddForm(false)
-    setEditError(null)
-    setEditingSessionCount(null)
-    setEditingSlot(slot)
-    editingIdRef.current = slot.id
-    const count = await onCountSessions(slot.id)
-    if (editingIdRef.current === slot.id) setEditingSessionCount(count)
-  }
-
-  const cancelEdit = () => {
-    editingIdRef.current = null
-    setEditingSlot(null)
-    setEditingSessionCount(null)
-    setEditError(null)
-  }
-
-  const handleUpdate = async (input: SlotInput) => {
-    if (!editingSlot) return
-    setEditError(null)
-    const error = await onUpdateSlot(editingSlot.id, input)
-    if (error) { setEditError(error); return }
-    cancelEdit()
-  }
-
-  const formatTime = (dateStr: string) => {
-    return new Date(dateStr).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZone: event.timezone })
-  }
+  const daySlots = slots.filter((s) => s.day_date === selectedDay).sort((a, b) => Date.parse(a.start_time) - Date.parse(b.start_time))
+  const formatTime = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZone: timezone })
 
   const editingInitial = React.useMemo<SlotInput | null>(() => {
     if (!editingSlot) return null
-    const start = toEventLocalParts(editingSlot.start_time, event.timezone)
-    const end = toEventLocalParts(editingSlot.end_time, event.timezone)
+    const start = toEventLocalParts(editingSlot.start_time, timezone)
+    const end = toEventLocalParts(editingSlot.end_time, timezone)
     return {
       venueId: editingSlot.venue_id || venue.id,
       dayDate: editingSlot.day_date || start.date,
@@ -780,126 +528,125 @@ function VenueAvailabilityEditor({
       endTime: end.time,
       label: editingSlot.label || '',
       slotType: editingSlot.slot_type || (editingSlot.is_break ? 'break' : 'session'),
-      isBreak: editingSlot.is_break,
     }
-  }, [editingSlot, event.timezone, venue.id])
+  }, [editingSlot, timezone, venue.id])
+
+  const cancelEdit = () => {
+    setEditingSlot(null)
+    setEditError(null)
+    setEditNeedsConfirm(false)
+  }
+
+  const submitEdit = async (input: SlotInput) => {
+    if (!editingSlot) return
+    const res = await onUpdate(editingSlot.id, input, editNeedsConfirm)
+    if (res.error) {
+      setEditError(res.error)
+      setEditNeedsConfirm(Boolean(res.needsConfirm))
+      return
+    }
+    cancelEdit()
+  }
+
+  const submitAdd = async (input: SlotInput) => {
+    setAddError(null)
+    const message = await onCreate([input])
+    if (message) setAddError(message)
+    else setShowAddForm(false)
+  }
+
+  const requestDelete = async (slot: AdminTimeSlot, confirmed: boolean) => {
+    if (!confirmed) {
+      setDeleting({
+        id: slot.id,
+        needsConfirm: slot.sessions.length > 0,
+        message: slot.sessions.length > 0
+          ? `${slot.sessions.length} session${slot.sessions.length === 1 ? ' is' : 's are'} scheduled here (${slot.sessions.map((s) => s.title).join(', ')}) and will go back to the tray.`
+          : null,
+      })
+      return
+    }
+    const res = await onDelete(slot.id, deleting?.needsConfirm ?? false)
+    if (res.error) setDeleting({ id: slot.id, message: res.error, needsConfirm: Boolean(res.needsConfirm) })
+    else setDeleting(null)
+  }
 
   return (
     <div className="space-y-4">
-      {/* Day Tabs */}
       <div className="flex items-center gap-2 overflow-x-auto pb-1 -mx-1 px-1">
         {eventDays.map((day) => (
-          <Button
-            key={day.date}
-            variant={selectedDay === day.date ? 'default' : 'outline'}
-            size="sm"
-            onClick={() => setSelectedDay(day.date)}
-            className="whitespace-nowrap flex-shrink-0"
-          >
-            {day.label}
-          </Button>
+          <Button key={day.date} variant={selectedDay === day.date ? 'default' : 'outline'} size="sm" onClick={() => setSelectedDay(day.date)} aria-pressed={selectedDay === day.date} className="whitespace-nowrap flex-shrink-0">{day.label}</Button>
         ))}
       </div>
 
-      {/* Slots for selected day */}
       <div className="space-y-2">
         {daySlots.length === 0 ? (
-          <p className="text-sm text-muted-foreground py-4 text-center">
-            No time slots for this day. Add availability windows below.
-          </p>
+          <p className="text-sm text-muted-foreground py-4 text-center">No time slots for this day. Add availability below.</p>
         ) : (
           daySlots.map((slot) =>
             editingSlot?.id === slot.id && editingInitial ? (
-              <SlotForm
-                key={slot.id}
-                mode="edit"
-                initial={editingInitial}
-                venues={venues}
-                eventDays={eventDays}
-                isSaving={isSaving}
-                error={editError}
-                sessionCount={editingSessionCount}
-                onSubmit={handleUpdate}
-                onCancel={cancelEdit}
-              />
+              <SlotForm key={slot.id} mode="edit" initial={editingInitial} venues={venues} eventDays={eventDays} isSaving={isSaving} error={editError} confirmLabel={editNeedsConfirm ? 'Confirm and save' : undefined} sessionTitles={slot.sessions.map((s) => s.title)} onSubmit={submitEdit} onCancel={cancelEdit} />
             ) : (
-              <div
-                key={slot.id}
-                className={cn(
-                  'flex items-center justify-between p-3 rounded-lg border gap-2',
-                  slot.is_break ? 'bg-amber-50 dark:bg-amber-950/20 border-amber-200 dark:border-amber-800' : 'bg-muted/30'
-                )}
-              >
-                <div className="flex items-center gap-2 sm:gap-3 flex-wrap flex-1 min-w-0">
-                  <div className="text-sm whitespace-nowrap">
-                    {formatTime(slot.start_time)} - {formatTime(slot.end_time)}
+              <div key={slot.id} className={cn('rounded-lg border p-3 space-y-2', slot.is_break ? 'bg-amber-50 dark:bg-amber-950/20 border-amber-200 dark:border-amber-800' : 'bg-muted/30')}>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 sm:gap-3 flex-wrap flex-1 min-w-0">
+                    <div className="text-sm whitespace-nowrap">{formatTime(slot.start_time)} - {formatTime(slot.end_time)}</div>
+                    <Badge variant={slot.is_break ? 'secondary' : 'outline'} className="text-xs capitalize">{slot.is_break ? 'Break' : slot.slot_type || 'session'}</Badge>
+                    {slot.label && <span className="text-sm text-muted-foreground truncate">{slot.label}</span>}
+                    {slot.sessions.length > 0 && <span className="text-xs text-muted-foreground truncate">· {slot.sessions.map((s) => s.title).join(', ')}</span>}
                   </div>
-                  <Badge variant={slot.is_break ? 'secondary' : 'outline'} className="text-xs">
-                    {slot.is_break ? 'Break' : slot.slot_type || 'session'}
-                  </Badge>
-                  {slot.label && (
-                    <span className="text-sm text-muted-foreground truncate">{slot.label}</span>
+                  {canManage && (
+                    <div className="flex gap-1 flex-shrink-0">
+                      <Button size="icon" variant="ghost" className="h-9 w-9" onClick={() => { setShowAddForm(false); setDeleting(null); setEditError(null); setEditNeedsConfirm(false); setEditingSlot(slot) }} disabled={isSaving} aria-label={`Edit ${formatTime(slot.start_time)} slot`}><Edit2 className="h-4 w-4" /></Button>
+                      <Button size="icon" variant="ghost" className="h-9 w-9 text-destructive hover:text-destructive" onClick={() => void requestDelete(slot, false)} disabled={isSaving} aria-label={`Remove ${formatTime(slot.start_time)} slot`}><Trash2 className="h-4 w-4" /></Button>
+                    </div>
                   )}
                 </div>
-                {canManage && (
-                  <div className="flex gap-1 flex-shrink-0">
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="h-9 w-9"
-                      onClick={() => startEditSlot(slot)}
-                      disabled={isSaving}
-                      aria-label={`Edit ${formatTime(slot.start_time)} slot`}
-                    >
-                      <Edit2 className="h-4 w-4" />
-                    </Button>
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="h-9 w-9 text-destructive hover:text-destructive"
-                      onClick={() => onDeleteSlot(slot.id)}
-                      disabled={isSaving}
-                      aria-label={`Remove ${formatTime(slot.start_time)} slot`}
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
+                {deleting?.id === slot.id && (
+                  <div role="alertdialog" aria-label="Remove time slot" className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-2 text-sm">
+                    <span>{deleting.message ?? 'Remove this time slot?'}</span>
+                    <div className="flex gap-2">
+                      <Button size="sm" variant="outline" onClick={() => setDeleting(null)}>Keep</Button>
+                      <Button size="sm" variant="destructive" onClick={() => void requestDelete(slot, true)} disabled={isSaving}>Remove</Button>
+                    </div>
                   </div>
                 )}
               </div>
-            )
+            ),
           )
         )}
       </div>
 
-      {/* Add slot form */}
-      {canManage && (
-        <>
-          {showAddForm ? (
-            <SlotForm
-              mode="add"
-              initial={{ venueId: venue.id, dayDate: selectedDay, startTime: '09:00', endTime: '10:00', label: '', slotType: 'session', isBreak: false }}
-              venues={venues}
-              eventDays={eventDays}
-              isSaving={isAdding || isSaving}
-              error={null}
-              sessionCount={null}
-              onSubmit={handleAdd}
-              onCancel={() => setShowAddForm(false)}
-            />
-          ) : (
-            <Button variant="outline" size="sm" onClick={() => { cancelEdit(); setShowAddForm(true) }} className="w-full">
-              <Plus className="h-4 w-4 mr-2" />
-              <span className="hidden sm:inline">Add Time Slot for {eventDays.find((d) => d.date === selectedDay)?.label}</span>
-              <span className="sm:hidden">Add Slot</span>
-            </Button>
-          )}
-        </>
-      )}
+      {canManage && (showAddForm ? (
+        <SlotForm
+          mode="add"
+          initial={(() => {
+            // Start where the day's availability ends, so the suggestion does not overlap.
+            const last = daySlots[daySlots.length - 1]
+            const start = last ? toEventLocalParts(last.end_time, timezone).time : '09:00'
+            const [h, m] = start.split(':').map(Number)
+            const endMinutes = Math.min(h * 60 + m + 60, 23 * 60 + 59)
+            const end = `${String(Math.floor(endMinutes / 60)).padStart(2, '0')}:${String(endMinutes % 60).padStart(2, '0')}`
+            return { venueId: venue.id, dayDate: selectedDay, startTime: start, endTime: end, label: '', slotType: 'session' }
+          })()}
+          venues={venues}
+          eventDays={eventDays}
+          isSaving={isSaving}
+          error={addError}
+          sessionTitles={[]}
+          onSubmit={submitAdd}
+          onCancel={() => { setShowAddForm(false); setAddError(null) }}
+        />
+      ) : (
+        <Button variant="outline" size="sm" onClick={() => { cancelEdit(); setShowAddForm(true) }} className="w-full">
+          <Plus className="h-4 w-4 mr-2" />
+          Add a time slot for {eventDays.find((d) => d.date === selectedDay)?.label}
+        </Button>
+      ))}
     </div>
   )
 }
 
-// Shared create/edit form for a single time slot. Times are wall-clock in the event timezone.
 function SlotForm({
   mode,
   initial,
@@ -907,120 +654,79 @@ function SlotForm({
   eventDays,
   isSaving,
   error,
-  sessionCount,
+  confirmLabel,
+  sessionTitles,
   onSubmit,
   onCancel,
 }: {
   mode: 'add' | 'edit'
   initial: SlotInput
-  venues: Venue[]
+  venues: AdminVenue[]
   eventDays: { date: string; label: string }[]
   isSaving: boolean
   error: string | null
-  sessionCount: number | null
+  confirmLabel?: string
+  sessionTitles: string[]
   onSubmit: (input: SlotInput) => void
   onCancel: () => void
 }) {
   const id = React.useId()
-  const [venueId, setVenueId] = React.useState(initial.venueId)
-  const [dayDate, setDayDate] = React.useState(initial.dayDate)
-  const [startTime, setStartTime] = React.useState(initial.startTime)
-  const [endTime, setEndTime] = React.useState(initial.endTime)
-  const [label, setLabel] = React.useState(initial.label)
-  const [slotType, setSlotType] = React.useState(initial.slotType || 'session')
-
+  const [form, setForm] = React.useState<SlotInput>(initial)
   const isEdit = mode === 'edit'
   const selectClass = 'w-full min-h-[44px] rounded-md border bg-background px-3 text-sm'
+  const set = (key: keyof SlotInput) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setForm((f) => ({ ...f, [key]: e.target.value }))
 
   return (
     <Card className={cn(isEdit ? 'border-primary/50' : 'border-dashed')} role="group" aria-labelledby={`${id}-title`}>
       <CardContent className="p-4 space-y-4">
-        <h4 id={`${id}-title`} className="text-sm font-semibold">{isEdit ? 'Edit Time Slot' : 'New Time Slot'}</h4>
-
-        {isEdit && sessionCount !== null && sessionCount > 0 && (
+        <h4 id={`${id}-title`} className="text-sm font-semibold">{isEdit ? 'Edit time slot' : 'New time slot'}</h4>
+        {isEdit && sessionTitles.length > 0 && (
           <p role="status" className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/20 dark:text-amber-200">
-            {sessionCount} {sessionCount === 1 ? 'session is' : 'sessions are'} scheduled in this slot; {sessionCount === 1 ? 'its' : 'their'} time will move with it.
+            Scheduled here: {sessionTitles.join(', ')}. Changing the time or room moves {sessionTitles.length === 1 ? 'it' : 'them'} and notifies the host{sessionTitles.length === 1 ? '' : 's'}.
           </p>
         )}
-
         {isEdit && (
           <div className="grid gap-3 grid-cols-1 sm:grid-cols-2">
             <div className="space-y-2">
-              <label htmlFor={`${id}-venue`} className="text-xs font-medium">Venue</label>
-              <select id={`${id}-venue`} value={venueId} onChange={(e) => setVenueId(e.target.value)} className={selectClass}>
-                {venues.map((v) => (
-                  <option key={v.id} value={v.id}>{v.name}</option>
-                ))}
+              <label htmlFor={`${id}-venue`} className="text-xs font-medium">Room</label>
+              <select id={`${id}-venue`} value={form.venueId} onChange={set('venueId')} className={selectClass}>
+                {venues.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
               </select>
             </div>
             <div className="space-y-2">
               <label htmlFor={`${id}-day`} className="text-xs font-medium">Day</label>
-              <select id={`${id}-day`} value={dayDate} onChange={(e) => setDayDate(e.target.value)} className={selectClass}>
-                {eventDays.map((day) => (
-                  <option key={day.date} value={day.date}>{day.label}</option>
-                ))}
+              <select id={`${id}-day`} value={form.dayDate} onChange={set('dayDate')} className={selectClass}>
+                {eventDays.map((day) => <option key={day.date} value={day.date}>{day.label}</option>)}
               </select>
             </div>
           </div>
         )}
-
         <div className="grid gap-3 grid-cols-2 sm:grid-cols-4">
           <div className="space-y-2">
             <label htmlFor={`${id}-start`} className="text-xs font-medium">Start</label>
-            <Input
-              id={`${id}-start`}
-              type="time"
-              value={startTime}
-              onChange={(e) => setStartTime(e.target.value)}
-              className="min-h-[44px]"
-            />
+            <Input id={`${id}-start`} type="time" value={form.startTime} onChange={set('startTime')} className="min-h-[44px]" />
           </div>
           <div className="space-y-2">
             <label htmlFor={`${id}-end`} className="text-xs font-medium">End</label>
-            <Input
-              id={`${id}-end`}
-              type="time"
-              value={endTime}
-              onChange={(e) => setEndTime(e.target.value)}
-              className="min-h-[44px]"
-            />
+            <Input id={`${id}-end`} type="time" value={form.endTime} onChange={set('endTime')} className="min-h-[44px]" />
           </div>
           <div className="space-y-2">
             <label htmlFor={`${id}-type`} className="text-xs font-medium">Type</label>
-            <select id={`${id}-type`} value={slotType} onChange={(e) => setSlotType(e.target.value)} className={selectClass}>
-              {SLOT_TYPE_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>{opt.label}</option>
-              ))}
+            <select id={`${id}-type`} value={form.slotType} onChange={set('slotType')} className={selectClass}>
+              {SLOT_TYPE_OPTIONS.map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
             </select>
           </div>
           <div className="space-y-2">
             <label htmlFor={`${id}-label`} className="text-xs font-medium">Label</label>
-            <Input
-              id={`${id}-label`}
-              placeholder="Optional"
-              value={label}
-              onChange={(e) => setLabel(e.target.value)}
-              className="min-h-[44px]"
-            />
+            <Input id={`${id}-label`} placeholder="Optional" value={form.label} onChange={set('label')} maxLength={80} className="min-h-[44px]" />
           </div>
         </div>
-
-        {error && (
-          <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">{error}</p>
-        )}
-
+        {error && <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">{error}</p>}
         <div className="flex gap-2">
-          <Button size="sm" variant="outline" onClick={onCancel} disabled={isSaving} className="flex-1 sm:flex-none">
-            Cancel
-          </Button>
-          <Button
-            size="sm"
-            onClick={() => onSubmit({ venueId, dayDate, startTime, endTime, label, slotType, isBreak: slotType === 'break' })}
-            disabled={isSaving}
-            className="flex-1 sm:flex-none"
-          >
+          <Button size="sm" variant="outline" onClick={onCancel} disabled={isSaving} className="flex-1 sm:flex-none">Cancel</Button>
+          <Button size="sm" onClick={() => onSubmit(form)} disabled={isSaving || form.endTime <= form.startTime} className="flex-1 sm:flex-none">
             {isEdit ? <Check className="h-4 w-4 mr-1" /> : <Plus className="h-4 w-4 mr-1" />}
-            {isEdit ? 'Update' : 'Add'}
+            {confirmLabel ?? (isEdit ? 'Update' : 'Add')}
           </Button>
         </div>
       </CardContent>

@@ -1,174 +1,99 @@
-import { NextResponse } from 'next/server'
-import { createAdminClient } from '@/lib/supabase/server'
-import { constructWebhookEvent, stripe } from '@/lib/payments/stripe'
+/**
+ * Stripe webhook: ticket payment lifecycle.
+ *
+ *   checkout.session.completed (payment_status paid) / async_payment_succeeded
+ *       → settle under the tier lock: confirm the hold (membership + `ticket_confirmed`, one
+ *         transaction); if the hold lapsed, confirm only if a seat is still free, otherwise
+ *         mark `refund_needed` (logged, shown on the organizer revenue page)
+ *   checkout.session.expired / async_payment_failed → release that session's hold
+ *   charge.refunded (full refund)                   → cancel the ticket (or refund-needed row)
+ *
+ * The hold is found by `metadata.ticket_id` (set at checkout), checked against
+ * `metadata.event_id`; `tier_id`/`holder_id` settle a payment whose hold was already swept. Every handler is idempotent. 503 when Stripe or the webhook secret is
+ * not configured. Logs name the event type only.
+ */
 import type Stripe from 'stripe'
+import { constructWebhookEvent, stripe } from '@/lib/payments/stripe'
+import { cancelRefundedTicket, releaseCheckoutHold, settlePaidCheckout } from '@/lib/tickets'
 
-// Disable body parsing, we need raw body for signature verification
 export const runtime = 'nodejs'
+export const dynamic = 'force-dynamic'
 
-export async function POST(request: Request) {
-  if (!stripe) {
-    return NextResponse.json(
-      { error: 'Stripe is not configured' },
-      { status: 500 }
-    )
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+function ticketRef(session: Stripe.Checkout.Session): { ticketId: string; eventId: string; tierId: string | null; holderId: string | null } | null {
+  const m = session.metadata ?? {}
+  if (!m.ticket_id || !m.event_id || !UUID.test(m.ticket_id) || !UUID.test(m.event_id)) return null
+  return {
+    ticketId: m.ticket_id,
+    eventId: m.event_id,
+    tierId: m.tier_id && UUID.test(m.tier_id) ? m.tier_id : null,
+    holderId: m.holder_id && UUID.test(m.holder_id) ? m.holder_id : null,
+  }
+}
+
+function paymentIntentId(value: string | Stripe.PaymentIntent | null): string | null {
+  if (!value) return null
+  return typeof value === 'string' ? value : value.id
+}
+
+export async function POST(request: Request): Promise<Response> {
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET
+  if (!stripe || !webhookSecret) {
+    return Response.json({ error: 'Payments are not configured' }, { status: 503 })
   }
 
-  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET
-  if (!webhookSecret) {
-    console.error('STRIPE_WEBHOOK_SECRET is not set')
-    return NextResponse.json(
-      { error: 'Webhook secret not configured' },
-      { status: 500 }
-    )
+  const signature = request.headers.get('stripe-signature')
+  if (!signature) return Response.json({ error: 'Missing signature' }, { status: 400 })
+
+  let event: Stripe.Event
+  try {
+    event = constructWebhookEvent(await request.text(), signature, webhookSecret)
+  } catch {
+    return Response.json({ error: 'Invalid signature' }, { status: 400 })
   }
 
   try {
-    const body = await request.text()
-    const signature = request.headers.get('stripe-signature')
-
-    if (!signature) {
-      return NextResponse.json(
-        { error: 'Missing signature' },
-        { status: 400 }
-      )
-    }
-
-    // Verify webhook signature
-    let event: Stripe.Event
-    try {
-      event = constructWebhookEvent(body, signature, webhookSecret)
-    } catch (err) {
-      console.error('Webhook signature verification failed:', err)
-      return NextResponse.json(
-        { error: 'Invalid signature' },
-        { status: 400 }
-      )
-    }
-
-    const supabase = await createAdminClient()
-
-    // Handle different event types
     switch (event.type) {
-      case 'checkout.session.completed': {
+      case 'checkout.session.completed':
+      case 'checkout.session.async_payment_succeeded': {
         const session = event.data.object as Stripe.Checkout.Session
-
-        // Get ticket details from metadata
-        const tierId = session.metadata?.tier_id
-        const eventId = session.metadata?.event_id
-        const userId = session.metadata?.user_id
-        const paymentIntentId = typeof session.payment_intent === 'string'
-          ? session.payment_intent
-          : session.payment_intent?.id
-
-        if (!tierId || !eventId || !userId) {
-          console.error('Missing metadata in checkout session:', session.id)
-          break
-        }
-
-        // Find the pending ticket
-        const { data: ticket, error: findError } = await supabase
-          .from('tickets')
-          .select('id')
-          .eq('event_id', eventId)
-          .eq('tier_id', tierId)
-          .eq('user_id', userId)
-          .eq('status', 'pending')
-          .maybeSingle()
-
-        if (findError) {
-          console.error('Error finding ticket:', findError)
-          break
-        }
-
-        if (!ticket) {
-          // Create ticket if not found (webhook may arrive before redirect)
-          const { error: createError } = await supabase
-            .from('tickets')
-            .insert({
-              event_id: eventId,
-              tier_id: tierId,
-              user_id: userId,
-              status: 'confirmed',
-              payment_intent_id: paymentIntentId,
-              amount_paid_cents: session.amount_total,
-              payment_confirmed_at: new Date().toISOString(),
-            })
-
-          if (createError) {
-            console.error('Error creating ticket:', createError)
-          }
-        } else {
-          // Update existing pending ticket
-          const { error: updateError } = await supabase
-            .from('tickets')
-            .update({
-              status: 'confirmed',
-              payment_intent_id: paymentIntentId,
-              amount_paid_cents: session.amount_total,
-              payment_confirmed_at: new Date().toISOString(),
-            })
-            .eq('id', ticket.id)
-
-          if (updateError) {
-            console.error('Error updating ticket:', updateError)
-          }
-        }
-
-        console.log(`Ticket confirmed for user ${userId}, event ${eventId}`)
+        const ref = ticketRef(session)
+        if (!ref) break
+        // `completed` also fires for delayed payment methods before the money arrives.
+        if (session.payment_status !== 'paid' && session.payment_status !== 'no_payment_required') break
+        await settlePaidCheckout({
+          ...ref,
+          sessionId: session.id,
+          paymentIntentId: paymentIntentId(session.payment_intent),
+          amountPaidCents: session.amount_total ?? null,
+        })
         break
       }
 
-      case 'payment_intent.payment_failed': {
-        const paymentIntent = event.data.object as Stripe.PaymentIntent
-
-        // Find and cancel the pending ticket
-        const { error } = await supabase
-          .from('tickets')
-          .update({ status: 'cancelled' })
-          .eq('payment_intent_id', paymentIntent.id)
-          .eq('status', 'pending')
-
-        if (error) {
-          console.error('Error cancelling ticket:', error)
-        }
-
-        console.log(`Payment failed for payment intent ${paymentIntent.id}`)
+      case 'checkout.session.expired':
+      case 'checkout.session.async_payment_failed': {
+        const session = event.data.object as Stripe.Checkout.Session
+        const ref = ticketRef(session)
+        if (ref) await releaseCheckoutHold({ ticketId: ref.ticketId, eventId: ref.eventId, sessionId: session.id })
         break
       }
 
       case 'charge.refunded': {
         const charge = event.data.object as Stripe.Charge
-        const paymentIntentId = typeof charge.payment_intent === 'string'
-          ? charge.payment_intent
-          : charge.payment_intent?.id
-
-        if (paymentIntentId) {
-          // Mark ticket as cancelled on refund
-          const { error } = await supabase
-            .from('tickets')
-            .update({ status: 'cancelled' })
-            .eq('payment_intent_id', paymentIntentId)
-
-          if (error) {
-            console.error('Error cancelling refunded ticket:', error)
-          }
-
-          console.log(`Ticket cancelled due to refund: ${paymentIntentId}`)
-        }
+        const pi = paymentIntentId(charge.payment_intent)
+        if (pi && charge.refunded) await cancelRefundedTicket(pi)
         break
       }
 
       default:
-        console.log(`Unhandled event type: ${event.type}`)
+        break
     }
-
-    return NextResponse.json({ received: true })
-  } catch (error) {
-    console.error('Webhook error:', error)
-    return NextResponse.json(
-      { error: 'Webhook handler failed' },
-      { status: 500 }
-    )
+  } catch (err) {
+    // Non-2xx makes Stripe retry; handlers are idempotent.
+    console.error(`[webhooks:stripe] ${event.type} failed:`, err instanceof Error ? err.name : 'error')
+    return Response.json({ error: 'Webhook handler failed' }, { status: 500 })
   }
+
+  return Response.json({ received: true })
 }

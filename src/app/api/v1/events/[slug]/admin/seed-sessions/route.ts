@@ -1,200 +1,114 @@
 /**
- * Generate test sessions for auto-scheduler testing
- * POST - Create 25-30 test sessions with varied constraints
- * DELETE - Remove seeded test sessions
+ * Development test data for the auto-scheduler.
+ *   POST   /api/v1/events/[slug]/admin/seed-sessions   create ~28 host-less "[TEST]" sessions
+ *   DELETE /api/v1/events/[slug]/admin/seed-sessions   remove them (never ones published on the network)
+ *
+ * Disabled in production unless ALLOW_SEED_SESSIONS=true.
  */
+import { asAccount } from '@/lib/db'
+import { errorResponse, fail, json, requireOrganizer, rolesWith } from '@/lib/scheduling/admin-api'
+import { insertCuratedSession } from '@/lib/scheduling/sessions'
 
-import { NextRequest, NextResponse } from 'next/server'
-import { createAdminClient, createRequestClient } from '@/lib/supabase/server'
-import { getUserFromRequest } from '@/lib/api/getUser'
+export const dynamic = 'force-dynamic'
 
-// Test-data seeding is disabled in production unless explicitly enabled.
-function seedingDisabled(): NextResponse | null {
-  if (process.env.NODE_ENV !== 'production' || process.env.ALLOW_SEED_SESSIONS === 'true') {
-    return null
-  }
-  return NextResponse.json(
-    { error: 'Test session seeding is disabled in production' },
-    { status: 403 }
-  )
+const ROLES = rolesWith('manageSchedule')
+
+function seedingDisabled(): Response | null {
+  if (process.env.NODE_ENV !== 'production' || process.env.ALLOW_SEED_SESSIONS === 'true') return null
+  return fail(403, 'Test session seeding is disabled in production')
 }
 
-const TEST_SESSIONS = [
-  // Time slot conflicts (5 sessions wanting morning keynote time)
-  { title: 'Opening Keynote: The Future of DAOs', expectedAttendance: 100, trackPreference: 'governance', description: 'A high-energy opening session exploring the evolution and future of decentralized autonomous organizations.' },
-  { title: 'Morning Meditation & Intention Setting', expectedAttendance: 50, trackPreference: null, description: 'Start your day with mindfulness practices tailored for builders and innovators.' },
-  { title: 'Breakfast Discussion: Web3 Ethics', expectedAttendance: 30, trackPreference: 'culture', description: 'An informal discussion over breakfast about ethical considerations in decentralized systems.' },
-  { title: 'Early Bird Workshop: Solidity Basics', expectedAttendance: 40, trackPreference: 'technical', description: 'A hands-on workshop for beginners to learn the fundamentals of Solidity smart contract development.' },
-  { title: 'Dawn Yoga for Builders', expectedAttendance: 25, trackPreference: null, description: 'Stretch, breathe, and energize before diving into a day of building and collaboration.' },
-
-  // Presenter conflicts (3 sessions by same person - will use proposer)
-  { title: 'Zero-Knowledge Proofs 101', expectedAttendance: 60, trackPreference: 'technical', presenterConflict: true, description: 'An introduction to ZK proofs: what they are, why they matter, and how they work.' },
-  { title: 'Advanced ZK Circuits', expectedAttendance: 40, trackPreference: 'technical', presenterConflict: true, description: 'Deep dive into building efficient ZK circuits for real-world applications.' },
-  { title: 'ZK for Privacy Applications', expectedAttendance: 45, trackPreference: 'technical', presenterConflict: true, description: 'Exploring how zero-knowledge proofs enable privacy-preserving applications on public blockchains.' },
-
-  // Large venue requirements (need big rooms)
-  { title: 'Community Town Hall', expectedAttendance: 150, trackPreference: 'governance', description: 'An open forum for the community to discuss priorities, concerns, and celebrate wins.' },
-  { title: 'Demo Day: Showcase Your Project', expectedAttendance: 120, trackPreference: null, description: 'Teams present their projects in quick 5-minute demos. Expect innovation and inspiration!' },
-  { title: 'Panel: Scaling Ethereum', expectedAttendance: 100, trackPreference: 'technical', description: 'Leading researchers and builders discuss the latest in L2s, rollups, and scaling solutions.' },
-  { title: 'Fireside Chat: Founders Stories', expectedAttendance: 80, trackPreference: 'culture', description: 'Candid conversations with founders about their journeys, failures, and lessons learned.' },
-
-  // Multi-slot workshops (need consecutive slots)
-  { title: 'Full-Stack DApp Workshop', expectedAttendance: 35, trackPreference: 'technical', multiSlot: true, description: 'Build a complete decentralized application from scratch. Bring your laptop!' },
-  { title: 'Governance Design Workshop', expectedAttendance: 30, trackPreference: 'governance', multiSlot: true, description: 'Learn to design effective governance systems through hands-on exercises and case studies.' },
-
-  // Track-assigned sessions
-  { title: 'Token Engineering Deep Dive', expectedAttendance: 40, trackPreference: 'technical', description: 'Explore the art and science of designing token economies that align incentives.' },
-  { title: 'Smart Contract Security Patterns', expectedAttendance: 45, trackPreference: 'technical', description: 'Learn battle-tested patterns to write secure smart contracts and avoid common pitfalls.' },
-  { title: 'DAO Treasury Management', expectedAttendance: 35, trackPreference: 'governance', description: 'Best practices for managing DAO treasuries: diversification, risk, and sustainability.' },
-  { title: 'Quadratic Funding Explained', expectedAttendance: 50, trackPreference: 'governance', description: 'Understanding quadratic funding and its applications for public goods funding.' },
-  { title: 'Regenerative Finance Panel', expectedAttendance: 55, trackPreference: 'culture', description: 'How can finance be a force for ecological and social regeneration?' },
-  { title: 'Art & NFTs: Beyond Profile Pictures', expectedAttendance: 40, trackPreference: 'culture', description: 'Exploring the intersection of art, culture, and blockchain technology.' },
-
-  // Flexible sessions (no special constraints)
-  { title: 'Lightning Talks: 5 Minute Pitches', expectedAttendance: 60, trackPreference: null, description: 'Rapid-fire presentations where anyone can share an idea, project, or insight in 5 minutes.' },
-  { title: 'Networking Lunch Discussion', expectedAttendance: 50, trackPreference: null, description: 'Structured networking over lunch with rotating table topics.' },
-  { title: 'Open Space: Bring Your Topic', expectedAttendance: 30, trackPreference: null, description: 'Unconference-style session where attendees propose and vote on topics in real-time.' },
-  { title: 'AMA: Ask the Core Team', expectedAttendance: 70, trackPreference: null, description: 'Your chance to ask anything to the protocol core team.' },
-  { title: 'Closing Circle & Reflections', expectedAttendance: 80, trackPreference: null, description: 'End the event with gratitude, reflections, and commitments for the future.' },
-  { title: 'Hackathon Project Showcase', expectedAttendance: 65, trackPreference: null, description: 'Winners and participants present what they built during the hackathon.' },
-  { title: 'Birds of a Feather: Find Your Tribe', expectedAttendance: 40, trackPreference: null, description: 'Self-organizing groups around shared interests. Find your people!' },
-  { title: 'Impromptu Sessions Board', expectedAttendance: 25, trackPreference: null, description: 'Check the board for spontaneous sessions proposed throughout the day.' },
+const TEST_SESSIONS: Array<{ title: string; expected: number; track: string | null; format: 'talk' | 'workshop' | 'discussion' | 'panel' | 'demo'; duration: number; description: string }> = [
+  { title: 'Opening Circle: Why We Gather', expected: 100, track: 'governance', format: 'talk', duration: 60, description: 'A welcome session on the purpose and format of the gathering.' },
+  { title: 'Morning Stretch & Intentions', expected: 50, track: null, format: 'discussion', duration: 30, description: 'Start the day together.' },
+  { title: 'Breakfast Conversation: Ethics of Coordination', expected: 30, track: 'culture', format: 'discussion', duration: 60, description: 'An informal conversation about the ethics of coordination tools.' },
+  { title: 'Early Workshop: Building a Budget Together', expected: 40, track: 'technical', format: 'workshop', duration: 90, description: 'Hands-on participatory budgeting.' },
+  { title: 'Zero-Knowledge Proofs 101', expected: 60, track: 'technical', format: 'talk', duration: 60, description: 'What they are and why they matter.' },
+  { title: 'Advanced ZK Circuits', expected: 40, track: 'technical', format: 'workshop', duration: 90, description: 'Building efficient circuits.' },
+  { title: 'ZK for Privacy Applications', expected: 45, track: 'technical', format: 'talk', duration: 60, description: 'Privacy-preserving applications.' },
+  { title: 'Community Town Hall', expected: 150, track: 'governance', format: 'discussion', duration: 60, description: 'An open forum for the community.' },
+  { title: 'Demo Hour', expected: 120, track: null, format: 'demo', duration: 60, description: 'Short demos of community projects.' },
+  { title: 'Panel: Scaling Local Networks', expected: 100, track: 'technical', format: 'panel', duration: 60, description: 'Researchers and builders discuss scale.' },
+  { title: 'Fireside: Founders Stories', expected: 80, track: 'culture', format: 'talk', duration: 60, description: 'Candid conversations about what went wrong.' },
+  { title: 'Full-Stack App Workshop', expected: 35, track: 'technical', format: 'workshop', duration: 90, description: 'Build a complete app from scratch.' },
+  { title: 'Governance Design Workshop', expected: 30, track: 'governance', format: 'workshop', duration: 90, description: 'Design governance through exercises.' },
+  { title: 'Token Engineering Deep Dive', expected: 40, track: 'technical', format: 'talk', duration: 60, description: 'Designing incentive systems.' },
+  { title: 'Security Patterns', expected: 45, track: 'technical', format: 'talk', duration: 60, description: 'Battle-tested patterns.' },
+  { title: 'Treasury Management', expected: 35, track: 'governance', format: 'discussion', duration: 60, description: 'Sustainable shared treasuries.' },
+  { title: 'Quadratic Funding Explained', expected: 50, track: 'governance', format: 'talk', duration: 30, description: 'How quadratic funding works.' },
+  { title: 'Regenerative Finance Panel', expected: 55, track: 'culture', format: 'panel', duration: 60, description: 'Finance for ecological regeneration.' },
+  { title: 'Art Beyond Profile Pictures', expected: 40, track: 'culture', format: 'talk', duration: 60, description: 'Art, culture and open networks.' },
+  { title: 'Lightning Talks', expected: 60, track: null, format: 'talk', duration: 60, description: 'Five-minute talks from anyone.' },
+  { title: 'Lunch Table Topics', expected: 50, track: null, format: 'discussion', duration: 60, description: 'Structured networking over lunch.' },
+  { title: 'Open Space: Bring Your Topic', expected: 30, track: null, format: 'discussion', duration: 60, description: 'Propose topics in the room.' },
+  { title: 'Ask the Organizers', expected: 70, track: null, format: 'discussion', duration: 30, description: 'Questions about the gathering.' },
+  { title: 'Closing Circle', expected: 80, track: null, format: 'discussion', duration: 60, description: 'Reflections and commitments.' },
+  { title: 'Hackathon Showcase', expected: 65, track: null, format: 'demo', duration: 60, description: 'What people built.' },
+  { title: 'Birds of a Feather', expected: 40, track: null, format: 'discussion', duration: 60, description: 'Self-organizing interest groups.' },
+  { title: 'Impromptu Sessions Board', expected: 25, track: null, format: 'discussion', duration: 30, description: 'Spontaneous sessions.' },
 ]
 
-export async function POST(
-  request: NextRequest,
-  { params }: { params: Promise<{ slug: string }> }
-) {
+export async function POST(request: Request, { params }: { params: Promise<{ slug: string }> }) {
   const disabled = seedingDisabled()
   if (disabled) return disabled
-
   const { slug } = await params
+  const ctx = await requireOrganizer(request, slug, ROLES)
+  if (ctx instanceof Response) return ctx
 
-  const user = await getUserFromRequest(request)
-  if (!user) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  try {
+    const created = await asAccount(ctx.viewer.accountId, async (tx) => {
+      const tracks = await tx<{ id: string; name: string }[]>`select id, name from tracks where event_id = ${ctx.event.id}`
+      const trackFor = (hint: string | null) => {
+        if (!hint) return null
+        const match = tracks.find((t) => {
+          const name = t.name.toLowerCase()
+          if (hint === 'technical') return /tech|dev|build|open source/.test(name)
+          if (hint === 'governance') return /gov|dao|coord/.test(name)
+          return /cult|commun|social|local/.test(name)
+        })
+        return match?.id ?? null
+      }
+      let n = 0
+      for (const s of TEST_SESSIONS) {
+        await insertCuratedSession(tx, ctx.event.id, ctx.viewer.accountId, {
+          title: `[TEST] ${s.title}`,
+          description: s.description,
+          format: s.format,
+          duration: s.duration,
+          status: 'approved',
+          track_id: trackFor(s.track),
+          topic_tags: null,
+          listed_host_name: null,
+          time_slot_id: null,
+          expected_attendance: s.expected,
+          required_features: [],
+        }, { importedFrom: 'seed' })
+        n++
+      }
+      return n
+    })
+    return json({ success: true, created, message: `Created ${created} test sessions (prefixed with [TEST])` }, { status: 201 })
+  } catch (e) {
+    return errorResponse(e, 'seed sessions')
   }
-
-  const supabase = await createAdminClient()
-
-  // Get event and verify admin
-  const { data: event } = await supabase
-    .from('events')
-    .select('id')
-    .eq('slug', slug)
-    .single()
-
-  if (!event) {
-    return NextResponse.json({ error: 'Event not found' }, { status: 404 })
-  }
-
-  const { data: membership } = await supabase
-    .from('event_members')
-    .select('role')
-    .eq('event_id', event.id)
-    .eq('user_id', user.id)
-    .single()
-
-  if (!membership || !['owner', 'admin'].includes(membership.role)) {
-    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
-  }
-
-  // Get tracks for assignment
-  const { data: tracks } = await supabase
-    .from('tracks')
-    .select('id, name')
-    .eq('event_id', event.id)
-
-  const trackMap: Record<string, string> = {}
-  tracks?.forEach(t => {
-    const name = t.name.toLowerCase()
-    if (name.includes('tech') || name.includes('dev') || name.includes('build')) trackMap['technical'] = t.id
-    if (name.includes('gov') || name.includes('dao')) trackMap['governance'] = t.id
-    if (name.includes('cult') || name.includes('commun') || name.includes('social')) trackMap['culture'] = t.id
-  })
-
-  // Create sessions
-  const sessionsToCreate = TEST_SESSIONS.map((s) => ({
-    event_id: event.id,
-    title: `[TEST] ${s.title}`,
-    description: s.description,
-    status: 'approved',
-    proposer_id: user.id,
-    expected_attendance: s.expectedAttendance,
-    track_id: s.trackPreference ? trackMap[s.trackPreference] || null : null,
-  }))
-
-  const { data: created, error } = await createRequestClient(request)
-    .from('sessions')
-    .insert(sessionsToCreate)
-    .select('id, title')
-
-  if (error) {
-    console.error('Error creating test sessions:', error)
-    return NextResponse.json({ error: 'Failed to create sessions' }, { status: 500 })
-  }
-
-  return NextResponse.json({
-    success: true,
-    created: created?.length || 0,
-    message: `Created ${created?.length} test sessions (prefixed with [TEST])`,
-  })
 }
 
-export async function DELETE(
-  request: NextRequest,
-  { params }: { params: Promise<{ slug: string }> }
-) {
+export async function DELETE(request: Request, { params }: { params: Promise<{ slug: string }> }) {
   const disabled = seedingDisabled()
   if (disabled) return disabled
-
   const { slug } = await params
+  const ctx = await requireOrganizer(request, slug, ROLES)
+  if (ctx instanceof Response) return ctx
 
-  const user = await getUserFromRequest(request)
-  if (!user) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  try {
+    const deleted = await asAccount(ctx.viewer.accountId, (tx) => tx`
+      delete from sessions
+      where event_id = ${ctx.event.id} and title like '[TEST]%' and imported_from = 'seed'
+        and not (calendar_event_uri is not null and slot_uri is not null and cancelled_at is null)
+      returning id
+    `)
+    return json({ success: true, deleted: deleted.length, message: `Deleted ${deleted.length} test sessions` })
+  } catch (e) {
+    return errorResponse(e, 'delete seeded sessions')
   }
-
-  const supabase = await createAdminClient()
-
-  // Get event and verify admin
-  const { data: event } = await supabase
-    .from('events')
-    .select('id')
-    .eq('slug', slug)
-    .single()
-
-  if (!event) {
-    return NextResponse.json({ error: 'Event not found' }, { status: 404 })
-  }
-
-  const { data: membership } = await supabase
-    .from('event_members')
-    .select('role')
-    .eq('event_id', event.id)
-    .eq('user_id', user.id)
-    .single()
-
-  if (!membership || !['owner', 'admin'].includes(membership.role)) {
-    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
-  }
-
-  // Delete test sessions (identified by [TEST] prefix)
-  const { data: deleted, error } = await supabase
-    .from('sessions')
-    .delete()
-    .eq('event_id', event.id)
-    .like('title', '[TEST]%')
-    .select('id')
-
-  if (error) {
-    console.error('Error deleting test sessions:', error)
-    return NextResponse.json({ error: 'Failed to delete test sessions' }, { status: 500 })
-  }
-
-  return NextResponse.json({
-    success: true,
-    deleted: deleted?.length || 0,
-    message: `Deleted ${deleted?.length || 0} test sessions`,
-  })
 }

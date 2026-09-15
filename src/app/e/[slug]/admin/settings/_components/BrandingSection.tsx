@@ -21,7 +21,7 @@ interface ImageFieldProps {
   previewClassName?: string
 }
 
-/** Upload straight to storage, then persist the URL on the event. */
+/** Upload to `/api/uploads`, then persist the URL on the event. */
 function ImageField({ id, label, hint, url, upload, onPersist, previewClassName }: ImageFieldProps) {
   const inputRef = React.useRef<HTMLInputElement>(null)
   const [busy, setBusy] = React.useState(false)
@@ -101,8 +101,8 @@ export function BrandingSection({ event }: { event: Event }) {
       <Field label="Discord" htmlFor="social-discord"><Input id="social-discord" value={social.discord} onChange={setSocialField('discord')} placeholder="https://discord.gg/…" /></Field>
     </div>
     <div className="space-y-5 border-t pt-5">
-      <ImageField id="event-logo" label="Logo" hint="Square, PNG or JPG, up to 5MB. Saved as soon as it uploads." url={logoUrl} upload={uploadEventLogo} onPersist={persistAsset('logo_url', setLogoUrl)} />
-      <ImageField id="event-banner" label="Banner" hint="Wide (about 3:1), up to 5MB. Used on the event page and link previews." url={bannerUrl} upload={uploadEventBanner} onPersist={persistAsset('banner_url', setBannerUrl)} previewClassName="h-20 w-full max-w-xs rounded-lg border object-cover" />
+      <ImageField id="event-logo" label="Logo" hint="Square, PNG or JPG, up to 5MB. Saved as soon as it uploads." url={logoUrl} upload={file => uploadEventLogo(file, event.slug)} onPersist={persistAsset('logo_url', setLogoUrl)} />
+      <ImageField id="event-banner" label="Banner" hint="Wide (about 3:1), up to 5MB. Used on the event page and link previews." url={bannerUrl} upload={file => uploadEventBanner(file, event.slug)} onPersist={persistAsset('banner_url', setBannerUrl)} previewClassName="h-20 w-full max-w-xs rounded-lg border object-cover" />
       <div className="text-sm" aria-live="polite">
         {assets.state.status === 'error' ? <p role="alert" className="text-destructive">{assets.state.message}</p> : assets.state.status === 'saved' ? <p className="text-primary">{assets.state.message}</p> : null}
       </div>

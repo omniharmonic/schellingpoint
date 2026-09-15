@@ -1,59 +1,53 @@
 'use client'
 
 import * as React from 'react'
-
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+import { apiFetch } from '@/lib/api/client'
 
 export interface Track {
   id: string
   name: string
+  slug: string
+  description: string | null
   color: string | null
+  display_order: number | null
 }
 
 interface UseTracksResult {
   tracks: Track[]
   isLoading: boolean
+  error: string | null
 }
 
-export function useTracks(): UseTracksResult {
+/** The active tracks of one event (`GET /api/v1/events/[slug]/tracks`). */
+export function useTracks(eventSlug: string | null | undefined): UseTracksResult {
   const [tracks, setTracks] = React.useState<Track[]>([])
-  const [isLoading, setIsLoading] = React.useState(true)
+  const [isLoading, setIsLoading] = React.useState(!!eventSlug)
+  const [error, setError] = React.useState<string | null>(null)
 
   React.useEffect(() => {
-    let mounted = true
-
-    const fetchTracks = async () => {
-      try {
-        const response = await fetch(
-          `${SUPABASE_URL}/rest/v1/tracks?is_active=eq.true&select=id,name,color&order=name`,
-          {
-            headers: {
-              'apikey': SUPABASE_KEY,
-              'Authorization': `Bearer ${SUPABASE_KEY}`,
-            },
-          }
-        )
-
-        if (response.ok && mounted) {
-          const data = await response.json()
-          setTracks(data)
-        }
-      } catch (err) {
-        console.error('Error fetching tracks:', err)
-      } finally {
-        if (mounted) {
-          setIsLoading(false)
-        }
-      }
+    if (!eventSlug) {
+      setTracks([])
+      setIsLoading(false)
+      return
     }
-
-    fetchTracks()
-
+    let mounted = true
+    setIsLoading(true)
+    apiFetch<{ tracks: Track[] }>(`/api/v1/events/${encodeURIComponent(eventSlug)}/tracks`)
+      .then((data) => {
+        if (!mounted) return
+        setTracks(data.tracks)
+        setError(null)
+      })
+      .catch((err) => {
+        if (mounted) setError(err instanceof Error ? err.message : 'Tracks could not load')
+      })
+      .finally(() => {
+        if (mounted) setIsLoading(false)
+      })
     return () => {
       mounted = false
     }
-  }, [])
+  }, [eventSlug])
 
-  return { tracks, isLoading }
+  return { tracks, isLoading, error }
 }

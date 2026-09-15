@@ -8,22 +8,8 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { useAuth } from '@/hooks/useAuth'
-
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!
-
-function getAccessToken(): string | null {
-  const storageKey = `sb-${new URL(SUPABASE_URL).hostname.split('.')[0]}-auth-token`
-  const stored = localStorage.getItem(storageKey)
-  if (stored) {
-    try {
-      const session = JSON.parse(stored)
-      return session?.access_token || null
-    } catch {
-      return null
-    }
-  }
-  return null
-}
+import { apiFetch, ApiError } from '@/lib/api/client'
+import type { InvitePreview } from '@/app/api/v1/sessions/_lib/invite'
 
 const formatIcons: Record<string, React.ComponentType<{ className?: string }>> = {
   talk: Mic,
@@ -33,21 +19,7 @@ const formatIcons: Record<string, React.ComponentType<{ className?: string }>> =
   demo: Monitor,
 }
 
-interface InviteData {
-  id: string
-  status: string
-  expires_at: string
-  session: {
-    id: string
-    title: string
-    description: string | null
-    format: string
-    duration: number
-    host_name: string | null
-    host: { id: string; display_name: string | null; avatar_url: string | null } | null
-    event: { slug: string } | null
-  }
-}
+type InviteData = InvitePreview
 
 // Sessions live under /e/[slug]/sessions; without a slug fall back to the home page.
 function sessionHref(eventSlug: string | null | undefined, sessionId: string): string {
@@ -65,6 +37,7 @@ export function InviteClient({ token, invite }: InviteClientProps) {
   const [isAccepting, setIsAccepting] = React.useState(false)
   const [accepted, setAccepted] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
+  const [publishNote, setPublishNote] = React.useState<string | null>(null)
 
   if (!invite || !invite.session) {
     return (
@@ -91,10 +64,10 @@ export function InviteClient({ token, invite }: InviteClientProps) {
     )
   }
 
-  const session = invite.session as any
-  const eventSlug: string | null = session.event?.slug ?? null
+  const session = invite.session
+  const eventSlug: string | null = invite.event_slug
   const sessionUrl = sessionHref(eventSlug, session.id)
-  const FormatIcon = formatIcons[session.format] || Mic
+  const FormatIcon = formatIcons[session.format ?? ''] || Mic
 
   // Invite is not pending
   if (invite.status !== 'pending') {
@@ -141,8 +114,9 @@ export function InviteClient({ token, invite }: InviteClientProps) {
             </div>
             <CardTitle className="text-2xl">You're a Co-Host!</CardTitle>
             <CardDescription>
-              You've been added as a co-host for "{session.title}". You can now edit this session.
+              You co-host &ldquo;{session.title}&rdquo; and can now edit it with the proposer.
             </CardDescription>
+            {publishNote && <p className="text-sm text-muted-foreground mt-2">{publishNote}</p>}
           </CardHeader>
           <CardContent className="text-center">
             <Button asChild>
@@ -159,27 +133,18 @@ export function InviteClient({ token, invite }: InviteClientProps) {
     setError(null)
 
     try {
-      const accessToken = getAccessToken()
-      const response = await fetch(`/api/invite/${token}/accept`, {
-        method: 'POST',
-        headers: accessToken ? { 'Authorization': `Bearer ${accessToken}` } : {},
-      })
-
-      const data = await response.json()
-
-      if (!response.ok) {
-        if (response.status === 409) {
-          // Already a co-host — redirect to session
-          router.push(sessionHref(data.event_slug ?? eventSlug, data.session_id ?? session.id))
-          return
-        }
-        setError(data.error || 'Failed to accept invite')
+      const result = await apiFetch<{ session_id: string; event_slug: string; atproto?: { error?: string } }>(
+        `/api/invite/${token}/accept`,
+        { method: 'POST' },
+      )
+      if (result.atproto?.error) setPublishNote('You are a co-host. Your public co-host record could not be written yet; you can retry from the session page.')
+      setAccepted(true)
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409 && /already a co-host/i.test(err.message)) {
+        router.push(sessionHref(eventSlug, session.id))
         return
       }
-
-      setAccepted(true)
-    } catch {
-      setError('Something went wrong. Please try again.')
+      setError(err instanceof Error ? err.message : 'Something went wrong. Please try again.')
     } finally {
       setIsAccepting(false)
     }
@@ -214,7 +179,7 @@ export function InviteClient({ token, invite }: InviteClientProps) {
                 {session.host?.avatar_url ? (
                   <img
                     src={session.host.avatar_url}
-                    alt={session.host.display_name || session.host_name || ''}
+                    alt={session.host.display_name || ''}
                     className="h-full w-full object-cover"
                   />
                 ) : (
@@ -222,10 +187,15 @@ export function InviteClient({ token, invite }: InviteClientProps) {
                 )}
               </div>
               <span className="text-sm text-muted-foreground">
-                Hosted by {session.host?.display_name || session.host_name || 'Unknown'}
+                {session.host ? `Proposed by ${session.host.display_name || (session.host.handle ? `@${session.host.handle}` : 'a participant')}` : `Unclaimed proposal at ${invite.event_name}`}
               </span>
             </div>
           </div>
+
+          <p className="text-xs text-muted-foreground">
+            Accepting adds you as a co-host and writes a co-host record into your own repository, naming
+            this proposal. It is public; you can step down later, which deletes it, but copies may persist on the network.
+          </p>
 
           {error && (
             <div className="rounded-lg bg-destructive/10 border border-destructive/20 p-3 text-sm text-destructive">
@@ -254,7 +224,7 @@ export function InviteClient({ token, invite }: InviteClientProps) {
                 Sign in to accept this invitation
               </p>
               <Button asChild className="w-full">
-                <Link href={`/login?redirect=/invite/${token}`}>
+                <Link href={`/login?returnTo=${encodeURIComponent(`/invite/${token}`)}`}>
                   Sign In to Accept
                 </Link>
               </Button>

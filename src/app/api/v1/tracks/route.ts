@@ -1,28 +1,18 @@
-import { createAdminClient } from '@/lib/supabase/server'
-import { validateApiKey, resolvePartnerEvent } from '@/lib/api/auth'
-import { apiSuccess, unauthorized, badRequest, methodNotAllowed } from '@/lib/api/response'
+import { resolvePublicEvent } from '@/lib/api/auth'
+import { methodNotAllowed } from '@/lib/api/response'
+import { publicJson, publishedTracks } from '../schedule/public-read'
 
-const TRACK_FIELDS = 'id,name,slug,description,color,lead_name,is_active,created_at'
+/**
+ * GET /api/v1/tracks?event=<slug> — the gathering's published tracks
+ * (`schellingpoint.draft.track` records). Public; no key. Track leads are never included (R9).
+ */
+export const dynamic = 'force-dynamic'
 
 export async function GET(request: Request) {
-  if (!validateApiKey(request)) return unauthorized()
-
-  const supabase = await createAdminClient()
-
-  const resolved = await resolvePartnerEvent(request, supabase)
+  const resolved = await resolvePublicEvent(request)
   if ('error' in resolved) return resolved.error
-
-  const { data, error } = await supabase
-    .from('tracks')
-    .select(TRACK_FIELDS)
-    .eq('event_id', resolved.event.id)
-    .order('name')
-
-  if (error) {
-    return badRequest(error.message)
-  }
-
-  return apiSuccess(data, data?.length ?? 0)
+  const tracks = await publishedTracks(resolved.event.id)
+  return publicJson(tracks, tracks.length)
 }
 
 export async function POST() { return methodNotAllowed() }

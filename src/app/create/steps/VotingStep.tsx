@@ -8,6 +8,7 @@ import { Label } from '@/components/ui/label';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import type { WizardState, WizardAction, VotingMechanism } from '../useWizardState';
+import { POLICY_THRESHOLD_BOUNDS, type GatheringPolicyThresholds } from '@/lib/events/policy';
 
 // ============================================================================
 // Types
@@ -173,6 +174,12 @@ export function VotingStep({ state, dispatch }: VotingStepProps) {
       : [...currentDurations, duration];
     handleVotingChange({ allowedDurations: newDurations });
   };
+
+  const thresholds = voting.policyThresholds;
+  const setThresholds = (updates: Partial<GatheringPolicyThresholds>) => {
+    handleVotingChange({ policyThresholds: { ...thresholds, ...updates } });
+  };
+  const range = (min: number, max: number) => Array.from({ length: max - min + 1 }, (_, i) => min + i);
 
   // Handler for proposal approval toggle
   const handleApprovalToggle = () => {
@@ -412,7 +419,82 @@ export function VotingStep({ state, dispatch }: VotingStepProps) {
                 Require Admin Approval
               </Label>
               <p className="text-sm text-muted-foreground">
-                Require admin approval before proposals appear for voting
+                Off by default: proposals are public as soon as they are written, and organizers decline by not scheduling. Turn this on to review each proposal before it is listed.
+              </p>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Policy thresholds (freeschool.draft.policy#thresholds) */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Safeguards</CardTitle>
+          <CardDescription>
+            These become part of the gathering&apos;s public rules when you publish it.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-6">
+          <div className="space-y-2">
+            <Label htmlFor="destructiveActionStewards">Approvals to move or cancel a published session</Label>
+            <select
+              id="destructiveActionStewards"
+              value={thresholds.destructiveActionStewards}
+              onChange={(e) => setThresholds({ destructiveActionStewards: parseInt(e.target.value, 10) })}
+              className="w-full max-w-[200px] rounded-xl border bg-background p-2.5 text-sm"
+            >
+              {range(POLICY_THRESHOLD_BOUNDS.destructiveActionStewards.min, POLICY_THRESHOLD_BOUNDS.destructiveActionStewards.max).map((n) => (
+                <option key={n} value={n}>{n} organizer{n === 1 ? '' : 's'}</option>
+              ))}
+            </select>
+            <p className="text-sm text-muted-foreground">
+              Once the schedule is published, a session is a public calendar record people may already rely on. Moving or cancelling it needs this many organizers to approve. With {thresholds.destructiveActionStewards === 1 ? 'one, any single organizer can do it alone' : `${thresholds.destructiveActionStewards}, no single organizer can do it alone`}.
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="feedbackK">Fewest voters before a count is shown</Label>
+            <select
+              id="feedbackK"
+              value={thresholds.feedbackK}
+              onChange={(e) => setThresholds({ feedbackK: parseInt(e.target.value, 10) })}
+              className="w-full max-w-[200px] rounded-xl border bg-background p-2.5 text-sm"
+            >
+              {range(POLICY_THRESHOLD_BOUNDS.feedbackK.min, POLICY_THRESHOLD_BOUNDS.feedbackK.max).map((n) => (
+                <option key={n} value={n}>{n} people</option>
+              ))}
+            </select>
+            <p className="text-sm text-muted-foreground">
+              Vote and feedback results for a session are only shown once at least this many people took part, so no one&apos;s individual choice can be worked out. Below it, the result reads “fewer than {thresholds.feedbackK}”.
+            </p>
+          </div>
+
+          <div className="flex items-start gap-3">
+            <button
+              type="button"
+              role="switch"
+              id="publishRoles"
+              aria-checked={thresholds.publishRoles}
+              onClick={() => setThresholds({ publishRoles: !thresholds.publishRoles })}
+              className={cn(
+                'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out',
+                'focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2',
+                thresholds.publishRoles ? 'bg-primary' : 'bg-muted'
+              )}
+            >
+              <span
+                className={cn(
+                  'pointer-events-none inline-block h-5 w-5 transform rounded-full bg-background shadow ring-0 transition duration-200 ease-in-out',
+                  thresholds.publishRoles ? 'translate-x-5' : 'translate-x-0'
+                )}
+              />
+            </button>
+            <div className="space-y-1">
+              <Label htmlFor="publishRoles" className="cursor-pointer" onClick={() => setThresholds({ publishRoles: !thresholds.publishRoles })}>
+                Let hosts and organizers publish their role
+              </Label>
+              <p className="text-sm text-muted-foreground">
+                Off by default. When on, a host or organizer can choose to add “I hosted at this gathering” to their public profile. Nobody&apos;s role is published without their own opt-in.
               </p>
             </div>
           </div>

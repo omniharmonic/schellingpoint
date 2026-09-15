@@ -4,10 +4,11 @@
  *   npm run atproto:indexer
  *
  * Subscribes to the Jetstream v1 `/subscribe` endpoint (`ATPROTO_JETSTREAM_URL`)
- * with `wantedCollections` = INDEXED_COLLECTIONS, resumes from the persisted
- * `at_sync_cursor('jetstream')` (unix microseconds), ingests every commit
- * through `ingestFromJetstreamFrame`, persists the cursor every ~2s and on
- * shutdown, reconnects with 1s→30s backoff, logs a heartbeat every 60s.
+ * with `wantedCollections` = JETSTREAM_COLLECTIONS (ours + borrowed), resumes from the persisted
+ * `at_sync_cursor('jetstream')` (unix microseconds), ingests every commit through
+ * `ingestFromJetstreamFrame` (relevance-filtered, per-record error boundary), advances the cursor
+ * MONOTONICALLY every ~2s and on shutdown, reconnects with 1s→30s backoff, logs a heartbeat every
+ * 60s. Log lines carry collections and outcomes only — never a DID, handle or AT-URI (R9).
  *
  * Frame shape (validated live against jetstream2.us-east and the Jetstream RFD §5.1):
  *   {did, time_us, kind:'commit'|'identity'|'account',
@@ -26,7 +27,7 @@ import { pathToFileURL } from 'node:url'
 
 loadEnvConfig(process.cwd(), process.env.NODE_ENV !== 'production')
 
-import { INDEXED_COLLECTIONS } from '../src/lib/atproto/nsids'
+import { JETSTREAM_COLLECTIONS } from '../src/lib/atproto/nsids'
 
 type Ingest = typeof import('../src/lib/atproto/ingest')
 type IndexStore = typeof import('../src/lib/atproto/index-store')
@@ -103,7 +104,7 @@ async function main(): Promise<void> {
     if (lastTimeUs === null || lastTimeUs === flushedTimeUs) return
     const value = lastTimeUs
     try {
-      await store.setCursor(JETSTREAM_CURSOR_SOURCE, String(value))
+      await ingest.persistJetstreamCursor(value)
       flushedTimeUs = value
     } catch (e) {
       log('cursor persist failed', { error: e instanceof Error ? e.message : String(e) })
@@ -113,8 +114,8 @@ async function main(): Promise<void> {
   function connect(): void {
     if (stopping) return
     const cursor = lastTimeUs !== null ? Math.max(0, lastTimeUs - RESUME_OVERLAP_US) : null
-    const url = jetstreamSubscribeUrl(INDEXED_COLLECTIONS, cursor)
-    log('connecting', { url: url.replace(/cursor=\d+/, 'cursor=…'), cursor, collections: INDEXED_COLLECTIONS.length })
+    const url = jetstreamSubscribeUrl(JETSTREAM_COLLECTIONS, cursor)
+    log('connecting', { host: new URL(url).host, cursor, collections: JETSTREAM_COLLECTIONS.length })
     const socket = new WebSocket(url)
     ws = socket
 
@@ -139,13 +140,14 @@ async function main(): Promise<void> {
         .then(async () => {
           const res = await ingestFromJetstreamFrame(frame)
           if (!res) return
+          if (res.outcome === 'skipped:irrelevant' || res.outcome === 'skipped:collection') return
           ingested++
-          log(`${res.operation} ${res.outcome} ${res.uri}`, {
-            ...(res.sideEffects.length ? { effects: res.sideEffects } : {}),
-            ...(res.warnings.length ? { warnings: res.warnings } : {}),
+          log(`${res.operation} ${res.outcome} ${res.collection}`, {
+            ...(res.sideEffects.length ? { effects: res.sideEffects.map((e) => e.split(':')[0]) } : {}),
+            ...(res.warnings.length ? { warnings: res.warnings.length } : {}),
           })
         })
-        .catch((e) => log('ingest failed', { did: frame.did, collection: frame.commit?.collection, rkey: frame.commit?.rkey, error: e instanceof Error ? e.message : String(e) }))
+        .catch((e) => log('ingest failed', { collection: frame.commit?.collection, error: e instanceof Error ? e.name : 'error' }))
     }
     socket.onerror = (event: Event) => {
       log('socket error', { message: (event as ErrorEvent).message ?? 'unknown' })

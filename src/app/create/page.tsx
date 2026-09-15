@@ -20,27 +20,6 @@ import {
 } from './WizardNavigation';
 import { WIZARD_STEPS, getStepFromNumber, type WizardState, type WizardAction } from './useWizardState';
 
-// ============================================================================
-// Auth Helpers
-// ============================================================================
-
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-
-function getAccessToken(): string | null {
-  if (typeof window === 'undefined') return null;
-  const storageKey = `sb-${new URL(SUPABASE_URL).hostname.split('.')[0]}-auth-token`;
-  const stored = localStorage.getItem(storageKey);
-  if (stored) {
-    try {
-      const session = JSON.parse(stored);
-      return session?.access_token || null;
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
-
 import BasicsStep from './steps/BasicsStep';
 import DatesStep from './steps/DatesStep';
 import VenuesStep from './steps/VenuesStep';
@@ -48,6 +27,7 @@ import ScheduleStep from './steps/ScheduleStep';
 import TracksStep from './steps/TracksStep';
 import VotingStep from './steps/VotingStep';
 import BrandingStep from './steps/BrandingStep';
+import IdentityStep from './steps/IdentityStep';
 import ReviewStep from './steps/ReviewStep';
 
 // ============================================================================
@@ -205,37 +185,37 @@ function CreateWizardContent() {
     setSubmitError(null);
     setSlugSuggestions([]);
 
-    try {
-      // Get the access token
-      const accessToken = getAccessToken();
-      if (!accessToken) {
-        setSubmitError('You must be logged in to create an event. Please sign in and try again.');
-        setIsSubmitting(false);
-        return;
-      }
+    if (!state.identity.acknowledged) {
+      setSubmitError('Confirm what becomes public before creating the gathering.');
+      dispatch({ type: 'SET_STEP', payload: WIZARD_STEPS.indexOf('identity') });
+      setIsSubmitting(false);
+      return;
+    }
 
-      // Call the event creation API
+    try {
+      // Same-origin with the session cookie (plan §3.3). Read the body directly: a 409
+      // carries slug suggestions alongside the error.
       const response = await fetch('/api/events/create', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${accessToken}`,
-        },
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
         body: JSON.stringify({ wizardState: state }),
       });
-
-      const data = await response.json();
+      const data = (await response.json().catch(() => ({}))) as {
+        success?: boolean;
+        error?: string;
+        suggestions?: string[];
+        eventSlug?: string;
+        event?: { slug: string };
+        identity?: { status: 'created' | 'pending'; error?: string };
+      };
 
       if (!response.ok || !data.success) {
-        // Handle specific error cases
         if (response.status === 401) {
           setSubmitError('Your session has expired. Please sign in again.');
         } else if (response.status === 409) {
-          // Slug conflict - show suggestions
           setSubmitError(data.error || 'This event URL is already taken.');
-          if (data.suggestions?.length > 0) {
-            setSlugSuggestions(data.suggestions);
-          }
+          if (data.suggestions?.length) setSlugSuggestions(data.suggestions);
         } else {
           setSubmitError(data.error || 'Failed to create event. Please try again.');
         }
@@ -243,17 +223,11 @@ function CreateWizardContent() {
         return;
       }
 
-      // Success! Clear the draft and redirect to the new event dashboard
       clearDraft();
-
-      // Redirect to the event dashboard
       const eventSlug = data.eventSlug || data.event?.slug;
-      if (eventSlug) {
-        router.push(`/e/${eventSlug}/admin`);
-      } else {
-        // Fallback to home if no slug (shouldn't happen)
-        router.push('/');
-      }
+      // A pending identity is surfaced, with a retry, in Event settings.
+      const destination = data.identity?.status === 'pending' ? 'admin/settings?identity=pending#network' : 'admin';
+      router.push(eventSlug ? `/e/${eventSlug}/${destination}` : '/');
     } catch (error) {
       console.error('Error creating event:', error);
       setSubmitError('An unexpected error occurred. Please try again.');
@@ -318,6 +292,12 @@ function CreateWizardContent() {
         return (
           <Suspense fallback={<StepLoadingFallback />}>
             <BrandingStep {...props} />
+          </Suspense>
+        );
+      case 'identity':
+        return (
+          <Suspense fallback={<StepLoadingFallback />}>
+            <IdentityStep {...props} />
           </Suspense>
         );
       case 'review':

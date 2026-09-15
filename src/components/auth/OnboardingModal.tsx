@@ -2,13 +2,13 @@
 
 import * as React from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
+import { useParams } from 'next/navigation'
 import {
   User,
   Building2,
   Rocket,
   Hash,
   Send,
-  Hexagon,
   Mail,
   Plus,
   X,
@@ -26,12 +26,13 @@ import {
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
-
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+import { apiFetch } from '@/lib/api/client'
+import { PROFILE_INPUT_LIMITS, uploadAvatar, useInterestSuggestions } from '@/components/SettingsModal'
 
 interface OnboardingModalProps {
+  /** Kept for callers; the server identifies the account from the session cookie. */
   userId: string
+  /** Shown for reference; empty for accounts that signed in with Bluesky. */
   email: string
   onComplete: () => void
   /** Event-specific suggested topics (optional, falls back to defaults) */
@@ -41,23 +42,9 @@ interface OnboardingModalProps {
   requireProposalApproval?: boolean
 }
 
-// Empty fallback — topics are organizer-defined per event. When not set,
-// users can still add their own custom interests below.
-const DEFAULT_INTERESTS: string[] = []
-
-function getAccessToken(): string | null {
-  const storageKey = `sb-${new URL(SUPABASE_URL).hostname.split('.')[0]}-auth-token`
-  const stored = localStorage.getItem(storageKey)
-  if (stored) {
-    try {
-      const session = JSON.parse(stored)
-      return session?.access_token || null
-    } catch {
-      return null
-    }
-  }
-  return null
-}
+// Onboarding asks for a handful; the profile editor allows up to PROFILE_INPUT_LIMITS.interests.
+const ONBOARDING_MAX_INTERESTS = 5
+const SUGGESTION_CHIPS = 12
 
 // Intro slides explaining the app
 const introSlides = [
@@ -95,7 +82,7 @@ const introSlides = [
 
 ]
 
-export function OnboardingModal({ userId, email, onComplete, suggestedTopics, voteCredits = 100, votingMechanism = 'quadratic', requireProposalApproval = true }: OnboardingModalProps) {
+export function OnboardingModal({ email, onComplete, suggestedTopics, voteCredits = 100, votingMechanism = 'quadratic', requireProposalApproval = true }: OnboardingModalProps) {
   const slides = introSlides.map((slide, index) => index === 1 ? {
     ...slide,
     description: votingMechanism === 'quadratic'
@@ -105,8 +92,23 @@ export function OnboardingModal({ userId, email, onComplete, suggestedTopics, vo
       : `You have ${voteCredits} credits. Give one vote to each session you want to support.`,
   } : index === 3 ? { ...slide, tip: requireProposalApproval ? 'Organizers review proposals before opening them for voting.' : 'Your proposal will be available for the community to discover and support.' } : slide)
 
-  const suggestedInterests = suggestedTopics && suggestedTopics.length > 0 ? suggestedTopics : DEFAULT_INTERESTS
+  // Organizer topics for this gathering first, then interests fellow members already use.
+  const params = useParams<{ slug?: string }>()
+  const eventSlug = typeof params?.slug === 'string' ? params.slug : null
+  const fetchedInterests = useInterestSuggestions(true, eventSlug)
+  const suggestedInterests = React.useMemo(() => {
+    const seen = new Set<string>()
+    return [...(suggestedTopics ?? []), ...fetchedInterests]
+      .filter((t) => {
+        const key = t.trim().toLowerCase()
+        if (!key || seen.has(key)) return false
+        seen.add(key)
+        return true
+      })
+      .slice(0, SUGGESTION_CHIPS)
+  }, [suggestedTopics, fetchedInterests])
   const [step, setStep] = React.useState(1)
+  const [isUploading, setIsUploading] = React.useState(false)
   const [isSubmitting, setIsSubmitting] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
 
@@ -117,7 +119,6 @@ export function OnboardingModal({ userId, email, onComplete, suggestedTopics, vo
   const [affiliation, setAffiliation] = React.useState('')
   const [building, setBuilding] = React.useState('')
   const [telegram, setTelegram] = React.useState('')
-  const [ens, setEns] = React.useState('')
   const [interests, setInterests] = React.useState<string[]>([])
   const [customInterest, setCustomInterest] = React.useState('')
 
@@ -129,100 +130,59 @@ export function OnboardingModal({ userId, email, onComplete, suggestedTopics, vo
   const isIntroStep = step <= introStepCount
   const profileStep = step - introStepCount // 1, 2, or 3 for profile steps
 
+  const hasInterest = (interest: string) => interests.some((i) => i.toLowerCase() === interest.toLowerCase())
+
   const toggleInterest = (interest: string) => {
-    if (interests.includes(interest)) {
-      setInterests(interests.filter((i) => i !== interest))
-    } else if (interests.length < 5) {
+    if (hasInterest(interest)) {
+      setInterests(interests.filter((i) => i.toLowerCase() !== interest.toLowerCase()))
+    } else if (interests.length < ONBOARDING_MAX_INTERESTS) {
       setInterests([...interests, interest])
     }
   }
 
   const addCustomInterest = () => {
-    if (customInterest.trim() && !interests.includes(customInterest.trim()) && interests.length < 5) {
-      setInterests([...interests, customInterest.trim()])
+    const value = customInterest.trim().slice(0, PROFILE_INPUT_LIMITS.interestLength)
+    if (value && !hasInterest(value) && interests.length < ONBOARDING_MAX_INTERESTS) {
+      setInterests([...interests, value])
       setCustomInterest('')
     }
   }
 
-  const handlePhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
-    if (file) {
-      const reader = new FileReader()
-      reader.onloadend = () => {
-        setAvatarUrl(reader.result as string)
-      }
-      reader.readAsDataURL(file)
+    e.target.value = ''
+    if (!file) return
+    setIsUploading(true)
+    setError(null)
+    try {
+      setAvatarUrl(await uploadAvatar(file))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Upload failed.')
+    } finally {
+      setIsUploading(false)
     }
   }
 
   const handleSubmit = async () => {
     setIsSubmitting(true)
     setError(null)
-
-    const token = getAccessToken()
-    if (!token) {
-      setError('Session expired. Please refresh and try again.')
-      setIsSubmitting(false)
-      return
-    }
-
-    // Full profile data with all fields
-    const fullProfileData: Record<string, unknown> = {
-      display_name: displayName || null,
-      bio: bio || null,
-      avatar_url: avatarUrl || null,
-      affiliation: affiliation || null,
-      building: building || null,
-      telegram: telegram || null,
-      ens: ens || null,
-      interests: interests.length > 0 ? interests : null,
-      onboarding_completed: true,
-    }
-
-    // Minimal profile data (original schema only)
-    const minimalProfileData = {
-      display_name: displayName || null,
-      bio: bio || null,
-    }
-
     try {
-      // First try with all fields
-      let response = await fetch(`${SUPABASE_URL}/rest/v1/profiles?id=eq.${userId}`, {
+      await apiFetch('/api/me/profile', {
         method: 'PATCH',
-        headers: {
-          'apikey': SUPABASE_KEY,
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-          'Prefer': 'return=minimal',
+        json: {
+          display_name: displayName,
+          bio,
+          avatar_url: avatarUrl || null,
+          affiliation,
+          building,
+          telegram,
+          interests,
+          onboarding_completed: true,
         },
-        body: JSON.stringify(fullProfileData),
       })
-
-      // If 400 error (likely missing columns), retry with minimal fields
-      if (response.status === 400) {
-        console.log('Full update failed (400), retrying with minimal fields...')
-        response = await fetch(`${SUPABASE_URL}/rest/v1/profiles?id=eq.${userId}`, {
-          method: 'PATCH',
-          headers: {
-            'apikey': SUPABASE_KEY,
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json',
-            'Prefer': 'return=minimal',
-          },
-          body: JSON.stringify(minimalProfileData),
-        })
-      }
-
-      if (response.ok || response.status === 204) {
-        onComplete()
-      } else {
-        const errorText = await response.text()
-        console.error('Profile update failed:', response.status, errorText)
-        setError(`Failed to save profile. Please try again. (${response.status})`)
-      }
+      onComplete()
     } catch (err) {
-      console.error('Error updating profile:', err)
-      setError('Network error. Please check your connection and try again.')
+      setError(err instanceof Error ? err.message : 'Could not save your profile. Please try again.')
     } finally {
       setIsSubmitting(false)
     }
@@ -277,7 +237,7 @@ export function OnboardingModal({ userId, email, onComplete, suggestedTopics, vo
               <div className="flex items-center gap-4">
                 <div className="h-20 w-20 rounded-full bg-muted flex items-center justify-center overflow-hidden border-2 border-dashed border-border">
                   {avatarUrl ? (
-                    <img src={avatarUrl} alt="Profile" className="h-full w-full object-cover" />
+                    <img src={avatarUrl} alt="Profile" className="h-full w-full object-cover" referrerPolicy="no-referrer" />
                   ) : (
                     <User className="h-10 w-10 text-muted-foreground" />
                   )}
@@ -287,7 +247,7 @@ export function OnboardingModal({ userId, email, onComplete, suggestedTopics, vo
                     <Button type="button" variant="outline" size="sm" asChild>
                       <span className="cursor-pointer">
                         <Upload className="h-4 w-4 mr-2" />
-                        Upload Photo
+                        {isUploading ? 'Uploading...' : 'Upload Photo'}
                       </span>
                     </Button>
                     <input
@@ -295,6 +255,7 @@ export function OnboardingModal({ userId, email, onComplete, suggestedTopics, vo
                       type="file"
                       accept="image/*"
                       onChange={handlePhotoUpload}
+                      disabled={isUploading}
                       className="hidden"
                     />
                   </label>
@@ -311,6 +272,7 @@ export function OnboardingModal({ userId, email, onComplete, suggestedTopics, vo
                 id="onboarding-display-name"
                 placeholder="What should people call you?"
                 value={displayName}
+                maxLength={PROFILE_INPUT_LIMITS.displayName}
                 onChange={(e) => setDisplayName(e.target.value)}
                 autoFocus
               />
@@ -325,6 +287,7 @@ export function OnboardingModal({ userId, email, onComplete, suggestedTopics, vo
                 id="onboarding-affiliation"
                 placeholder="Company, DAO, or project"
                 value={affiliation}
+                maxLength={PROFILE_INPUT_LIMITS.affiliation}
                 onChange={(e) => setAffiliation(e.target.value)}
               />
             </div>
@@ -355,6 +318,7 @@ export function OnboardingModal({ userId, email, onComplete, suggestedTopics, vo
                 id="onboarding-building"
                 placeholder="Describe your project or work"
                 value={building}
+                maxLength={PROFILE_INPUT_LIMITS.building}
                 onChange={(e) => setBuilding(e.target.value)}
               />
               <p className="text-xs text-muted-foreground">
@@ -371,30 +335,24 @@ export function OnboardingModal({ userId, email, onComplete, suggestedTopics, vo
                 id="onboarding-telegram"
                 placeholder="@username"
                 value={telegram}
+                maxLength={PROFILE_INPUT_LIMITS.telegram}
                 onChange={(e) => setTelegram(e.target.value)}
               />
+              <p className="text-xs text-muted-foreground">
+                Only fellow members of gatherings you join can see this. You can verify an ENS name later from your profile.
+              </p>
             </div>
 
-            <div className="space-y-2">
-              <label htmlFor="onboarding-ens" className="text-sm font-medium flex items-center gap-2">
-                <Hexagon className="h-4 w-4" />
-                ENS Name <span className="text-muted-foreground font-normal">(optional)</span>
-              </label>
-              <Input
-                id="onboarding-ens"
-                placeholder="yourname.eth"
-                value={ens}
-                onChange={(e) => setEns(e.target.value)}
-              />
-            </div>
-
-            <div className="p-4 rounded-lg bg-muted/30 border">
-              <div className="flex items-center gap-2 text-sm">
-                <Mail className="h-4 w-4 text-muted-foreground" />
-                <span className="text-muted-foreground">Email:</span>
-                <span className="font-medium">{email}</span>
+            {email && (
+              <div className="p-4 rounded-lg bg-muted/30 border">
+                <div className="flex items-center gap-2 text-sm">
+                  <Mail className="h-4 w-4 text-muted-foreground" />
+                  <span className="text-muted-foreground">Email:</span>
+                  <span className="font-medium">{email}</span>
+                </div>
+                <p className="text-xs text-muted-foreground mt-1">Never shown to other people.</p>
               </div>
-            </div>
+            )}
           </div>
         )
       case 3:
@@ -406,7 +364,7 @@ export function OnboardingModal({ userId, email, onComplete, suggestedTopics, vo
                 Topics you're interested in
               </label>
               <p className="text-xs text-muted-foreground">
-                Select up to 5 topics to help others find you
+                Select up to {ONBOARDING_MAX_INTERESTS} topics to help fellow members find you
               </p>
             </div>
 
@@ -428,14 +386,14 @@ export function OnboardingModal({ userId, email, onComplete, suggestedTopics, vo
 
             <div className="flex flex-wrap gap-2">
               {suggestedInterests
-                .filter((i) => !interests.includes(i))
+                .filter((i) => !hasInterest(i))
                 .map((interest) => (
                   <button
                     key={interest}
                     type="button"
                     onClick={() => toggleInterest(interest)}
                     className="inline-flex items-center rounded-full border px-4 py-2.5 text-sm min-h-[44px] hover:bg-accent transition-colors"
-                    disabled={interests.length >= 5}
+                    disabled={interests.length >= ONBOARDING_MAX_INTERESTS}
                   >
                     <Plus className="h-4 w-4 mr-1.5" />
                     {interest}
@@ -447,6 +405,7 @@ export function OnboardingModal({ userId, email, onComplete, suggestedTopics, vo
               <Input
                 placeholder="Add custom topic"
                 value={customInterest}
+                maxLength={PROFILE_INPUT_LIMITS.interestLength}
                 onChange={(e) => setCustomInterest(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
@@ -455,14 +414,14 @@ export function OnboardingModal({ userId, email, onComplete, suggestedTopics, vo
                   }
                 }}
                 className="flex-1"
-                disabled={interests.length >= 5}
+                disabled={interests.length >= ONBOARDING_MAX_INTERESTS}
               />
               <Button
                 type="button"
                 variant="outline"
                 size="icon"
                 onClick={addCustomInterest}
-                disabled={!customInterest.trim() || interests.length >= 5}
+                disabled={!customInterest.trim() || interests.length >= ONBOARDING_MAX_INTERESTS}
               >
                 <Plus className="h-4 w-4" />
               </Button>
@@ -548,7 +507,7 @@ export function OnboardingModal({ userId, email, onComplete, suggestedTopics, vo
             ) : (
               <Button
                 onClick={handleSubmit}
-                disabled={isSubmitting}
+                disabled={isSubmitting || isUploading}
                 className="btn-primary-glow min-h-[44px]"
               >
                 {isSubmitting ? 'Saving...' : 'Join the gathering'}

@@ -3,11 +3,15 @@
 import * as React from 'react'
 import Link from 'next/link'
 import { useEvent } from '@/contexts/EventContext'
-import { Heart, Mic, Wrench, MessageSquare, Users, Monitor, Plus, Minus, MapPin, Clock, ChevronRight } from 'lucide-react'
+import { Heart, Mic, Wrench, MessageSquare, Users, Monitor, MapPin, Clock, ChevronRight } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
-import { Button } from '@/components/ui/button'
 import { RSVPIndicator } from '@/components/RSVPButton'
-import { cn, votesToCredits, nextVoteCost, type VotingMechanism } from '@/lib/utils'
+import { VoteControl } from '@/components/VoteControl'
+import { apiFetch } from '@/lib/api/client'
+import { cn } from '@/lib/utils'
+import type { SessionView } from '@/app/api/v1/sessions/_lib/read'
+import { hostByline } from '@/app/api/v1/sessions/_lib/byline'
+
 
 const formatIcons: Record<string, React.ReactNode> = {
   talk: <Mic className="h-3.5 w-3.5" strokeWidth={1.5} />,
@@ -18,8 +22,7 @@ const formatIcons: Record<string, React.ReactNode> = {
 }
 
 function formatTime(isoString: string, timeZone: string): string {
-  const date = new Date(isoString)
-  return date.toLocaleTimeString('en-US', {
+  return new Date(isoString).toLocaleTimeString('en-US', {
     timeZone,
     hour: 'numeric',
     minute: '2-digit',
@@ -27,74 +30,35 @@ function formatTime(isoString: string, timeZone: string): string {
   })
 }
 
+/** Save or unsave a session in the viewer's personal schedule. */
+export async function setFavorite(eventSlug: string, sessionId: string, favorite: boolean): Promise<void> {
+  await apiFetch(`/api/v1/events/${encodeURIComponent(eventSlug)}/favorites/${sessionId}`, {
+    method: favorite ? 'PUT' : 'DELETE',
+  })
+}
+
 interface SessionCardProps {
-  session: {
-    id: string
-    title: string
-    description: string | null
-    format: string
-    duration: number
-    host_name: string | null
-    topic_tags: string[] | null
-    total_votes: number
-    status: string
-    venue?: { name: string; capacity?: number | null } | null
-    time_slot?: { label: string; start_time: string } | null
-    is_self_hosted?: boolean
-    custom_location?: string | null
-    self_hosted_start_time?: string | null
-    self_hosted_end_time?: string | null
-    track?: { id: string; name: string; color: string | null } | null
-    cohosts?: { profile: { display_name: string | null } | null }[] | null
-    rsvp_count?: number
-    waitlist_count?: number
-  }
+  session: SessionView
   eventSlug: string
-  userVotes?: number
   isFavorited?: boolean
-  remainingCredits: number
-  onVote?: (sessionId: string, newVoteCount: number) => void
   onToggleFavorite?: (sessionId: string) => void
+  /** Render the ballot control (C) for this session. */
   showVoting?: boolean
   isLoggedIn?: boolean
-  userRsvpStatus?: 'confirmed' | 'waitlist' | null
-  votingMechanism?: VotingMechanism
 }
 
 export function SessionCard({
   session,
   eventSlug,
-  userVotes = 0,
   isFavorited = false,
-  remainingCredits,
-  onVote,
   onToggleFavorite,
   showVoting = true,
   isLoggedIn = false,
-  userRsvpStatus,
-  votingMechanism = 'quadratic',
 }: SessionCardProps) {
   const event = useEvent()
   const eventIsOver = event.status === 'completed' || event.status === 'archived'
-  const currentCredits = votesToCredits(userVotes, votingMechanism)
-  const costToAdd = nextVoteCost(userVotes, votingMechanism)
-  const canAddVote = remainingCredits >= costToAdd
-  const isApproval = votingMechanism === 'approval'
-  const showAddControl = !isApproval || userVotes === 0
-
-  const handleAddVote = () => {
-    if (canAddVote && onVote) {
-      onVote(session.id, userVotes + 1)
-    }
-  }
-
-  const handleRemoveVote = () => {
-    if (userVotes > 0 && onVote) {
-      onVote(session.id, userVotes - 1)
-    }
-  }
-
   const trackColor = session.track?.color || 'hsl(var(--signal))'
+  const startsAt = session.time_slot?.start_time || (session.is_self_hosted ? session.self_hosted_start_time : null)
 
   return (
     <Card
@@ -109,11 +73,10 @@ export function SessionCard({
     >
       <CardContent className="p-3.5 sm:p-5">
         <div className="space-y-2.5 sm:space-y-3">
-          {/* Header: format label + duration (monospace system layer) */}
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 text-muted-foreground">
               <span className="flex items-center gap-1.5 text-[11px] tracking-wider">
-                {formatIcons[session.format] || <Mic className="h-3.5 w-3.5" strokeWidth={1.5} />}
+                {formatIcons[session.format ?? ''] || <Mic className="h-3.5 w-3.5" strokeWidth={1.5} />}
                 {session.format}
               </span>
               <span className="text-border">·</span>
@@ -132,7 +95,6 @@ export function SessionCard({
               )}
             </div>
 
-            {/* Favorite */}
             {onToggleFavorite && isLoggedIn && (
               <button
                 aria-label={isFavorited ? `Unsave ${session.title}` : `Save ${session.title}`}
@@ -151,7 +113,6 @@ export function SessionCard({
             )}
           </div>
 
-          {/* Title (human layer — display font) */}
           <Link href={`/e/${eventSlug}/sessions/${session.id}`} className="block">
             <h3 className="font-display font-semibold text-lg leading-snug line-clamp-2 group-hover:text-primary transition-colors">
               {session.title}
@@ -159,22 +120,10 @@ export function SessionCard({
             </h3>
           </Link>
 
-          {/* Host */}
-          {session.host_name && (() => {
-            const cohostNames = (session.cohosts || [])
-              .map(c => c.profile?.display_name)
-              .filter(Boolean) as string[]
-            let byLine = session.host_name
-            if (cohostNames.length === 1) byLine += ` & ${cohostNames[0]}`
-            else if (cohostNames.length > 1) byLine += ` & ${cohostNames.length} others`
-            return (
-              <p className="text-xs text-muted-foreground">
-                {byLine}
-              </p>
-            )
-          })()}
+          <p className={cn('text-xs', session.host ? 'text-muted-foreground' : 'text-muted-foreground italic')}>
+            {hostByline(session)}
+          </p>
 
-          {/* Description */}
           {session.description && (
             <Link href={`/e/${eventSlug}/sessions/${session.id}`} className="block">
               <p className="text-sm text-muted-foreground line-clamp-2 hover:text-foreground/80 transition-colors">
@@ -183,8 +132,7 @@ export function SessionCard({
             </Link>
           )}
 
-          {/* Tags — monospace diagram labels */}
-          {session.topic_tags && session.topic_tags.length > 0 && (
+          {session.topic_tags.length > 0 && (
             <div className="flex flex-wrap gap-1.5">
               {session.topic_tags.slice(0, 3).map((tag) => (
                 <span
@@ -197,83 +145,37 @@ export function SessionCard({
             </div>
           )}
 
-          {/* Scheduled info */}
-          {(session.venue || session.is_self_hosted || session.self_hosted_start_time) && (
+          {(session.venue || session.is_self_hosted) && (
             <div className="flex items-center gap-3 text-xs text-muted-foreground bg-surface-2 rounded-md p-2.5">
               <span className="flex items-center gap-1.5">
                 <MapPin className="h-3.5 w-3.5" strokeWidth={1.5} />
-                {session.is_self_hosted ? (
-                  session.custom_location || 'Self-Hosted'
-                ) : session.venue ? (
-                  session.venue.name
-                ) : null}
+                {session.is_self_hosted ? 'Self-hosted' : session.venue?.name}
               </span>
-              {(session.time_slot?.start_time || session.self_hosted_start_time) && (
+              {startsAt && (
                 <span className="flex items-center gap-1.5">
                   <Clock className="h-3.5 w-3.5" strokeWidth={1.5} />
-                  {formatTime(session.time_slot?.start_time || session.self_hosted_start_time!, event.timezone)}
+                  {formatTime(startsAt, event.timezone)}
                 </span>
               )}
             </div>
           )}
 
-          {/* Signal meter: vote count + controls */}
-          <div className="flex items-center justify-between pt-3 border-t border-border/50">
-            <div className="flex items-center gap-3">
-              {/* Signal strength — vote count as monospace readout */}
-              <div className="flex items-baseline gap-1.5">
-                <span className="text-lg font-bold text-primary tabular-nums">
-                  {session.total_votes}
-                </span>
-                <span className="text-xs text-muted-foreground">
-                  votes
-                </span>
+          {((session.status === 'scheduled' && session.venue?.capacity) || (showVoting && !eventIsOver)) && (
+            <div className="flex items-center justify-between gap-3 pt-3 border-t border-border/50">
+              <div className="flex items-center gap-3">
+                {session.status === 'scheduled' && session.venue?.capacity ? (
+                  <RSVPIndicator
+                    rsvpCount={session.rsvp_count}
+                    capacity={session.venue.capacity}
+                    userStatus={session.my_rsvp?.status ?? null}
+                  />
+                ) : null}
               </div>
-              {/* RSVP indicator for scheduled sessions */}
-              {session.status === 'scheduled' && session.venue?.capacity && (
-                <RSVPIndicator
-                  rsvpCount={session.rsvp_count || 0}
-                  capacity={session.venue.capacity}
-                  userStatus={userRsvpStatus}
-                />
+              {showVoting && !eventIsOver && (
+                <VoteControl eventSlug={eventSlug} sessionId={session.id} sessionTitle={session.title} compact />
               )}
             </div>
-
-            {/* Voting controls — precise instrument buttons */}
-            {showVoting && !eventIsOver && isLoggedIn && onVote && (
-              <div className="flex items-center gap-1.5">
-                <Button
-                  size="icon-sm"
-                  variant="outline"
-                  aria-label={`Remove a vote from ${session.title}`}
-                  onClick={handleRemoveVote}
-                  disabled={userVotes === 0}
-                  className="rounded-lg"
-                >
-                  <Minus className="h-3.5 w-3.5" strokeWidth={1.5} />
-                </Button>
-
-                <div className="min-w-[52px] text-center">
-                  <div className="font-bold text-sm tabular-nums">{userVotes}</div>
-                  <div className="text-xs text-muted-foreground tracking-wider">
-                    {currentCredits} credits
-                  </div>
-                </div>
-
-                <Button
-                  size="icon-sm"
-                  variant="outline"
-                  aria-label={`Add a vote to ${session.title} for ${costToAdd} credits`}
-                  onClick={handleAddVote}
-                  disabled={!canAddVote || !showAddControl}
-                  title={isApproval && userVotes > 0 ? 'Already approved' : undefined}
-                  className="rounded-lg"
-                >
-                  <Plus className="h-3.5 w-3.5" strokeWidth={1.5} />
-                </Button>
-              </div>
-            )}
-          </div>
+          )}
         </div>
       </CardContent>
     </Card>

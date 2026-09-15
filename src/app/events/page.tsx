@@ -7,15 +7,12 @@ import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Footer } from '@/components/Footer';
 import { SiteHeader } from '@/components/SiteHeader';
-import { createClient } from '@/lib/supabase/server';
-import type { EventRow } from '@/types/event';
+import { getDirectoryEvents, type DirectoryEvent } from '@/lib/events';
 
 export const metadata: Metadata = {
   title: 'All gatherings | Schelling Point',
   description: 'Browse every public gathering on Schelling Point — upcoming unconferences, hackathons, and community events, plus the ones that came before.',
 };
-
-type DirectoryEvent = EventRow & { attendee_count?: number };
 
 // Status badge configuration (mirrors the homepage directory)
 const statusBadgeConfig: Record<string, { label: string; variant: 'default' | 'secondary' | 'destructive' | 'outline' | 'success' }> = {
@@ -74,42 +71,21 @@ function EventCard({ event }: { event: DirectoryEvent }) {
 
 // Mirrors the homepage query: public, non-draft, non-archived events with attendee counts.
 async function fetchDirectory() {
-  const supabase = await createClient();
-
-  const { data: events, error } = await supabase
-    .from('events')
-    .select('*')
-    .eq('visibility', 'public')
-    .not('status', 'in', '("draft","archived")')
-    .order('start_date', { ascending: true });
-
-  if (error || !events) {
+  let events: DirectoryEvent[];
+  try {
+    events = await getDirectoryEvents();
+  } catch (error) {
     console.error('Error fetching events directory:', error);
     return { upcomingEvents: [] as DirectoryEvent[], pastEvents: [] as DirectoryEvent[], loadFailed: true };
   }
-
-  const eventIds = events.map(e => e.id);
-  const { data: memberCounts } = eventIds.length
-    ? await supabase.from('event_members').select('event_id').in('event_id', eventIds)
-    : { data: [] as { event_id: string }[] };
-
-  const attendeeCounts: Record<string, number> = {};
-  (memberCounts ?? []).forEach(m => {
-    attendeeCounts[m.event_id] = (attendeeCounts[m.event_id] || 0) + 1;
-  });
-
-  const eventsWithCounts: DirectoryEvent[] = events.map(e => ({
-    ...e,
-    attendee_count: attendeeCounts[e.id] || 0,
-  }));
 
   const now = new Date();
   const isUpcoming = (e: DirectoryEvent) =>
     new Date(`${e.end_date.slice(0, 10)}T23:59:59`) >= now && e.status !== 'completed';
 
-  const upcomingEvents = eventsWithCounts.filter(isUpcoming);
+  const upcomingEvents = events.filter(isUpcoming);
   // Most recent past gatherings first
-  const pastEvents = eventsWithCounts
+  const pastEvents = events
     .filter(e => !isUpcoming(e))
     .sort((a, b) => b.start_date.localeCompare(a.start_date));
 
@@ -121,6 +97,8 @@ async function fetchDirectory() {
  *
  * Every public gathering on the platform: upcoming first, then past.
  */
+export const dynamic = 'force-dynamic';
+
 export default async function EventsDirectoryPage() {
   const { upcomingEvents, pastEvents, loadFailed } = await fetchDirectory();
 

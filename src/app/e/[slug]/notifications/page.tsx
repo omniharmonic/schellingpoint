@@ -5,32 +5,13 @@ import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { Bell, CheckCheck, ArrowLeft, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardContent } from '@/components/ui/card'
 import { DashboardLayout } from '@/components/DashboardLayout'
-import { useNotifications, type Notification } from '@/hooks/useNotifications'
+import { safeActionPath, useNotifications, type Notification } from '@/hooks/useNotifications'
+import { TYPE_LABELS } from '@/lib/notifications/categories'
 import { useEvent } from '@/contexts/EventContext'
 import { cn } from '@/lib/utils'
 import { formatDistanceToNow, format } from 'date-fns'
-
-// Map notification types to readable labels
-const typeLabels: Record<string, string> = {
-  session_approved: 'Session Approved',
-  session_rejected: 'Session Rejected',
-  session_scheduled: 'Session Scheduled',
-  session_rescheduled: 'Session Rescheduled',
-  session_cancelled: 'Session Cancelled',
-  vote_milestone: 'Vote Milestone',
-  cohost_invited: 'Co-host Invitation',
-  cohost_accepted: 'Co-host Accepted',
-  cohost_declined: 'Co-host Declined',
-  voting_opened: 'Voting Open',
-  voting_closed: 'Voting Closed',
-  schedule_published: 'Schedule Published',
-  event_reminder: 'Event Reminder',
-  admin_announcement: 'Announcement',
-  new_proposal: 'New Proposal',
-  proposal_needs_review: 'Review Needed',
-}
 
 // Color styles for notification types
 const typeStyles: Record<string, string> = {
@@ -39,7 +20,6 @@ const typeStyles: Record<string, string> = {
   session_scheduled: 'bg-blue-500',
   session_rescheduled: 'bg-yellow-500',
   session_cancelled: 'bg-red-500',
-  vote_milestone: 'bg-purple-500',
   cohost_invited: 'bg-indigo-500',
   cohost_accepted: 'bg-green-500',
   cohost_declined: 'bg-orange-500',
@@ -50,6 +30,10 @@ const typeStyles: Record<string, string> = {
   admin_announcement: 'bg-primary',
   new_proposal: 'bg-cyan-500',
   proposal_needs_review: 'bg-yellow-500',
+  proposal_changed: 'bg-yellow-500',
+  approval_requested: 'bg-orange-500',
+  event_invitation: 'bg-indigo-500',
+  ticket_confirmed: 'bg-green-500',
   default: 'bg-muted-foreground',
 }
 
@@ -63,14 +47,15 @@ function NotificationRow({
   const router = useRouter()
   const isUnread = !notification.read_at
   const style = typeStyles[notification.type] || typeStyles.default
-  const typeLabel = typeLabels[notification.type] || notification.type
+  const typeLabel = TYPE_LABELS[notification.type] || notification.type
 
   const handleClick = () => {
     if (isUnread) {
       onMarkAsRead(notification.id)
     }
-    if (notification.action_url) {
-      router.push(notification.action_url)
+    const target = safeActionPath(notification.action_url)
+    if (target) {
+      router.push(target)
     }
   }
 
@@ -126,9 +111,13 @@ export default function NotificationsPage() {
     notifications,
     unreadCount,
     isLoading,
+    isLoadingMore,
+    hasMore,
+    error,
     markAsRead,
     markAllAsRead,
-  } = useNotifications({ eventId: event.id, limit: 50 })
+    loadMore,
+  } = useNotifications({ eventSlug: event.slug, limit: 30 })
 
   return (
     <DashboardLayout>
@@ -163,7 +152,9 @@ export default function NotificationsPage() {
         {/* Notifications list */}
         <Card>
           <CardContent className="p-0">
-            {isLoading ? (
+            {error && notifications.length === 0 && !isLoading ? (
+              <div className="py-12 text-center text-sm text-muted-foreground">{error}</div>
+            ) : isLoading ? (
               <div className="flex items-center justify-center py-12">
                 <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
               </div>
@@ -184,6 +175,14 @@ export default function NotificationsPage() {
                     onMarkAsRead={markAsRead}
                   />
                 ))}
+                {hasMore && (
+                  <div className="p-3 text-center">
+                    <Button variant="ghost" size="sm" onClick={() => loadMore()} disabled={isLoadingMore}>
+                      {isLoadingMore && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+                      Load older notifications
+                    </Button>
+                  </div>
+                )}
               </div>
             )}
           </CardContent>

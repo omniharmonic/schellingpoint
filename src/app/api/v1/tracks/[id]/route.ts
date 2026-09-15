@@ -1,61 +1,32 @@
-import { createAdminClient } from '@/lib/supabase/server'
-import { validateApiKey, partnerEventForRow } from '@/lib/api/auth'
-import {
-  apiSuccess,
-  unauthorized,
-  badRequest,
-  notFound,
-  methodNotAllowed,
-  isValidUUID,
-  parseIncludes,
-} from '@/lib/api/response'
+import { sql } from '@/lib/db'
+import { publicEventForRow } from '@/lib/api/auth'
+import { badRequest, isValidUUID, methodNotAllowed, notFound, parseIncludes } from '@/lib/api/response'
+import { publicJson, publishedSessions, publishedTracks } from '../../schedule/public-read'
 
-const TRACK_FIELDS = 'id,name,slug,description,color,lead_name,is_active,created_at'
-const VALID_INCLUDES = ['sessions']
+/**
+ * GET /api/v1/tracks/[id][?event=<slug>][&include=sessions] — one published track, optionally
+ * with its published sessions. Unpublished tracks, and tracks of private or draft gatherings,
+ * are 404.
+ */
+export const dynamic = 'force-dynamic'
 
-export async function GET(
-  request: Request,
-  { params }: { params: Promise<{ id: string }> }
-) {
-  if (!validateApiKey(request)) return unauthorized()
-
+export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
-  if (!isValidUUID(id)) {
-    return badRequest('Invalid track ID format. Expected a UUID.')
-  }
+  if (!isValidUUID(id)) return badRequest('Invalid track ID format. Expected a UUID.')
+  const includes = parseIncludes(request, ['sessions'])
+  if ('error' in includes) return includes.error
 
-  const result = parseIncludes(request, VALID_INCLUDES)
-  if ('error' in result) return result.error
-
-  const supabase = await createAdminClient()
-  const { data, error } = await supabase
-    .from('tracks')
-    .select(`event_id,${TRACK_FIELDS}`)
-    .eq('id', id)
-    .single()
-
-  if (error || !data) {
-    return notFound('Track')
-  }
-
-  // Hide rows whose event is private/draft (or does not match ?event=)
-  const { event_id, ...track } = data
-  const event = await partnerEventForRow(request, supabase, event_id)
+  const [row] = await sql<{ event_id: string }[]>`select event_id from tracks where id = ${id}`
+  const event = await publicEventForRow(request, row?.event_id)
   if (!event) return notFound('Track')
+  const [track] = await publishedTracks(event.id, id)
+  if (!track) return notFound('Track')
 
-  if (result.includes.includes('sessions')) {
-    const { data: sessions } = await supabase
-      .from('sessions')
-      .select('id,title,description,format,duration,host_name,status,session_type,topic_tags,total_votes,created_at')
-      .eq('track_id', id)
-      .eq('event_id', event.id)
-      .in('status', ['approved', 'scheduled'])
-      .order('total_votes', { ascending: false })
-
-    return apiSuccess({ ...track, sessions: sessions ?? [] })
+  if (includes.includes.includes('sessions')) {
+    const sessions = await publishedSessions(event.id, { actorDid: event.actor_did, trackId: id })
+    return publicJson({ ...track, sessions })
   }
-
-  return apiSuccess(track)
+  return publicJson(track)
 }
 
 export async function POST() { return methodNotAllowed() }

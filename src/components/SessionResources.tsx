@@ -18,7 +18,7 @@ import {
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { getAccessToken } from '@/lib/supabase/client'
+import { apiFetch } from '@/lib/api/client'
 import { cn } from '@/lib/utils'
 
 export type ResourceKind = 'slides' | 'recording' | 'notes' | 'link' | 'repo'
@@ -30,7 +30,6 @@ interface Resource {
   url: string
   kind: ResourceKind
   display_order: number
-  added_by: string | null
   created_at: string
 }
 
@@ -50,11 +49,6 @@ const KIND_META: Record<ResourceKind, { label: string; icon: React.ComponentType
 }
 
 const KIND_ORDER: ResourceKind[] = ['slides', 'recording', 'notes', 'repo', 'link']
-
-function authHeaders(): Record<string, string> {
-  const token = getAccessToken()
-  return token ? { Authorization: `Bearer ${token}` } : {}
-}
 
 function isValidHttpUrl(value: string): boolean {
   if (!/^https?:\/\//i.test(value)) return false
@@ -90,11 +84,7 @@ export function SessionResources({ sessionId, eventSlug, canManage }: SessionRes
 
   const load = React.useCallback(async () => {
     try {
-      const response = await fetch(endpoint, { headers: authHeaders() })
-      if (!response.ok) {
-        throw new Error((await response.json().catch(() => null))?.error || 'Failed to load resources')
-      }
-      const json = await response.json()
+      const json = await apiFetch<{ resources: Resource[] }>(endpoint)
       setResources(json.resources ?? [])
       setError(null)
     } catch (err) {
@@ -118,15 +108,10 @@ export function SessionResources({ sessionId, eventSlug, canManage }: SessionRes
     setIsSaving(true)
     setError(null)
     try {
-      const response = await fetch(endpoint, {
+      const json = await apiFetch<{ resource: Resource }>(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({ title: title.trim(), url: urlTrimmed, kind }),
+        json: { title: title.trim(), url: urlTrimmed, kind },
       })
-      const json = await response.json().catch(() => null)
-      if (!response.ok) {
-        throw new Error(json?.error || 'Failed to add resource')
-      }
       setResources((prev) => [...prev, json.resource])
       setTitle('')
       setUrl('')
@@ -144,13 +129,7 @@ export function SessionResources({ sessionId, eventSlug, canManage }: SessionRes
     setBusyId(resource.id)
     setError(null)
     try {
-      const response = await fetch(`${endpoint}?id=${encodeURIComponent(resource.id)}`, {
-        method: 'DELETE',
-        headers: authHeaders(),
-      })
-      if (!response.ok) {
-        throw new Error((await response.json().catch(() => null))?.error || 'Failed to remove resource')
-      }
+      await apiFetch(`${endpoint}?id=${encodeURIComponent(resource.id)}`, { method: 'DELETE' })
       setResources((prev) => prev.filter((r) => r.id !== resource.id))
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to remove resource')
@@ -169,15 +148,10 @@ export function SessionResources({ sessionId, eventSlug, canManage }: SessionRes
     setBusyId(next[target].id)
     setError(null)
     try {
-      const response = await fetch(endpoint, {
+      const json = await apiFetch<{ resources: Resource[] }>(endpoint, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({ order: next.map((r) => r.id) }),
+        json: { order: next.map((r) => r.id) },
       })
-      const json = await response.json().catch(() => null)
-      if (!response.ok) {
-        throw new Error(json?.error || 'Failed to reorder resources')
-      }
       setResources(json.resources ?? next)
     } catch (err) {
       setResources(previous)

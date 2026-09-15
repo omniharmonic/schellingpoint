@@ -1,551 +1,253 @@
 'use client'
 
 import * as React from 'react'
-import { useRouter } from 'next/navigation'
-import { Send, Loader2, CheckCircle, History, Megaphone, Mail, CalendarCheck, AlertCircle } from 'lucide-react'
+import { AlertCircle, CalendarCheck, CheckCircle, History, Loader2, Mail, Megaphone, Send } from 'lucide-react'
+import { formatDistanceToNow } from 'date-fns'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Label } from '@/components/ui/label'
 import { Alert, AlertDescription } from '@/components/ui/alert'
-
-import { useAuth } from '@/hooks/useAuth'
 import { useEvent, useEventRole } from '@/contexts/EventContext'
-import { getAccessToken } from '@/lib/supabase/client'
-import { formatDistanceToNow } from 'date-fns'
+import { apiFetch, ApiError } from '@/lib/api/client'
 
 interface SessionEmailStats {
   scheduled_total: number
   scheduled_unnotified: number
   scheduled_unnotified_sessions: { id: string; title: string }[]
-  pending_email_notifications: number
+  skipped: Array<{ sessionId: string; title: string; reason: string }>
 }
 
 interface Broadcast {
   title: string
   body: string | null
   action_url: string | null
-  data: Record<string, unknown> | null
   created_at: string
+  recipients: number
 }
 
+type Feedback = { kind: 'success' | 'error'; text: string } | null
+
 export default function AdminCommunicationsPage() {
-  const router = useRouter()
-  const { user, isLoading: authLoading } = useAuth()
   const event = useEvent()
-  const { isAdmin, isLoading: roleLoading, can } = useEventRole()
+  const { can } = useEventRole()
+  const base = `/api/v1/events/${event.slug}/admin`
 
   const [title, setTitle] = React.useState('')
   const [message, setMessage] = React.useState('')
   const [ctaUrl, setCtaUrl] = React.useState('')
   const [ctaText, setCtaText] = React.useState('')
-
-  const [isLoading, setIsLoading] = React.useState(false)
-  const [success, setSuccess] = React.useState<string | null>(null)
-  const [error, setError] = React.useState<string | null>(null)
+  const [sending, setSending] = React.useState(false)
+  const [broadcastFeedback, setBroadcastFeedback] = React.useState<Feedback>(null)
 
   const [broadcasts, setBroadcasts] = React.useState<Broadcast[]>([])
   const [loadingHistory, setLoadingHistory] = React.useState(true)
+  const [historyError, setHistoryError] = React.useState<string | null>(null)
 
-  // Session emails state
-  const [sessionEmailStats, setSessionEmailStats] = React.useState<SessionEmailStats | null>(null)
+  const [stats, setStats] = React.useState<SessionEmailStats | null>(null)
   const [loadingStats, setLoadingStats] = React.useState(true)
-  const [isNotifyingHosts, setIsNotifyingHosts] = React.useState(false)
-  const [isDispatchingQueue, setIsDispatchingQueue] = React.useState(false)
-  const [sessionEmailFeedback, setSessionEmailFeedback] = React.useState<
-    { kind: 'success' | 'error'; text: string } | null
-  >(null)
+  const [notifying, setNotifying] = React.useState(false)
+  const [emailFeedback, setEmailFeedback] = React.useState<Feedback>(null)
 
-  const fetchSessionEmailStats = React.useCallback(async () => {
+  const loadStats = React.useCallback(async () => {
     try {
-      const token = getAccessToken()
-      if (!token) {
-        setLoadingStats(false)
-        return
-      }
-      const response = await fetch(
-        `/api/v1/events/${event.slug}/admin/session-emails`,
-        { headers: { Authorization: `Bearer ${token}` } },
-      )
-      if (response.ok) {
-        const data: SessionEmailStats = await response.json()
-        setSessionEmailStats(data)
-      }
-    } catch (err) {
-      console.error('Error fetching session email stats:', err)
+      setStats(await apiFetch<SessionEmailStats>(`${base}/session-emails`))
+    } catch (e) {
+      setEmailFeedback({ kind: 'error', text: e instanceof ApiError ? e.message : 'Email status could not be loaded.' })
     } finally {
       setLoadingStats(false)
     }
-  }, [event.slug])
+  }, [base])
 
-  React.useEffect(() => {
-    fetchSessionEmailStats()
-  }, [fetchSessionEmailStats])
-
-  const postSessionEmailAction = async (action: 'notify-scheduled-hosts' | 'dispatch-queue') => {
-    setSessionEmailFeedback(null)
-    const token = getAccessToken()
-    if (!token) {
-      setSessionEmailFeedback({ kind: 'error', text: 'Please log in again.' })
-      return
-    }
-
-    const setBusy = action === 'notify-scheduled-hosts' ? setIsNotifyingHosts : setIsDispatchingQueue
-    setBusy(true)
+  const loadHistory = React.useCallback(async () => {
     try {
-      const response = await fetch(
-        `/api/v1/events/${event.slug}/admin/session-emails`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({ action }),
-        },
-      )
-      const data = await response.json()
-      if (!response.ok) {
-        setSessionEmailFeedback({
-          kind: 'error',
-          text: data.error || 'Failed to send emails.',
-        })
-        return
-      }
-      const label = action === 'notify-scheduled-hosts' ? 'schedule notification(s)' : 'approval/rejection email(s)'
-      setSessionEmailFeedback({
-        kind: 'success',
-        text: `Sent ${data.sent ?? 0} ${label}${data.skipped ? ` (${data.skipped} skipped)` : ''}.`,
-      })
-      await fetchSessionEmailStats()
-    } catch (err) {
-      setSessionEmailFeedback({
-        kind: 'error',
-        text: 'Unexpected error sending emails.',
-      })
+      const data = await apiFetch<{ broadcasts: Broadcast[] }>(`${base}/broadcast`)
+      setBroadcasts(data.broadcasts)
+      setHistoryError(null)
+    } catch (e) {
+      setHistoryError(e instanceof ApiError ? e.message : 'Recent announcements could not be loaded.')
     } finally {
-      setBusy(false)
+      setLoadingHistory(false)
+    }
+  }, [base])
+
+  React.useEffect(() => { void loadStats(); void loadHistory() }, [loadStats, loadHistory])
+
+  const notifyHosts = async () => {
+    setEmailFeedback(null)
+    setNotifying(true)
+    try {
+      const data = await apiFetch<{ sent: number; logged: number; skipped: number; errors: string[] }>(`${base}/session-emails`, {
+        method: 'POST',
+        json: { action: 'notify-scheduled-hosts' },
+      })
+      const parts = [`Emailed ${data.sent} host${data.sent === 1 ? '' : 's'}`]
+      if (data.logged) parts.push(`${data.logged} logged (mail is not configured here)`)
+      if (data.skipped) parts.push(`${data.skipped} skipped`)
+      setEmailFeedback({ kind: data.errors.length ? 'error' : 'success', text: `${parts.join(', ')}.${data.errors.length ? ` ${data.errors[0]}` : ''}` })
+      await loadStats()
+    } catch (e) {
+      setEmailFeedback({ kind: 'error', text: e instanceof ApiError ? e.message : 'Hosts could not be emailed.' })
+    } finally {
+      setNotifying(false)
     }
   }
 
-  // Fetch broadcast history
-  React.useEffect(() => {
-    async function fetchHistory() {
-      try {
-        const token = getAccessToken()
-        if (!token) {
-          console.warn('No auth token for broadcast history')
-          setLoadingHistory(false)
-          return
-        }
-
-        const response = await fetch(`/api/v1/events/${event.slug}/admin/broadcast`, {
-          headers: {
-            'Authorization': `Bearer ${token}`,
-          },
-        })
-        if (response.ok) {
-          const data = await response.json()
-          setBroadcasts(data.broadcasts || [])
-        }
-      } catch (err) {
-        console.error('Error fetching broadcast history:', err)
-      } finally {
-        setLoadingHistory(false)
-      }
-    }
-    fetchHistory()
-  }, [event.slug])
-
-  const handleSubmit = async (e: React.FormEvent) => {
+  const sendAnnouncement = async (e: React.FormEvent) => {
     e.preventDefault()
-    setIsLoading(true)
-    setSuccess(null)
-    setError(null)
-
+    setSending(true)
+    setBroadcastFeedback(null)
     try {
-      const token = getAccessToken()
-      if (!token) {
-        setError('Please log in to send announcements')
-        setIsLoading(false)
-        return
-      }
-
-      const response = await fetch(`/api/v1/events/${event.slug}/admin/broadcast`, {
+      const data = await apiFetch<{ message: string }>(`${base}/broadcast`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          title: title.trim(),
-          message: message.trim(),
-          ctaUrl: ctaUrl.trim() || undefined,
-          ctaText: ctaText.trim() || undefined,
-        }),
+        json: { title: title.trim(), message: message.trim(), ctaUrl: ctaUrl.trim() || undefined, ctaText: ctaText.trim() || undefined },
       })
-
-      const data = await response.json()
-
-      if (!response.ok) {
-        setError(data.error || 'Failed to send announcement')
-        return
-      }
-
-      setSuccess(data.message || `Announcement sent to ${data.sent} members`)
+      setBroadcastFeedback({ kind: 'success', text: data.message })
       setTitle('')
       setMessage('')
       setCtaUrl('')
       setCtaText('')
-
-      // Refresh history
-      const historyResponse = await fetch(`/api/v1/events/${event.slug}/admin/broadcast`, {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      })
-      if (historyResponse.ok) {
-        const historyData = await historyResponse.json()
-        setBroadcasts(historyData.broadcasts || [])
-      }
+      await loadHistory()
     } catch (err) {
-      setError('An unexpected error occurred')
+      setBroadcastFeedback({ kind: 'error', text: err instanceof ApiError ? err.message : 'The announcement could not be sent.' })
     } finally {
-      setIsLoading(false)
+      setSending(false)
     }
   }
 
-  // Redirect if not admin
-  React.useEffect(() => {
-    if (!authLoading && !roleLoading && (!user || !isAdmin)) {
-      router.push(`/e/${event.slug}/sessions`)
-    }
-  }, [user, isAdmin, authLoading, roleLoading, router, event.slug])
-
-  if (authLoading || roleLoading) {
-    return (
-      <div className="flex items-center justify-center py-12">
-        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-      </div>
-    )
-  }
-
-  if (!isAdmin) {
-    return null
+  if (!can('sendCommunications')) {
+    return <Card><CardContent className="py-8 text-center text-muted-foreground">Your role does not include messaging members.</CardContent></Card>
   }
 
   return (
-        <div className="space-y-6">
-          {/* Header */}
-          <div>
-            <h1 className="text-2xl font-display font-bold">Messages</h1>
-            <p className="text-sm text-muted-foreground">
-              Announcements and session emails for {event.name}
-            </p>
-          </div>
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-2xl font-display font-bold">Messages</h1>
+        <p className="text-sm text-muted-foreground">Announcements and session emails for {event.name}</p>
+      </div>
 
-          {/* Session Host Emails */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Mail className="h-5 w-5" />
-                Session Host Emails
-              </CardTitle>
-              <CardDescription>
-                Send session approval notifications and schedule confirmations directly to hosts.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {sessionEmailFeedback && (
-                <Alert
-                  className={
-                    sessionEmailFeedback.kind === 'success'
-                      ? 'bg-green-500/10 border-green-500/30'
-                      : undefined
-                  }
-                  variant={sessionEmailFeedback.kind === 'error' ? 'destructive' : undefined}
-                >
-                  {sessionEmailFeedback.kind === 'success' ? (
-                    <CheckCircle className="h-4 w-4 text-green-500" />
-                  ) : (
-                    <AlertCircle className="h-4 w-4" />
-                  )}
-                  <AlertDescription
-                    className={
-                      sessionEmailFeedback.kind === 'success' ? 'text-green-500' : undefined
-                    }
-                  >
-                    {sessionEmailFeedback.text}
-                  </AlertDescription>
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2"><Mail className="h-5 w-5" />Session host emails</CardTitle>
+          <CardDescription>
+            Approval, rejection and scheduling updates reach hosts automatically as notifications, by email when their preferences allow. Use this to send hosts the full details of their slot once it is on the published schedule.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {emailFeedback && (
+            <Alert variant={emailFeedback.kind === 'error' ? 'destructive' : undefined} className={emailFeedback.kind === 'success' ? 'bg-green-500/10 border-green-500/30' : undefined}>
+              {emailFeedback.kind === 'success' ? <CheckCircle className="h-4 w-4 text-green-500" /> : <AlertCircle className="h-4 w-4" />}
+              <AlertDescription>{emailFeedback.text}</AlertDescription>
+            </Alert>
+          )}
+          <div className="rounded-lg border p-4 space-y-3">
+            <div className="flex items-start gap-3">
+              <CalendarCheck className="h-5 w-5 text-primary mt-0.5" aria-hidden />
+              <div className="flex-1">
+                <h2 className="font-medium text-sm">Slot details</h2>
+                <p className="text-xs text-muted-foreground">Room, date and time for each host whose session is on the published schedule.</p>
+              </div>
+            </div>
+            {loadingStats ? (
+              <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+            ) : stats ? (
+              <>
+                <p className="text-sm">
+                  <span className="font-semibold">{stats.scheduled_unnotified}</span>
+                  <span className="text-muted-foreground"> of {stats.scheduled_total} scheduled session{stats.scheduled_total === 1 ? '' : 's'} ready to email</span>
+                </p>
+                {stats.scheduled_unnotified_sessions.length > 0 && (
+                  <ul className="text-xs text-muted-foreground max-h-24 overflow-y-auto space-y-0.5 pl-1">
+                    {stats.scheduled_unnotified_sessions.slice(0, 5).map((s) => <li key={s.id} className="truncate">• {s.title}</li>)}
+                    {stats.scheduled_unnotified_sessions.length > 5 && <li className="italic">…and {stats.scheduled_unnotified_sessions.length - 5} more</li>}
+                  </ul>
+                )}
+                {stats.skipped.length > 0 && (
+                  <details className="text-xs text-muted-foreground">
+                    <summary className="cursor-pointer">{stats.skipped.length} not ready</summary>
+                    <ul className="mt-1 space-y-0.5 pl-1">{stats.skipped.slice(0, 20).map((s) => <li key={s.sessionId}>• {s.title} — {s.reason}</li>)}</ul>
+                  </details>
+                )}
+                <Button size="sm" className="w-full sm:w-auto" onClick={() => void notifyHosts()} disabled={notifying || stats.scheduled_unnotified === 0}>
+                  {notifying ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Sending…</> : <><Mail className="h-4 w-4 mr-2" />Email hosts</>}
+                </Button>
+              </>
+            ) : (
+              <p className="text-xs text-muted-foreground">Unable to load.</p>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
+      <div className="grid gap-6 lg:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2"><Megaphone className="h-5 w-5" />Send an announcement</CardTitle>
+            <CardDescription>Every member gets it in their notifications, and by email if they have that turned on.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <form onSubmit={sendAnnouncement} className="space-y-4">
+              {broadcastFeedback && (
+                <Alert variant={broadcastFeedback.kind === 'error' ? 'destructive' : undefined} className={broadcastFeedback.kind === 'success' ? 'bg-green-500/10 border-green-500/30' : undefined}>
+                  {broadcastFeedback.kind === 'success' ? <CheckCircle className="h-4 w-4 text-green-500" /> : <AlertCircle className="h-4 w-4" />}
+                  <AlertDescription>{broadcastFeedback.text}</AlertDescription>
                 </Alert>
               )}
-
+              <div className="space-y-2">
+                <Label htmlFor="title">Title *</Label>
+                <Input id="title" placeholder="Important update" value={title} onChange={(e) => setTitle(e.target.value)} required maxLength={100} />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="message">Message *</Label>
+                <Textarea id="message" placeholder="Write your announcement…" value={message} onChange={(e) => setMessage(e.target.value)} required rows={5} maxLength={1000} />
+                <p className="text-xs text-muted-foreground text-right">{message.length}/1000</p>
+              </div>
               <div className="grid gap-4 sm:grid-cols-2">
-                {/* Schedule notifications */}
-                <div className="rounded-lg border p-4 space-y-3">
-                  <div className="flex items-start gap-3">
-                    <CalendarCheck className="h-5 w-5 text-primary mt-0.5" />
-                    <div className="flex-1">
-                      <h3 className="font-medium text-sm">Schedule notifications</h3>
-                      <p className="text-xs text-muted-foreground">
-                        Email hosts when their session has been scheduled with venue and time details.
-                      </p>
-                    </div>
-                  </div>
-                  {loadingStats ? (
-                    <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                  ) : sessionEmailStats ? (
-                    <>
-                      <p className="text-sm">
-                        <span className="font-semibold">
-                          {sessionEmailStats.scheduled_unnotified}
-                        </span>
-                        <span className="text-muted-foreground">
-                          {' '}of {sessionEmailStats.scheduled_total} scheduled session(s) awaiting notification
-                        </span>
-                      </p>
-                      {sessionEmailStats.scheduled_unnotified_sessions.length > 0 && (
-                        <ul className="text-xs text-muted-foreground max-h-24 overflow-y-auto space-y-0.5 pl-1">
-                          {sessionEmailStats.scheduled_unnotified_sessions.slice(0, 5).map((s) => (
-                            <li key={s.id} className="truncate">• {s.title}</li>
-                          ))}
-                          {sessionEmailStats.scheduled_unnotified_sessions.length > 5 && (
-                            <li className="italic">
-                              …and {sessionEmailStats.scheduled_unnotified_sessions.length - 5} more
-                            </li>
-                          )}
-                        </ul>
-                      )}
-                      <Button
-                        size="sm"
-                        className="w-full"
-                        onClick={() => postSessionEmailAction('notify-scheduled-hosts')}
-                        disabled={
-                          isNotifyingHosts ||
-                          sessionEmailStats.scheduled_unnotified === 0
-                        }
-                      >
-                        {isNotifyingHosts ? (
-                          <>
-                            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                            Sending…
-                          </>
-                        ) : (
-                          <>
-                            <Mail className="h-4 w-4 mr-2" />
-                            Notify scheduled hosts
-                          </>
-                        )}
-                      </Button>
-                    </>
-                  ) : (
-                    <p className="text-xs text-muted-foreground">Unable to load stats.</p>
-                  )}
+                <div className="space-y-2">
+                  <Label htmlFor="ctaUrl">Link (optional)</Label>
+                  <Input id="ctaUrl" placeholder={`https://… or /e/${event.slug}/schedule`} value={ctaUrl} onChange={(e) => setCtaUrl(e.target.value)} maxLength={500} />
                 </div>
-
-                {/* Approval / Rejection emails */}
-                <div className="rounded-lg border p-4 space-y-3">
-                  <div className="flex items-start gap-3">
-                    <CheckCircle className="h-5 w-5 text-primary mt-0.5" />
-                    <div className="flex-1">
-                      <h3 className="font-medium text-sm">Approval &amp; rejection emails</h3>
-                      <p className="text-xs text-muted-foreground">
-                        Dispatch any queued session-approval or rejection emails that haven&apos;t been
-                        sent yet.
-                      </p>
-                    </div>
-                  </div>
-                  {loadingStats ? (
-                    <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                  ) : sessionEmailStats ? (
-                    <>
-                      <p className="text-sm">
-                        <span className="font-semibold">
-                          {sessionEmailStats.pending_email_notifications}
-                        </span>
-                        <span className="text-muted-foreground">
-                          {' '}queued email notification(s)
-                        </span>
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        Approval emails are normally sent automatically when a session is approved.
-                        Use this to retry any that didn&apos;t go through.
-                      </p>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="w-full"
-                        onClick={() => postSessionEmailAction('dispatch-queue')}
-                        disabled={
-                          isDispatchingQueue ||
-                          sessionEmailStats.pending_email_notifications === 0
-                        }
-                      >
-                        {isDispatchingQueue ? (
-                          <>
-                            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                            Dispatching…
-                          </>
-                        ) : (
-                          <>
-                            <Send className="h-4 w-4 mr-2" />
-                            Send queued emails
-                          </>
-                        )}
-                      </Button>
-                    </>
-                  ) : (
-                    <p className="text-xs text-muted-foreground">Unable to load stats.</p>
-                  )}
+                <div className="space-y-2">
+                  <Label htmlFor="ctaText">Link text (optional)</Label>
+                  <Input id="ctaText" placeholder="Learn more" value={ctaText} onChange={(e) => setCtaText(e.target.value)} maxLength={30} />
                 </div>
               </div>
-            </CardContent>
-          </Card>
+              <Button type="submit" className="w-full" disabled={sending}>
+                {sending ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Sending…</> : <><Send className="h-4 w-4 mr-2" />Send announcement</>}
+              </Button>
+            </form>
+          </CardContent>
+        </Card>
 
-          <div className="grid gap-6 lg:grid-cols-2">
-          {/* Send Announcement */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Megaphone className="h-5 w-5" />
-                Send Announcement
-              </CardTitle>
-              <CardDescription>
-                Compose a message to send to all event members
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <form onSubmit={handleSubmit} className="space-y-4">
-                {success && (
-                  <Alert className="bg-green-500/10 border-green-500/30">
-                    <CheckCircle className="h-4 w-4 text-green-500" />
-                    <AlertDescription className="text-green-500">
-                      {success}
-                    </AlertDescription>
-                  </Alert>
-                )}
-
-                {error && (
-                  <Alert variant="destructive">
-                    <AlertDescription>{error}</AlertDescription>
-                  </Alert>
-                )}
-
-                <div className="space-y-2">
-                  <Label htmlFor="title">Title *</Label>
-                  <Input
-                    id="title"
-                    placeholder="Important Update"
-                    value={title}
-                    onChange={(e) => setTitle(e.target.value)}
-                    required
-                    maxLength={100}
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="message">Message *</Label>
-                  <Textarea
-                    id="message"
-                    placeholder="Write your announcement here..."
-                    value={message}
-                    onChange={(e) => setMessage(e.target.value)}
-                    required
-                    rows={5}
-                    maxLength={1000}
-                  />
-                  <p className="text-xs text-muted-foreground text-right">
-                    {message.length}/1000
-                  </p>
-                </div>
-
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <div className="space-y-2">
-                    <Label htmlFor="ctaUrl">Link URL (optional)</Label>
-                    <Input
-                      id="ctaUrl"
-                      type="url"
-                      placeholder="https://..."
-                      value={ctaUrl}
-                      onChange={(e) => setCtaUrl(e.target.value)}
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="ctaText">Link Text (optional)</Label>
-                    <Input
-                      id="ctaText"
-                      placeholder="Learn More"
-                      value={ctaText}
-                      onChange={(e) => setCtaText(e.target.value)}
-                      maxLength={30}
-                    />
-                  </div>
-                </div>
-
-                <Button type="submit" className="w-full" disabled={isLoading}>
-                  {isLoading ? (
-                    <>
-                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                      Sending...
-                    </>
-                  ) : (
-                    <>
-                      <Send className="h-4 w-4 mr-2" />
-                      Send Announcement
-                    </>
-                  )}
-                </Button>
-              </form>
-            </CardContent>
-          </Card>
-
-          {/* Broadcast History */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <History className="h-5 w-5" />
-                Recent Announcements
-              </CardTitle>
-              <CardDescription>
-                Previously sent announcements
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              {loadingHistory ? (
-                <div className="flex items-center justify-center py-8">
-                  <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-                </div>
-              ) : broadcasts.length === 0 ? (
-                <div className="text-center py-8 text-muted-foreground">
-                  <Megaphone className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                  <p>No announcements sent yet</p>
-                </div>
-              ) : (
-                <div className="space-y-4">
-                  {broadcasts.map((broadcast, index) => (
-                    <div
-                      key={index}
-                      className="border-b border-border pb-4 last:border-b-0 last:pb-0"
-                    >
-                      <div className="flex items-start justify-between gap-2">
-                        <h4 className="font-medium text-sm">{broadcast.title}</h4>
-                        <span className="text-xs text-muted-foreground whitespace-nowrap">
-                          {formatDistanceToNow(new Date(broadcast.created_at), { addSuffix: true })}
-                        </span>
-                      </div>
-                      {broadcast.body && (
-                        <p className="text-sm text-muted-foreground mt-1 line-clamp-2">
-                          {broadcast.body}
-                        </p>
-                      )}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2"><History className="h-5 w-5" />Recent announcements</CardTitle>
+            <CardDescription>Previously sent</CardDescription>
+          </CardHeader>
+          <CardContent>
+            {historyError && <p role="alert" className="mb-3 text-sm text-destructive">{historyError}</p>}
+            {loadingHistory ? (
+              <div className="flex items-center justify-center py-8"><Loader2 className="h-6 w-6 animate-spin text-muted-foreground" /></div>
+            ) : broadcasts.length === 0 ? (
+              <div className="text-center py-8 text-muted-foreground"><Megaphone className="h-8 w-8 mx-auto mb-2 opacity-50" aria-hidden /><p>No announcements sent yet</p></div>
+            ) : (
+              <ul className="space-y-4">
+                {broadcasts.map((b) => (
+                  <li key={`${b.title}-${b.created_at}`} className="border-b border-border pb-4 last:border-b-0 last:pb-0">
+                    <div className="flex items-start justify-between gap-2">
+                      <h3 className="font-medium text-sm">{b.title}</h3>
+                      <span className="text-xs text-muted-foreground whitespace-nowrap">{formatDistanceToNow(new Date(b.created_at), { addSuffix: true })}</span>
                     </div>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </div>
-        </div>
+                    {b.body && <p className="text-sm text-muted-foreground mt-1 line-clamp-2">{b.body}</p>}
+                    <p className="text-xs text-muted-foreground mt-1">{b.recipients} recipient{b.recipients === 1 ? '' : 's'}</p>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+    </div>
   )
 }

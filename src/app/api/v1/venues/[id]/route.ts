@@ -1,60 +1,31 @@
-import { createAdminClient } from '@/lib/supabase/server'
-import { validateApiKey, partnerEventForRow } from '@/lib/api/auth'
-import {
-  apiSuccess,
-  unauthorized,
-  badRequest,
-  notFound,
-  methodNotAllowed,
-  isValidUUID,
-  parseIncludes,
-} from '@/lib/api/response'
+import { sql } from '@/lib/db'
+import { publicEventForRow } from '@/lib/api/auth'
+import { badRequest, isValidUUID, methodNotAllowed, notFound, parseIncludes } from '@/lib/api/response'
+import { publicJson, publishedTimeSlots, publishedVenues } from '../../schedule/public-read'
 
-const VENUE_FIELDS = 'id,name,slug,capacity,features,style,address,notes,is_primary,created_at'
-const VALID_INCLUDES = ['timeslots']
+/**
+ * GET /api/v1/venues/[id][?event=<slug>][&include=timeslots] — one published venue, optionally
+ * with the time slots of its published slot grids.
+ */
+export const dynamic = 'force-dynamic'
 
-export async function GET(
-  request: Request,
-  { params }: { params: Promise<{ id: string }> }
-) {
-  if (!validateApiKey(request)) return unauthorized()
-
+export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
-  if (!isValidUUID(id)) {
-    return badRequest('Invalid venue ID format. Expected a UUID.')
-  }
+  if (!isValidUUID(id)) return badRequest('Invalid venue ID format. Expected a UUID.')
+  const includes = parseIncludes(request, ['timeslots'])
+  if ('error' in includes) return includes.error
 
-  const result = parseIncludes(request, VALID_INCLUDES)
-  if ('error' in result) return result.error
-
-  const supabase = await createAdminClient()
-  const { data, error } = await supabase
-    .from('venues')
-    .select(`event_id,${VENUE_FIELDS}`)
-    .eq('id', id)
-    .single()
-
-  if (error || !data) {
-    return notFound('Venue')
-  }
-
-  // Hide rows whose event is private/draft (or does not match ?event=)
-  const { event_id, ...venue } = data
-  const event = await partnerEventForRow(request, supabase, event_id)
+  const [row] = await sql<{ event_id: string }[]>`select event_id from venues where id = ${id}`
+  const event = await publicEventForRow(request, row?.event_id)
   if (!event) return notFound('Venue')
+  const [venue] = await publishedVenues(event.id, id)
+  if (!venue) return notFound('Venue')
 
-  if (result.includes.includes('timeslots')) {
-    const { data: timeslots } = await supabase
-      .from('time_slots')
-      .select('id,start_time,end_time,label,is_break,day_date,slot_type,created_at')
-      .eq('venue_id', id)
-      .eq('event_id', event.id)
-      .order('start_time')
-
-    return apiSuccess({ ...venue, timeslots: timeslots ?? [] })
+  if (includes.includes.includes('timeslots')) {
+    const timeslots = await publishedTimeSlots(event.id, { venueId: id })
+    return publicJson({ ...venue, timeslots })
   }
-
-  return apiSuccess(venue)
+  return publicJson(venue)
 }
 
 export async function POST() { return methodNotAllowed() }

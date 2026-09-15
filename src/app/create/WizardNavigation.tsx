@@ -22,6 +22,7 @@ const STEP_LABELS: Record<(typeof WIZARD_STEPS)[number], string> = {
   tracks: 'Tracks',
   voting: 'Voting',
   branding: 'Branding',
+  identity: 'Identity',
   review: 'Review',
 };
 

@@ -22,8 +22,9 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import Stripe from 'stripe'
-import { createAdminClient } from '@/lib/supabase/server'
-import { getUserFromRequest } from '@/lib/api/getUser'
+import { assertSameOrigin, requireEventRole } from '@/lib/auth/viewer'
+import { sql } from '@/lib/db'
+import type { EventRoleName } from '@/types/event'
 import {
   NOT_CONNECTED_STATUS,
   createConnectAccount,
@@ -35,8 +36,9 @@ import {
 } from '@/lib/payments/stripe'
 
 export const runtime = 'nodejs'
+export const dynamic = 'force-dynamic'
 
-const ADMIN_ROLES = ['owner', 'admin']
+const ADMIN_ROLES: readonly EventRoleName[] = ['owner', 'admin']
 
 function notConfigured() {
   return NextResponse.json({ error: 'Payments are not configured' }, { status: 503 })
@@ -44,53 +46,32 @@ function notConfigured() {
 
 function stripeErrorResponse(err: unknown, fallback: string) {
   if (err instanceof Stripe.errors.StripeError) {
-    console.error('Stripe Connect error:', err.type, err.code, err.message)
+    console.error('[stripe-connect] Stripe error:', err.type, err.code ?? '')
     return NextResponse.json({ error: err.message, code: err.code ?? null }, { status: 502 })
   }
-  console.error('Stripe Connect error:', err)
+  console.error('[stripe-connect] error:', err instanceof Error ? err.name : 'error')
   return NextResponse.json({ error: fallback }, { status: 500 })
 }
 
-async function authorize(request: NextRequest, slug: string, allowedRoles: string[]) {
-  const user = await getUserFromRequest(request)
-  if (!user) {
-    return { ok: false as const, response: NextResponse.json({ error: 'Unauthorized' }, { status: 401 }) }
+interface ConnectEvent {
+  id: string
+  slug: string
+  name: string
+  ticketing_enabled: boolean
+  stripe_account_id: string | null
+}
+
+async function authorize(request: NextRequest, slug: string, allowedRoles: readonly EventRoleName[]) {
+  if (request.method !== 'GET') {
+    const crossOrigin = assertSameOrigin(request)
+    if (crossOrigin) return { ok: false as const, response: crossOrigin }
   }
-
-  const supabase = await createAdminClient()
-  const { data: event } = await supabase
-    .from('events')
-    .select('id, slug, name, ticketing_enabled, stripe_account_id')
-    .eq('slug', slug)
-    .maybeSingle()
-
-  if (!event) {
-    return { ok: false as const, response: NextResponse.json({ error: 'Event not found' }, { status: 404 }) }
-  }
-
-  const { data: membership } = await supabase
-    .from('event_members')
-    .select('role')
-    .eq('event_id', event.id)
-    .eq('user_id', user.id)
-    .maybeSingle()
-
-  if (!membership || !allowedRoles.includes(membership.role)) {
-    return { ok: false as const, response: NextResponse.json({ error: 'Forbidden' }, { status: 403 }) }
-  }
-
-  return {
-    ok: true as const,
-    user,
-    event: event as {
-      id: string
-      slug: string
-      name: string
-      ticketing_enabled: boolean
-      stripe_account_id: string | null
-    },
-    supabase,
-  }
+  const auth = await requireEventRole(request, slug, allowedRoles)
+  if (auth instanceof Response) return { ok: false as const, response: auth }
+  const [event] = await sql<ConnectEvent[]>`
+    select id, slug, name, ticketing_enabled, stripe_account_id from events where id = ${auth.event.id}
+  `
+  return { ok: true as const, viewer: auth.viewer, event }
 }
 
 function appOrigin(request: NextRequest): string {
@@ -127,7 +108,7 @@ export async function GET(
     // The account id is stored but Stripe can't return it (deleted, wrong mode
     // key, etc). Report it as connected-but-unhealthy so the owner can disconnect.
     const message = err instanceof Error ? err.message : 'Unable to retrieve Stripe account'
-    console.error('Stripe accounts.retrieve failed for', accountId, message)
+    console.error('[stripe-connect] accounts.retrieve failed')
     return NextResponse.json({
       ...NOT_CONNECTED_STATUS,
       connected: true,
@@ -149,7 +130,7 @@ export async function POST(
   if (!isStripeConfigured()) return notConfigured()
 
   const action = request.nextUrl.searchParams.get('action')
-  const { event, supabase, user } = auth
+  const { event, viewer } = auth
 
   // --- Express Dashboard login link -------------------------------------
   if (action === 'dashboard') {
@@ -177,22 +158,28 @@ export async function POST(
         eventId: event.id,
         eventSlug: event.slug,
         eventName: event.name,
-        email: user.email,
+        email: viewer.email,
       })
       accountId = account.id
     } catch (err) {
       return stripeErrorResponse(err, 'Failed to create Stripe account')
     }
 
-    const { error: updateError } = await supabase
-      .from('events')
-      .update({ stripe_account_id: accountId })
-      .eq('id', event.id)
-
-    if (updateError) {
+    try {
+      // Only fill an empty slot: two concurrent "Connect" clicks must not orphan an account.
+      const saved = await sql<{ stripe_account_id: string }[]>`
+        update events set stripe_account_id = ${accountId}, updated_at = now()
+        where id = ${event.id} and stripe_account_id is null
+        returning stripe_account_id
+      `
+      if (saved.length === 0) {
+        const [current] = await sql<{ stripe_account_id: string | null }[]>`select stripe_account_id from events where id = ${event.id}`
+        accountId = current?.stripe_account_id ?? accountId
+      }
+    } catch {
       // The Stripe account now exists but we failed to persist its id; surface
       // it so an operator can attach it manually via ticketing-settings.
-      console.error('Failed to persist stripe_account_id', accountId, updateError)
+      console.error('[stripe-connect] failed to persist the connected account id')
       return NextResponse.json(
         { error: 'Stripe account created but could not be saved', accountId },
         { status: 500 },
@@ -227,28 +214,25 @@ export async function DELETE(
   // but we still gate it so the UI behaves consistently when Stripe is off.
   if (!isStripeConfigured()) return notConfigured()
 
-  const { event, supabase } = auth
+  const { event } = auth
   if (!event.stripe_account_id) {
     return NextResponse.json({ error: 'No Stripe account is connected to this event' }, { status: 400 })
   }
 
-  const updates: Record<string, unknown> = { stripe_account_id: null }
   // Without a connected account, paid checkout can only proceed on the
   // platform account; unless that fallback is explicitly enabled, turn
   // ticketing off so nobody hits a broken checkout.
-  if (!isPlatformChargeFallbackAllowed()) {
-    updates.ticketing_enabled = false
-  }
-
-  const { data: updated, error } = await supabase
-    .from('events')
-    .update(updates)
-    .eq('id', event.id)
-    .select('ticketing_enabled, stripe_account_id')
-    .single()
-
-  if (error || !updated) {
-    return NextResponse.json({ error: error?.message || 'Failed to disconnect' }, { status: 500 })
+  const keepTicketing = isPlatformChargeFallbackAllowed()
+  const [updated] = await sql<{ ticketing_enabled: boolean; stripe_account_id: string | null }[]>`
+    update events
+    set stripe_account_id = null,
+        ticketing_enabled = ${keepTicketing ? sql`ticketing_enabled` : sql`false`},
+        updated_at = now()
+    where id = ${event.id}
+    returning ticketing_enabled, stripe_account_id
+  `
+  if (!updated) {
+    return NextResponse.json({ error: 'Failed to disconnect' }, { status: 500 })
   }
 
   return NextResponse.json({

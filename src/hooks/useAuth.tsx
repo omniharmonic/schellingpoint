@@ -33,9 +33,7 @@ export interface Profile {
   telegram: string | null
   ens: string | null
   interests: string[] | null
-  is_admin: boolean
   onboarding_completed: boolean
-  vote_credits: number
   did?: string | null
   atproto_handle?: string | null
   publish_proposals?: boolean | null
@@ -51,7 +49,6 @@ interface AuthContextValue {
   user: AuthUser | null
   profile: Profile | null
   isLoading: boolean
-  isAdmin: boolean
   needsOnboarding: boolean
   signIn: (email: string, returnTo?: string) => Promise<SignInResult>
   signOut: () => Promise<void>
@@ -127,7 +124,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     user,
     profile,
     isLoading,
-    isAdmin: profile?.is_admin ?? false,
     needsOnboarding: Boolean(user && profile && profile.onboarding_completed === false),
     signIn,
     signOut,

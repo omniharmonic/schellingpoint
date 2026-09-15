@@ -1,7 +1,11 @@
 /**
  * Base email template with event branding
- * Used by all notification emails for consistent styling
+ * Used by all notification emails for consistent styling.
+ *
+ * Every parameter except `bodyHtml` is plain text and is escaped here; `bodyHtml` is
+ * markup the caller built with `escapeHtml` around anything a person typed.
  */
+import { escapeHtml, safeHref } from './escape'
 
 /**
  * Public origin of the app, used for absolute links and assets in emails.
@@ -9,7 +13,32 @@
  */
 export function appUrl(): string {
   const configured = process.env.NEXT_PUBLIC_APP_URL?.trim()
-  return (configured || 'https://schellingpoint.app').replace(/\/+$/, '')
+  return (configured || 'https://unconference.events').replace(/\/+$/, '')
+}
+
+/** Product name shown in email footers. */
+export const PRODUCT_NAME = 'Unconference'
+
+/**
+ * Plain-text alternative for an email: heading, paragraphs, link, footer.
+ * Mail clients that do not render HTML (and spam filters) read this part.
+ */
+export function buildPlainText(params: {
+  heading: string
+  paragraphs: Array<string | null | undefined | false>
+  ctaUrl?: string | null
+  ctaText?: string | null
+  footerNote?: string | null
+  eventName?: string | null
+}): string {
+  const lines = [params.heading, '']
+  for (const p of params.paragraphs) {
+    if (p) lines.push(p.trim(), '')
+  }
+  if (params.ctaUrl) lines.push(`${params.ctaText || 'Open'}: ${params.ctaUrl}`, '')
+  if (params.footerNote) lines.push(params.footerNote, '')
+  lines.push(`— ${params.eventName || PRODUCT_NAME}`)
+  return lines.join('\n')
 }
 
 export interface BaseEmailParams {
@@ -26,23 +55,21 @@ export interface BaseEmailParams {
 }
 
 export function buildBaseEmail(params: BaseEmailParams): string {
-  const {
-    eventName,
-    eventLogoUrl,
-    eventDateRange,
-    eventLocation,
-    previewText,
-    heading,
-    bodyHtml,
-    ctaUrl,
-    ctaText,
-    footerNote,
-  } = params
+  const { bodyHtml } = params
+  const eventName = escapeHtml(params.eventName)
+  const eventDateRange = params.eventDateRange ? escapeHtml(params.eventDateRange) : undefined
+  const eventLocation = params.eventLocation ? escapeHtml(params.eventLocation) : undefined
+  const previewText = escapeHtml(params.previewText)
+  const heading = escapeHtml(params.heading)
+  const ctaText = params.ctaText ? escapeHtml(params.ctaText) : undefined
+  const footerNote = params.footerNote ? escapeHtml(params.footerNote) : undefined
+  const ctaUrl = safeHref(params.ctaUrl)
+  const eventLogoUrl = safeHref(params.eventLogoUrl)
 
   // Default logo fallback
   const logoHtml = eventLogoUrl
     ? `<img src="${eventLogoUrl}" alt="${eventName}" width="48" height="48" style="display: block; border: 0; border-radius: 8px;">`
-    : `<div style="width: 48px; height: 48px; border-radius: 8px; background-color: #B2FF00; display: flex; align-items: center; justify-content: center; font-size: 24px; font-weight: bold; color: #0a0e14;">${eventName.charAt(0)}</div>`
+    : `<div style="width: 48px; height: 48px; border-radius: 8px; background-color: #B2FF00; display: flex; align-items: center; justify-content: center; font-size: 24px; font-weight: bold; color: #0a0e14;">${escapeHtml(params.eventName.charAt(0))}</div>`
 
   // CTA button HTML
   const ctaHtml = ctaUrl && ctaText
@@ -176,7 +203,7 @@ export function buildBaseEmail(params: BaseEmailParams): string {
           <tr>
             <td align="center" style="padding: 24px 20px;">
               <p style="margin: 0; font-size: 11px; color: #484f58;">
-                Powered by <a href="${appUrl()}" style="color: #6e7681; text-decoration: none;">Schelling Point</a>
+                Powered by <a href="${escapeHtml(appUrl())}" style="color: #6e7681; text-decoration: none;">${PRODUCT_NAME}</a>
               </p>
             </td>
           </tr>

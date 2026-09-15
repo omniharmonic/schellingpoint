@@ -1,41 +1,31 @@
-import { NextResponse } from 'next/server'
-import { createAdminClient, createRequestClient } from '@/lib/supabase/server'
-import { validateApiKey, resolvePartnerEvent } from '@/lib/api/auth'
-import { getUserFromRequest } from '@/lib/api/getUser'
-import { publishProposal } from '@/lib/atproto/participant'
+import { sql, asAccount, dbErrorResponse } from '@/lib/db'
+import { assertSameOrigin, requireViewer } from '@/lib/auth/viewer'
+import { validateApiKey } from '@/lib/api/auth'
+import { notify } from '@/lib/notifications'
+import { validateSkillUris } from '@/lib/atproto/skills'
+import { apiSuccess, unauthorized, badRequest, notFound, methodNotAllowed, parseIncludes } from '@/lib/api/response'
 import {
-  apiSuccess,
-  unauthorized,
-  badRequest,
-  methodNotAllowed,
-  parseIncludes,
-} from '@/lib/api/response'
-
-const SESSION_FIELDS = 'id,title,description,format,duration,host_name,topic_tags,status,is_self_hosted,custom_location,self_hosted_start_time,self_hosted_end_time,session_type,is_votable,total_votes,total_credits,voter_count,host_id,venue_id,time_slot_id,track_id,telegram_group_url,expected_attendance,created_at,updated_at'
+  ensurePublicMembership,
+  isUuid,
+  json,
+  jsonError,
+  loadEventAccess,
+  readJsonObject,
+  type EventAccess,
+} from './_lib/access'
+import { FieldError, parseSessionFields, parseTimePreference } from './_lib/validate'
+import { publishProposalFor, type AtprotoOutcome } from './_lib/atproto'
+import { reconcileTimePreference, saveTimePreference } from './_lib/time-preference'
+import { partnerSessions } from './_lib/partner'
 
 const VALID_INCLUDES = ['host', 'track', 'venue', 'timeslot', 'cohosts']
 const VALID_STATUSES = ['pending', 'approved', 'rejected', 'scheduled']
 
-function buildSelect(includes: string[]): string {
-  const parts = [SESSION_FIELDS]
-  if (includes.includes('host')) {
-    parts.push('host:profiles!host_id(id,display_name,bio,affiliation,building,interests)')
-  }
-  if (includes.includes('track')) {
-    parts.push('track:tracks(id,name,slug,color)')
-  }
-  if (includes.includes('venue')) {
-    parts.push('venue:venues(id,name,slug)')
-  }
-  if (includes.includes('timeslot')) {
-    parts.push('time_slot:time_slots(id,start_time,end_time,label,is_break,day_date,slot_type)')
-  }
-  if (includes.includes('cohosts')) {
-    parts.push('cohosts:session_cohosts(user_id,display_order,profile:profiles(id,display_name,bio,affiliation))')
-  }
-  return parts.join(',')
-}
-
+/**
+ * GET /api/v1/sessions?event=<slug> — partner read API (x-api-key). Public or unlisted,
+ * non-draft events only; R9-filtered like every other read (no vote counts, no free-text
+ * host names, no attendee-only details).
+ */
 export async function GET(request: Request) {
   if (!validateApiKey(request)) return unauthorized()
 
@@ -43,130 +33,146 @@ export async function GET(request: Request) {
   if ('error' in result) return result.error
 
   const url = new URL(request.url)
-  const statusParam = url.searchParams.get('status')
-  let statuses = ['approved', 'scheduled']
+  const slug = url.searchParams.get('event')?.trim()
+  if (!slug) return badRequest('event query parameter (event slug) is required')
 
+  let statuses = ['approved', 'scheduled']
+  const statusParam = url.searchParams.get('status')
   if (statusParam) {
-    const requested = statusParam.split(',').map(s => s.trim())
-    const invalid = requested.filter(s => !VALID_STATUSES.includes(s))
+    const requested = statusParam.split(',').map((s) => s.trim())
+    const invalid = requested.filter((s) => !VALID_STATUSES.includes(s))
     if (invalid.length > 0) {
-      return badRequest(
-        `Invalid status(es): ${invalid.join(', ')}. Valid options: ${VALID_STATUSES.join(', ')}`
-      )
+      return badRequest(`Invalid status(es): ${invalid.join(', ')}. Valid options: ${VALID_STATUSES.join(', ')}`)
     }
     statuses = requested
   }
 
-  const supabase = await createAdminClient()
+  const events = await sql<{ id: string }[]>`
+    select id from events
+    where slug = ${slug} and visibility in ('public', 'unlisted') and status <> 'draft'
+  `
+  if (!events[0]) return notFound('Event')
 
-  const resolved = await resolvePartnerEvent(request, supabase)
-  if ('error' in resolved) return resolved.error
-
-  const selectQuery = buildSelect(result.includes)
-
-  const { data, error } = await supabase
-    .from('sessions')
-    .select(selectQuery)
-    .eq('event_id', resolved.event.id)
-    .in('status', statuses)
-    .order('total_votes', { ascending: false })
-
-  if (error) {
-    return badRequest(error.message)
-  }
-
-  return apiSuccess(data, data?.length ?? 0)
+  const data = await partnerSessions({ eventId: events[0].id, statuses, includes: result.includes })
+  return apiSuccess(data, data.length)
 }
 
-const ALLOWED_FIELDS = [
-  'title', 'description', 'format', 'duration', 'host_name',
-  'topic_tags', 'time_preferences', 'status', 'is_self_hosted',
-  'custom_location', 'self_hosted_start_time', 'self_hosted_end_time',
-  'track_id', 'telegram_group_url', 'event_id', 'expected_attendance',
-]
-
+/**
+ * POST /api/v1/sessions — propose a session.
+ *
+ * Body: `event_slug` (or `event_id`), `title`, `format`, `duration`, optional content fields,
+ * `time_preference: { windows, blackouts, publish }`. No host name and no co-hosts: the host
+ * is the signed-in proposer, and co-hosts accept invitations themselves (spec §4.2, R9).
+ *
+ * The insert runs as the proposer so `enforce_event_proposal_rules` applies (window, format,
+ * duration, per-person limit, approval status). Organizers are notified in the same
+ * transaction. After commit the proposal is written to the proposer's own repository when
+ * they are custodial or have confirmed public linkage (F).
+ *
+ * 201 `{ id, status, atproto }`.
+ */
 export async function POST(request: Request) {
-  const user = await getUserFromRequest(request)
-  if (!user) return unauthorized()
+  const bad = assertSameOrigin(request)
+  if (bad) return bad
+  const viewer = await requireViewer(request)
+  if (viewer instanceof Response) return viewer
 
-  let body: Record<string, unknown>
+  const body = await readJsonObject(request)
+  if (body instanceof Response) return body
+
+  let slug: string | null = typeof body.event_slug === 'string' ? body.event_slug.trim() : null
+  if (!slug && isUuid(body.event_id)) {
+    const rows = await sql<{ slug: string }[]>`select slug from events where id = ${body.event_id}`
+    slug = rows[0]?.slug ?? null
+  }
+  if (!slug) return jsonError(400, 'event_slug is required', { field: 'event_slug' })
+
+  const access = await loadEventAccess(request, slug)
+  if (access instanceof Response) return access
+
+  let fields: Record<string, unknown>
+  let timePreference: ReturnType<typeof parseTimePreference>
   try {
-    body = await request.json()
-    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('Invalid body')
-  } catch {
-    return badRequest('Invalid JSON body')
+    fields = parseSessionFields(body, true)
+    timePreference = parseTimePreference(body.time_preference)
+  } catch (e) {
+    if (e instanceof FieldError) return jsonError(400, e.message, { field: e.field })
+    throw e
+  }
+  for (const organizerOnly of ['status', 'venue_id', 'time_slot_id', 'session_type', 'is_votable', 'rejection_reason']) {
+    delete fields[organizerOnly]
+  }
+  if (fields.is_self_hosted === true && !fields.custom_location) {
+    return jsonError(400, 'Tell attendees where a self-hosted session happens', { field: 'custom_location' })
   }
 
-  if (!body.title || typeof body.title !== 'string' || !body.title.trim()) {
-    return badRequest('Title is required')
+  if (Array.isArray(fields.skill_uris) && fields.skill_uris.length) {
+    const checked = await validateSkillUris(fields.skill_uris)
+    if (!checked.ok) return jsonError(400, checked.error, { field: 'skills' })
   }
 
-  if (!body.event_id || typeof body.event_id !== 'string') {
-    return badRequest('event_id is required')
-  }
+  const trackError = await checkTrack(access, fields.track_id)
+  if (trackError) return trackError
 
-  const supabase = await createAdminClient()
-
-  // Check event's require_proposal_approval setting
-  const { data: event, error: eventError } = await supabase
-    .from('events')
-    .select('require_proposal_approval, gathering_uri')
-    .eq('id', body.event_id)
-    .single()
-
-  if (eventError || !event) {
-    return badRequest('Event not found')
-  }
-
-  // Build sanitized insert object — only allow known fields. The id is minted
-  // here so the ATProto hook below can find the row without a user-scoped
-  // SELECT after the RLS-respecting insert.
-  const sessionId = crypto.randomUUID()
-  const insert: Record<string, unknown> = { id: sessionId, host_id: user.id }
-  for (const field of ALLOWED_FIELDS) {
-    if (body[field] !== undefined) {
-      insert[field] = body[field]
-    }
-  }
-  // Override host_name from body (proposer provides their display name)
-  if (body.host_name) insert.host_name = body.host_name
-
-  // Set status based on event's approval requirement
-  // If approval is not required, auto-approve the session
-  insert.status = event.require_proposal_approval ? 'pending' : 'approved'
-
-  const { error } = await createRequestClient(request).from('sessions').insert(insert)
-
-  if (error) {
-    return badRequest(error.message)
-  }
-
-  // ATProto: publish the proposal into the AUTHOR's own repo, best-effort.
-  // The body flag overrides the profile default; a missing DID or an
-  // unpublished gathering simply skips. A network failure never fails the
-  // proposal — the author can publish later from the session page.
-  let atproto: { uri?: string; error?: string } | undefined
-  if (event.gathering_uri) {
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('did, publish_proposals')
-      .eq('id', user.id)
-      .maybeSingle()
-    const wantsPublish =
-      typeof body.publish_to_atproto === 'boolean' ? body.publish_to_atproto : !!profile?.publish_proposals
-    if (profile?.did && wantsPublish) {
-      try {
-        const result = await publishProposal({ sessionId, userId: user.id })
-        atproto = { uri: result.uri }
-      } catch (e) {
-        console.error('[sessions POST] atproto publish failed:', e)
-        atproto = { error: e instanceof Error ? e.message : 'publish failed' }
+  const accountId = viewer.accountId
+  let created: { id: string; status: string; title: string }
+  try {
+    created = await asAccount(accountId, async (t) => {
+      const role = await ensurePublicMembership(t, { ...access, viewer })
+      if (!role) {
+        const err = new Error('Join this event before proposing a session') as Error & { code: string }
+        err.code = '23514'
+        throw err
       }
-    }
+      const row = { ...fields, event_id: access.event.id, host_id: accountId }
+      const [inserted] = await t<{ id: string; status: string; title: string }[]>`
+        insert into sessions ${t(row as Record<string, string>, Object.keys(row) as never)}
+        returning id, status, title
+      `
+      // The person-scoped write is done; time_preferences and notifications are service-side tables.
+      await t`reset role`
+      if (timePreference) await saveTimePreference(t, { eventId: access.event.id, sessionId: inserted.id, accountId, input: timePreference })
+
+      const organizers = await t<{ user_id: string }[]>`
+        select user_id from event_members
+        where event_id = ${access.event.id} and role in ('owner', 'admin') and user_id <> ${accountId}
+      `
+      const proposer = await t<{ display_name: string | null }[]>`select display_name from profiles where id = ${accountId}`
+      const who = proposer[0]?.display_name?.trim() || 'A participant'
+      await notify(t, {
+        eventId: access.event.id,
+        userIds: organizers.map((o) => o.user_id),
+        type: 'new_proposal',
+        title: inserted.status === 'pending' ? 'New proposal to review' : 'New session proposal',
+        body: inserted.status === 'pending'
+          ? `"${inserted.title}" by ${who} needs review.`
+          : `${who} proposed "${inserted.title}".`,
+        actionUrl: inserted.status === 'pending' ? `/e/${access.event.slug}/admin/sessions` : `/e/${access.event.slug}/sessions/${inserted.id}`,
+        data: { session_id: inserted.id, session_title: inserted.title },
+      })
+      return inserted
+    })
+  } catch (e) {
+    const mapped = dbErrorResponse(e)
+    if (mapped) return mapped
+    throw e
   }
 
-  return NextResponse.json({ id: sessionId, ...(atproto ? { atproto } : {}) }, { status: 201 })
+  const atproto: AtprotoOutcome = await publishProposalFor(created.id, accountId)
+  if (timePreference?.publish && atproto.uri) {
+    // The time preference strongRefs the proposal, so it can only follow a published proposal.
+    const outcome = await reconcileTimePreference(created.id, accountId, timePreference)
+    return json({ id: created.id, status: created.status, atproto, time_preference: outcome }, { status: 201 })
+  }
+  return json({ id: created.id, status: created.status, atproto }, { status: 201 })
 }
+
+async function checkTrack(access: EventAccess, trackId: unknown): Promise<Response | null> {
+  if (!trackId) return null
+  const rows = await sql`select 1 from tracks where id = ${trackId as string} and event_id = ${access.event.id} and coalesce(is_active, true)`
+  return rows.length ? null : jsonError(400, 'Choose one of this event’s tracks', { field: 'track_id' })
+}
+
 export async function PUT() { return methodNotAllowed() }
 export async function PATCH() { return methodNotAllowed() }
 export async function DELETE() { return methodNotAllowed() }

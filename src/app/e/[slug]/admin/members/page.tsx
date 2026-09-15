@@ -1,7 +1,6 @@
 'use client'
 
 import * as React from 'react'
-import { useRouter } from 'next/navigation'
 import {
   Loader2,
   Users,
@@ -24,11 +23,8 @@ import { Badge } from '@/components/ui/badge'
 
 import { useAuth } from '@/hooks/useAuth'
 import { useEvent, useEventRole } from '@/contexts/EventContext'
-import { getAccessToken } from '@/lib/supabase/client'
+import { apiFetch, ApiError } from '@/lib/api/client'
 import { formatDistanceToNow } from 'date-fns'
-
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 
 interface Member {
   id: string
@@ -38,6 +34,7 @@ interface Member {
   user_data: {
     display_name: string | null
     email: string | null
+    handle: string | null
   } | null
 }
 
@@ -51,11 +48,14 @@ interface Invitation {
   created_at: string
   max_uses: number | null
   use_count: number
+  /** Null once the retention job has removed the inviter (30 days after redemption). */
+  invited_by: string | null
 }
 
 interface EmailResult {
   email: string
   sent: boolean
+  channel?: 'notification' | 'email' | 'none'
   error?: string
 }
 
@@ -84,14 +84,14 @@ function defaultMaxUsesFor(role: string): string {
 }
 
 export default function AdminMembersPage() {
-  const router = useRouter()
-  const { user, isLoading: authLoading } = useAuth()
+  const { user } = useAuth()
   const event = useEvent()
-  const { isAdmin, isOwner, isLoading: roleLoading } = useEventRole()
+  const { isAdmin, isOwner } = useEventRole()
 
   const [members, setMembers] = React.useState<Member[]>([])
   const [invitations, setInvitations] = React.useState<Invitation[]>([])
   const [loading, setLoading] = React.useState(true)
+  const [loadError, setLoadError] = React.useState<string | null>(null)
 
   const [showInviteModal, setShowInviteModal] = React.useState(false)
   const [inviteEmails, setInviteEmails] = React.useState('')
@@ -102,64 +102,32 @@ export default function AdminMembersPage() {
   const [inviteError, setInviteError] = React.useState<string | null>(null)
   const [emailResults, setEmailResults] = React.useState<EmailResult[] | null>(null)
   const [generatedLink, setGeneratedLink] = React.useState<string | null>(null)
-  const [copied, setCopied] = React.useState(false)
+  const [copied, setCopied] = React.useState<string | null>(null)
+  const [confirmRevokeId, setConfirmRevokeId] = React.useState<string | null>(null)
+  const [inviteListError, setInviteListError] = React.useState<string | null>(null)
 
-  // Per-member role editing / removal state
   const [savingMemberId, setSavingMemberId] = React.useState<string | null>(null)
   const [memberFeedback, setMemberFeedback] = React.useState<
     Record<string, { kind: 'success' | 'error'; message: string }>
   >({})
   const [confirmRemoveId, setConfirmRemoveId] = React.useState<string | null>(null)
 
-  // Redirect if not admin
+  const base = `/api/v1/events/${event.slug}`
+
+  const fetchInvitations = React.useCallback(async () => {
+    const data = await apiFetch<{ invitations: Invitation[] }>(`${base}/invitations`)
+    setInvitations(data.invitations)
+  }, [base])
+
   React.useEffect(() => {
-    if (!authLoading && !roleLoading && (!user || !isAdmin)) {
-      router.push(`/e/${event.slug}/sessions`)
-    }
-  }, [user, isAdmin, authLoading, roleLoading, router, event.slug])
-
-  const fetchInvitations = React.useCallback(async (token: string) => {
-    const invitationsRes = await fetch(`/api/v1/events/${event.slug}/invitations`, {
-      headers: { 'Authorization': `Bearer ${token}` },
-    })
-    if (invitationsRes.ok) {
-      const data = await invitationsRes.json()
-      setInvitations(data.invitations || [])
-    }
-  }, [event.slug])
-
-  // Fetch members and invitations
-  React.useEffect(() => {
-    async function fetchData() {
-      const token = getAccessToken()
-      if (!token) return
-
-      try {
-        // Fetch members. Join to profiles via PostgREST FK resolution so we
-        // get display_name/email alongside each event_member row.
-        const membersRes = await fetch(
-          `${SUPABASE_URL}/rest/v1/event_members?event_id=eq.${event.id}&select=id,user_id,role,joined_at,user_data:profiles!user_id(display_name,email)&order=role.asc,joined_at.asc`,
-          {
-            headers: {
-              'apikey': SUPABASE_KEY,
-              'Authorization': `Bearer ${token}`,
-            },
-          }
-        )
-        if (membersRes.ok) {
-          setMembers(await membersRes.json())
-        }
-
-        await fetchInvitations(token)
-      } catch (err) {
-        console.error('Error fetching data:', err)
-      } finally {
-        setLoading(false)
-      }
-    }
-
-    fetchData()
-  }, [event.id, fetchInvitations])
+    if (!isAdmin) return
+    let cancelled = false
+    Promise.all([apiFetch<{ members: Member[] }>(`${base}/members`), fetchInvitations()])
+      .then(([m]) => { if (!cancelled) setMembers(m.members) })
+      .catch((e) => { if (!cancelled) setLoadError(e instanceof ApiError ? e.message : 'Members could not be loaded.') })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [base, fetchInvitations, isAdmin])
 
   const setFeedback = (memberId: string, kind: 'success' | 'error', message: string) => {
     setMemberFeedback(prev => ({ ...prev, [memberId]: { kind, message } }))
@@ -175,66 +143,29 @@ export default function AdminMembersPage() {
   }
 
   const handleRoleChange = async (member: Member, newRole: string) => {
-    const token = getAccessToken()
-    if (!token || newRole === member.role) return
-
+    if (newRole === member.role) return
     const previousRole = member.role
     setSavingMemberId(member.id)
-    // Optimistic update
     setMembers(prev => prev.map(m => (m.id === member.id ? { ...m, role: newRole } : m)))
-
     try {
-      const response = await fetch(`/api/v1/events/${event.slug}/members/${member.user_id}`, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
-        },
-        body: JSON.stringify({ role: newRole }),
-      })
-      const data = await response.json().catch(() => ({}))
-
-      if (!response.ok) {
-        // Roll back
-        setMembers(prev => prev.map(m => (m.id === member.id ? { ...m, role: previousRole } : m)))
-        setFeedback(member.id, 'error', data.error || 'Failed to update role')
-        return
-      }
-
-      setMembers(prev =>
-        prev.map(m => (m.id === member.id ? { ...m, role: data.member?.role ?? newRole } : m))
-      )
+      const data = await apiFetch<{ member: { role: string } }>(`${base}/members/${member.user_id}`, { method: 'PATCH', json: { role: newRole } })
+      setMembers(prev => prev.map(m => (m.id === member.id ? { ...m, role: data.member.role } : m)))
       setFeedback(member.id, 'success', 'Role updated')
-    } catch (err) {
-      console.error('Error updating role:', err)
+    } catch (e) {
       setMembers(prev => prev.map(m => (m.id === member.id ? { ...m, role: previousRole } : m)))
-      setFeedback(member.id, 'error', 'Network error while updating role')
+      setFeedback(member.id, 'error', e instanceof ApiError ? e.message : 'Failed to update role')
     } finally {
       setSavingMemberId(null)
     }
   }
 
   const handleRemoveMember = async (member: Member) => {
-    const token = getAccessToken()
-    if (!token) return
-
     setSavingMemberId(member.id)
     try {
-      const response = await fetch(`/api/v1/events/${event.slug}/members/${member.user_id}`, {
-        method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${token}` },
-      })
-      const data = await response.json().catch(() => ({}))
-
-      if (!response.ok) {
-        setFeedback(member.id, 'error', data.error || 'Failed to remove member')
-        return
-      }
-
+      await apiFetch(`${base}/members/${member.user_id}`, { method: 'DELETE' })
       setMembers(prev => prev.filter(m => m.id !== member.id))
-    } catch (err) {
-      console.error('Error removing member:', err)
-      setFeedback(member.id, 'error', 'Network error while removing member')
+    } catch (e) {
+      setFeedback(member.id, 'error', e instanceof ApiError ? e.message : 'Failed to remove member')
     } finally {
       setSavingMemberId(null)
       setConfirmRemoveId(null)
@@ -255,19 +186,14 @@ export default function AdminMembersPage() {
   }
 
   const handleCreateInvite = async () => {
-    const token = getAccessToken()
-    if (!token) return
-
     setInviting(true)
     setGeneratedLink(null)
     setEmailResults(null)
     setInviteError(null)
-
     try {
       const body: { emails?: string[]; role: string; max_uses?: number | null } = { role: inviteRole }
-
-      if (inviteType === 'email' && inviteEmails.trim()) {
-        body.emails = inviteEmails.split(',').map(e => e.trim()).filter(e => e)
+      if (inviteType === 'email') {
+        body.emails = inviteEmails.split(/[,\s]+/).map(e => e.trim()).filter(Boolean)
       } else {
         const trimmed = inviteMaxUses.trim()
         if (trimmed !== '') {
@@ -281,78 +207,52 @@ export default function AdminMembersPage() {
           body.max_uses = null
         }
       }
-
-      const response = await fetch(`/api/v1/events/${event.slug}/invitations`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
-        },
-        body: JSON.stringify(body),
-      })
-
-      const data = await response.json().catch(() => ({}))
-
-      if (!response.ok) {
-        setInviteError(data.error || 'Failed to create invitation')
-        return
-      }
-
-      if (data.inviteUrl) {
-        setGeneratedLink(data.inviteUrl)
-      }
-
+      const data = await apiFetch<{ inviteUrl: string | null; emailResults?: EmailResult[] }>(`${base}/invitations`, { method: 'POST', json: body })
+      if (data.inviteUrl) setGeneratedLink(data.inviteUrl)
       if (inviteType === 'email') {
-        // Surface per-address delivery results instead of silently closing
-        const results: EmailResult[] = Array.isArray(data.emailResults)
-          ? data.emailResults
-          : (body.emails || []).map(email => ({ email, sent: true }))
-        setEmailResults(results)
+        setEmailResults(data.emailResults ?? [])
         setInviteEmails('')
       }
-
-      await fetchInvitations(token)
-    } catch (err) {
-      console.error('Error creating invitation:', err)
-      setInviteError('Network error while creating invitation')
+      await fetchInvitations()
+    } catch (e) {
+      setInviteError(e instanceof ApiError ? e.message : 'Failed to create invitation')
     } finally {
       setInviting(false)
     }
   }
 
   const handleRevokeInvite = async (id: string) => {
-    const token = getAccessToken()
-    if (!token) return
-
-    if (!confirm('Revoke this invitation?')) return
-
+    setConfirmRevokeId(null)
+    setInviteListError(null)
     try {
-      await fetch(`/api/v1/events/${event.slug}/invitations/${id}`, {
-        method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${token}` },
-      })
-
+      await apiFetch(`${base}/invitations/${id}`, { method: 'DELETE' })
       setInvitations(prev => prev.filter(i => i.id !== id))
-    } catch (err) {
-      console.error('Error revoking invitation:', err)
+    } catch (e) {
+      setInviteListError(e instanceof ApiError ? e.message : 'The invitation could not be revoked.')
     }
   }
 
-  const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
+  const copyToClipboard = async (text: string, key: string) => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(key)
+      setTimeout(() => setCopied(null), 2000)
+    } catch {
+      setInviteListError('Copying failed; select the link and copy it manually.')
+    }
   }
 
-  if (authLoading || roleLoading || loading) {
+  if (!isAdmin) {
+    return <Card><CardContent className="py-8 text-center text-muted-foreground">Only owners and admins manage members.</CardContent></Card>
+  }
+
+  if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
         <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
       </div>
     )
   }
-
-  if (!isAdmin) return null
 
   const pendingInvitations = invitations.filter(i => !i.accepted_at)
   const inviteFinished = !!generatedLink || !!emailResults
@@ -372,6 +272,9 @@ export default function AdminMembersPage() {
               Invite People
             </Button>
           </div>
+
+          {loadError && <p role="alert" className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">{loadError}</p>}
+          {inviteListError && <p role="alert" className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">{inviteListError}</p>}
 
           {/* Invite Modal */}
           {showInviteModal && (
@@ -414,7 +317,7 @@ export default function AdminMembersPage() {
                       onChange={(e) => setInviteEmails(e.target.value)}
                     />
                     <p className="text-xs text-muted-foreground">
-                      Separate multiple emails with commas
+                      Separate addresses with commas. People who already have an account are invited in the app; others get an email.
                     </p>
                   </div>
                 )}
@@ -451,7 +354,7 @@ export default function AdminMembersPage() {
                     />
                     <p className="text-xs text-muted-foreground">
                       How many people can join with this link. Leave blank for unlimited.
-                      {inviteRole === 'admin' && ' Admin links must have a limit.'}
+                      {(inviteRole === 'admin' || inviteRole === 'moderator') && ' Moderator and admin links must have a limit.'}
                     </p>
                   </div>
                 )}
@@ -477,7 +380,9 @@ export default function AdminMembersPage() {
                           <span className="break-all">
                             <span className="font-medium">{r.email}</span>
                             {' — '}
-                            {r.sent ? 'sent' : `failed${r.error ? `: ${r.error}` : ''}`}
+                            {r.sent
+                              ? r.channel === 'notification' ? 'invited in the app (they already have an account)' : `emailed${r.error ? ` — ${r.error}` : ''}`
+                              : `not sent${r.error ? `: ${r.error}` : ''}`}
                           </span>
                         </li>
                       ))}
@@ -497,9 +402,10 @@ export default function AdminMembersPage() {
                       <Button
                         variant="outline"
                         size="icon"
-                        onClick={() => copyToClipboard(generatedLink)}
+                        onClick={() => void copyToClipboard(generatedLink, 'generated')}
+                        aria-label="Copy invitation link"
                       >
-                        {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                        {copied === 'generated' ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
                       </Button>
                     </div>
                     <p className="text-xs text-muted-foreground">
@@ -574,6 +480,8 @@ export default function AdminMembersPage() {
                           )}
                         </div>
                         <p className="text-xs text-muted-foreground">
+                          Invited by {invite.invited_by ?? '—'}
+                          {' · '}
                           Created {formatDistanceToNow(new Date(invite.created_at), { addSuffix: true })}
                           {' · '}
                           Expires {formatDistanceToNow(new Date(invite.expires_at), { addSuffix: true })}
@@ -584,19 +492,28 @@ export default function AdminMembersPage() {
                           <Button
                             variant="ghost"
                             size="icon"
-                            onClick={() => copyToClipboard(`${window.location.origin}/invite/e/${invite.token}`)}
+                            onClick={() => void copyToClipboard(`${window.location.origin}/invite/e/${invite.token}`, invite.id)}
+                            aria-label="Copy invitation link"
                           >
-                            <Copy className="h-4 w-4" />
+                            {copied === invite.id ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
                           </Button>
                         )}
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="text-destructive hover:text-destructive"
-                          onClick={() => handleRevokeInvite(invite.id)}
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
+                        {confirmRevokeId === invite.id ? (
+                          <>
+                            <Button variant="outline" size="sm" onClick={() => setConfirmRevokeId(null)}>Keep</Button>
+                            <Button variant="destructive" size="sm" onClick={() => void handleRevokeInvite(invite.id)}>Revoke</Button>
+                          </>
+                        ) : (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="text-destructive hover:text-destructive"
+                            onClick={() => setConfirmRevokeId(invite.id)}
+                            aria-label="Revoke invitation"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        )}
                       </div>
                     </div>
                     )
@@ -636,7 +553,7 @@ export default function AdminMembersPage() {
                           <div className={`w-2 h-2 rounded-full shrink-0 ${ROLE_COLORS[member.role] || 'bg-gray-500'}`} />
                           <div className="min-w-0">
                             <p className="font-medium truncate">
-                              {member.user_data?.display_name || member.user_data?.email || 'Unknown User'}
+                              {member.user_data?.display_name || (member.user_data?.handle ? `@${member.user_data.handle}` : null) || member.user_data?.email || 'Unknown member'}
                               {isSelf && <span className="ml-2 text-xs text-muted-foreground">(you)</span>}
                             </p>
                             {member.user_data?.email && member.user_data?.display_name && (
@@ -688,7 +605,7 @@ export default function AdminMembersPage() {
                             <span className="font-medium">
                               {member.user_data?.display_name || member.user_data?.email || 'this member'}
                             </span>{' '}
-                            from {event.name}? Their votes and sessions are kept.
+                            from {event.name}? Their proposals stay theirs.
                           </span>
                           <div className="flex gap-2">
                             <Button

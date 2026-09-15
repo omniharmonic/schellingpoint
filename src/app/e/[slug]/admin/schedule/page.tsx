@@ -2,1134 +2,805 @@
 
 import * as React from 'react'
 import Link from 'next/link'
-import { useRouter } from 'next/navigation'
 import {
-  Loader2,
-  GripVertical,
-  Calendar,
-  X,
-  PanelLeftClose,
-  PanelLeft,
   AlertTriangle,
+  CheckCircle,
   Clock,
-  Wand2,
-  Undo2,
+  FileText,
+  Globe,
+  GripVertical,
+  Hourglass,
+  Loader2,
+  Lock,
+  PanelLeft,
+  PanelLeftClose,
   Redo2,
   RotateCcw,
   Send,
-  CheckCircle,
-  FileText,
+  ShieldCheck,
+  Undo2,
+  Wand2,
+  X,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Checkbox } from '@/components/ui/checkbox'
-import { useAuth } from '@/hooks/useAuth'
 import { useEvent, useEventRole } from '@/contexts/EventContext'
-import { getEventDays, getEventDayLabel } from '@/lib/events/dates'
+import { apiFetch, ApiError } from '@/lib/api/client'
+import { getEventDayLabel, getEventDays } from '@/lib/events/dates'
 import { formatInEventTimezone } from '@/lib/events/timezone'
 import { cn } from '@/lib/utils'
+import { hostLabel, type AdminSession, type AdminSessionsResponse, type AdminTimeSlot, type AdminVenue } from '@/components/admin/types'
 
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-
-function getAccessToken(): string | null {
-  const storageKey = `sb-${new URL(SUPABASE_URL).hostname.split('.')[0]}-auth-token`
-  const stored = localStorage.getItem(storageKey)
-  if (stored) {
-    try {
-      const session = JSON.parse(stored)
-      return session?.access_token || null
-    } catch {
-      return null
-    }
-  }
-  return null
-}
-
-// Extended interfaces with new schema fields
-interface Venue {
+interface ApprovalRequest {
   id: string
-  name: string
-  slug: string | null
-  capacity: number | null
-  style: string | null
-  is_primary: boolean
+  action: 'move' | 'cancel' | 'remove-listing'
+  status: 'pending' | 'applying' | 'applied' | 'withdrawn' | 'failed'
+  reason: string
+  threshold: number
+  sessionId: string | null
+  sessionTitle: string | null
+  target: { timeSlotId?: string; venueId?: string | null; startsAt?: string | null; endsAt?: string | null }
+  requestedBy: { accountId: string; handle: string | null } | null
+  approvals: Array<{ accountId: string; handle: string | null; createdAt: string }>
+  error: string | null
+  createdAt: string
 }
 
-interface TimeSlot {
-  id: string
-  label: string | null
-  start_time: string
-  end_time: string
-  is_break: boolean
-  venue_id: string | null
-  day_date: string | null
-  slot_type: string | null
+interface PublishStatus {
+  schedulePublishedAt: string | null
+  hasUnpublishedChanges: boolean
+  scheduledSessions: number
+  networkPublishedSessions: number
+  networkLinked: boolean
+  changes: { added: { id: string; title: string }[]; moved: { id: string; title: string }[]; removed: { id: string; title: string }[] }
 }
 
-interface Track {
-  id: string
-  name: string
-  slug: string
-  color: string | null
+interface PublishResponse {
+  message: string
+  changes: { added: number; moved: number; removed: number }
+  notified: { members: number }
+  network: { attempted: false } | { attempted: true; published: number; failed: number; results: Array<{ kind: string; id: string; uri?: string; error?: string }>; error?: string }
 }
 
-interface Session {
-  id: string
-  title: string
-  description: string | null
-  format: string
-  duration: number
-  host_name: string | null
-  topic_tags: string[] | null
-  total_votes: number
-  status: 'pending' | 'approved' | 'rejected' | 'scheduled'
-  venue_id: string | null
-  time_slot_id: string | null
-  track_id: string | null
-  session_type: string | null
-  is_votable: boolean
-  time_preferences: string[] | null
-  track?: Track | null
+interface AutoScheduleResult {
+  assignments: Array<{ sessionId: string; sessionTitle: string; slotId: string; venueId: string; score: number; warnings: string[] }>
+  unassigned: Array<{ sessionId: string; sessionTitle: string; reason: string }>
+  stats: { totalSessions: number; assigned: number; unassigned: number; averageScore: number; usedBallots: boolean }
 }
 
-// History action for undo/redo
+interface ScheduleResponse {
+  status: 'applied' | 'awaiting_approval'
+  approvalsNeeded?: number
+  threshold?: number
+  approvals?: number
+  displaced?: { id: string; title: string } | null
+}
+
+/** Only direct (unpublished) placements can be undone. */
 interface HistoryAction {
-  type: 'schedule' | 'unschedule'
   sessionId: string
   fromSlotId: string | null
-  fromVenueId: string | null
   toSlotId: string | null
-  toVenueId: string | null
 }
 
-// Generate day-to-preferences mapping dynamically based on event dates
-function generateDayToPreferences(eventDays: string[]): Record<string, string[]> {
-  const mapping: Record<string, string[]> = {}
+type Destructive =
+  | { kind: 'move'; session: AdminSession; slotId: string }
+  | { kind: 'cancel'; session: AdminSession }
 
-  eventDays.forEach((dateStr) => {
-    const date = new Date(dateStr + 'T12:00:00')
-    const dayOfWeek = date.getDay()
-    const prefs: string[] = []
-
-    switch (dayOfWeek) {
-      case 0: prefs.push('sunday_am', 'sunday_pm'); break
-      case 1: prefs.push('monday_am', 'monday_pm'); break
-      case 2: prefs.push('tuesday_am', 'tuesday_pm'); break
-      case 3: prefs.push('wednesday_am', 'wednesday_pm'); break
-      case 4: prefs.push('thursday_am', 'thursday_pm'); break
-      case 5: prefs.push('friday_am', 'friday_pm'); break
-      case 6: prefs.push('saturday_am', 'saturday_pm'); break
-    }
-
-    mapping[dateStr] = prefs
-  })
-
-  return mapping
-}
+type Notice = { kind: 'success' | 'error' | 'info'; text: string; details?: string[] }
 
 const PREF_LABELS: Record<string, string> = {
-  friday_am: 'Fri AM', friday_pm: 'Fri PM',
-  saturday_am: 'Sat AM', saturday_pm: 'Sat PM',
+  monday_am: 'Mon AM', monday_pm: 'Mon PM', tuesday_am: 'Tue AM', tuesday_pm: 'Tue PM',
+  wednesday_am: 'Wed AM', wednesday_pm: 'Wed PM', thursday_am: 'Thu AM', thursday_pm: 'Thu PM',
+  friday_am: 'Fri AM', friday_pm: 'Fri PM', saturday_am: 'Sat AM', saturday_pm: 'Sat PM',
   sunday_am: 'Sun AM', sunday_pm: 'Sun PM',
-  monday_am: 'Mon AM', monday_pm: 'Mon PM',
-  tuesday_am: 'Tue AM', tuesday_pm: 'Tue PM',
-  wednesday_am: 'Wed AM', wednesday_pm: 'Wed PM',
-  thursday_am: 'Thu AM', thursday_pm: 'Thu PM',
 }
+const DAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']
 
-// Calculate slot duration in minutes
-function getSlotDuration(slot: TimeSlot): number {
-  const start = new Date(slot.start_time)
-  const end = new Date(slot.end_time)
-  return Math.round((end.getTime() - start.getTime()) / (1000 * 60))
-}
+const slotMinutes = (slot: Pick<AdminTimeSlot, 'start_time' | 'end_time'>) =>
+  Math.round((Date.parse(slot.end_time) - Date.parse(slot.start_time)) / 60_000)
+
+const errorText = (e: unknown, fallback: string) => (e instanceof ApiError ? e.message : fallback)
 
 export default function AdminSchedulePage() {
-  const router = useRouter()
-  const { user, isLoading: authLoading } = useAuth()
   const event = useEvent()
-  const { isAdmin, isLoading: roleLoading, can } = useEventRole()
+  const { can } = useEventRole()
+  const canSchedule = can('manageSchedule')
+  const base = `/api/v1/events/${event.slug}`
 
-  // Generate event days dynamically from event dates
-  const eventDays = React.useMemo(() => {
-    return getEventDays(event.startDate, event.endDate)
-  }, [event.startDate, event.endDate])
-
-  // Generate day-to-preferences mapping
-  const dayToPreferences = React.useMemo(() => {
-    return generateDayToPreferences(eventDays)
-  }, [eventDays])
-
-  const [venues, setVenues] = React.useState<Venue[]>([])
-  const [timeSlots, setTimeSlots] = React.useState<TimeSlot[]>([])
-  const [sessions, setSessions] = React.useState<Session[]>([])
-  const [tracks, setTracks] = React.useState<Track[]>([])
-  const [isLoading, setIsLoading] = React.useState(true)
+  const eventDays = React.useMemo(() => getEventDays(event.startDate, event.endDate), [event.startDate, event.endDate])
   const [selectedDay, setSelectedDay] = React.useState(eventDays[0] || '')
-  const [draggedSession, setDraggedSession] = React.useState<Session | null>(null)
-  const [showSidebar, setShowSidebar] = React.useState(true)
+  const [venues, setVenues] = React.useState<AdminVenue[]>([])
+  const [timeSlots, setTimeSlots] = React.useState<AdminTimeSlot[]>([])
+  const [sessions, setSessions] = React.useState<AdminSession[]>([])
+  const [votingStatus, setVotingStatus] = React.useState<string>('none')
+  const [approvals, setApprovals] = React.useState<ApprovalRequest[]>([])
+  const [approvalsError, setApprovalsError] = React.useState<string | null>(null)
+  const [viewerAccountId, setViewerAccountId] = React.useState<string | null>(null)
+  const [publishStatus, setPublishStatus] = React.useState<PublishStatus | null>(null)
+  const [isLoading, setIsLoading] = React.useState(true)
+  const [loadError, setLoadError] = React.useState<string | null>(null)
+  const [busy, setBusy] = React.useState(false)
+  const [notice, setNotice] = React.useState<Notice | null>(null)
 
-  // Undo/Redo history
+  const [showSidebar, setShowSidebar] = React.useState(true)
+  const [dragged, setDragged] = React.useState<AdminSession | null>(null)
+  const [picked, setPicked] = React.useState<AdminSession | null>(null)
+  const [conflict, setConflict] = React.useState<{ session: AdminSession; slotId: string; occupant: string } | null>(null)
+  const [destructive, setDestructive] = React.useState<Destructive | null>(null)
+  const [reason, setReason] = React.useState('')
+  const [confirmLinkage, setConfirmLinkage] = React.useState(false)
+  const [needsLinkage, setNeedsLinkage] = React.useState(false)
+  const [confirmReset, setConfirmReset] = React.useState(false)
   const [history, setHistory] = React.useState<HistoryAction[]>([])
   const [historyIndex, setHistoryIndex] = React.useState(-1)
 
-  // Conflict state
-  const [showConflictWarning, setShowConflictWarning] = React.useState(false)
-  const [conflictSlotId, setConflictSlotId] = React.useState<string | null>(null)
-  const [pendingDrop, setPendingDrop] = React.useState<{ slotId: string; venueId: string } | null>(null)
-
-  // Auto-schedule state
-  const [showAutoSchedule, setShowAutoSchedule] = React.useState(false)
-  const [autoScheduleLoading, setAutoScheduleLoading] = React.useState(false)
-  const [autoScheduleResult, setAutoScheduleResult] = React.useState<{
-    assignments: Array<{
-      sessionId: string
-      sessionTitle: string
-      slotId: string
-      venueId: string
-      score: number
-      warnings: string[]
-    }>
-    unassigned: Array<{ sessionId: string; sessionTitle: string; reason: string }>
-    stats: { totalSessions: number; assigned: number; unassigned: number; averageScore: number }
-  } | null>(null)
+  const [autoOpen, setAutoOpen] = React.useState(false)
+  const [autoLoading, setAutoLoading] = React.useState(false)
+  const [autoResult, setAutoResult] = React.useState<AutoScheduleResult | null>(null)
   const [selectedAssignments, setSelectedAssignments] = React.useState<Set<string>>(new Set())
 
-  // Inline notice for auto-schedule results: successes clear themselves, errors persist.
-  const [notice, setNotice] = React.useState<{ kind: 'success' | 'error'; message: string } | null>(null)
+  const [publishOpen, setPublishOpen] = React.useState(false)
+  const [publishing, setPublishing] = React.useState(false)
+  const [publishResult, setPublishResult] = React.useState<PublishResponse | null>(null)
 
   React.useEffect(() => {
     if (notice?.kind !== 'success') return
-    const timer = window.setTimeout(() => setNotice(null), 5000)
+    const timer = window.setTimeout(() => setNotice(null), 6000)
     return () => window.clearTimeout(timer)
   }, [notice])
 
-  // Publish workflow state
-  const [showPublishModal, setShowPublishModal] = React.useState(false)
-  const [publishStatus, setPublishStatus] = React.useState<{
-    schedulePublishedAt: string | null
-    lastScheduleChangeAt: string | null
-    hasUnpublishedChanges: boolean
-    scheduledSessions: number
-  } | null>(null)
-  const [isPublishing, setIsPublishing] = React.useState(false)
-  const [publishSuccess, setPublishSuccess] = React.useState(false)
+  React.useEffect(() => {
+    if (eventDays.length > 0 && !eventDays.includes(selectedDay)) setSelectedDay(eventDays[0])
+  }, [eventDays, selectedDay])
 
-  // Build slot occupancy map
-  const slotOccupancy = React.useMemo(() => {
-    const map = new Map<string, Session>()
-    sessions.forEach((s) => {
-      if (s.time_slot_id) {
-        map.set(s.time_slot_id, s)
-      }
-    })
+  const loadApprovals = React.useCallback(async () => {
+    try {
+      const res = await apiFetch<{ requests: ApprovalRequest[]; viewerAccountId: string }>(`${base}/approvals`)
+      setApprovals(res.requests)
+      setViewerAccountId(res.viewerAccountId)
+      setApprovalsError(null)
+    } catch (e) {
+      setApprovalsError(errorText(e, 'Approval requests could not be loaded.'))
+    }
+  }, [base])
+
+  const load = React.useCallback(async () => {
+    setLoadError(null)
+    try {
+      const [v, t, s, p] = await Promise.all([
+        apiFetch<{ venues: AdminVenue[] }>(`${base}/admin/venues`),
+        apiFetch<{ timeSlots: AdminTimeSlot[] }>(`${base}/admin/time-slots`),
+        apiFetch<AdminSessionsResponse>(`${base}/admin/sessions`),
+        apiFetch<PublishStatus>(`${base}/admin/publish-schedule`),
+      ])
+      setVenues(v.venues)
+      setTimeSlots(t.timeSlots)
+      setSessions(s.sessions)
+      setVotingStatus(s.voting.status)
+      setPublishStatus(p)
+    } catch (e) {
+      setLoadError(errorText(e, 'The schedule could not be loaded. Try again.'))
+    } finally {
+      setIsLoading(false)
+    }
+    void loadApprovals()
+  }, [base, loadApprovals])
+
+  React.useEffect(() => { void load() }, [load])
+
+  const sessionBySlot = React.useMemo(() => {
+    const map = new Map<string, AdminSession>()
+    for (const s of sessions) if (s.time_slot_id && s.status === 'scheduled') map.set(s.time_slot_id, s)
     return map
   }, [sessions])
 
-  // Update selected day when event days change
-  React.useEffect(() => {
-    if (eventDays.length > 0 && !eventDays.includes(selectedDay)) {
-      setSelectedDay(eventDays[0])
+  const openRequestBySession = React.useMemo(() => {
+    const map = new Map<string, ApprovalRequest>()
+    for (const r of approvals) if (r.sessionId && (r.status === 'pending' || r.status === 'applying')) map.set(r.sessionId, r)
+    return map
+  }, [approvals])
+
+  const unscheduled = sessions.filter((s) => s.status === 'approved' && !s.time_slot_id)
+  const pendingRequests = approvals.filter((r) => r.status === 'pending' || r.status === 'applying' || r.status === 'failed')
+
+  const formatTime = (iso: string) => formatInEventTimezone(new Date(iso), event.timezone, 'time')
+
+  const timeRows = React.useMemo(() => {
+    const rows = new Map<string, { start: string; end: string }>()
+    for (const slot of timeSlots) {
+      if (slot.day_date !== selectedDay) continue
+      rows.set(`${slot.start_time}|${slot.end_time}`, { start: slot.start_time, end: slot.end_time })
     }
-  }, [eventDays, selectedDay])
+    return [...rows.values()].sort((a, b) => Date.parse(a.start) - Date.parse(b.start))
+  }, [timeSlots, selectedDay])
 
-  // Redirect if not admin
-  React.useEffect(() => {
-    if (!authLoading && !roleLoading && (!user || !isAdmin)) {
-      router.push(`/e/${event.slug}/sessions`)
-    }
-  }, [user, isAdmin, authLoading, roleLoading, router, event.slug])
+  const dayPrefs = React.useMemo(() => {
+    if (!selectedDay) return [] as string[]
+    const name = DAY_NAMES[new Date(`${selectedDay}T12:00:00Z`).getUTCDay()]
+    return [`${name}_am`, `${name}_pm`]
+  }, [selectedDay])
 
-  // Fetch data
-  React.useEffect(() => {
-    const fetchData = async () => {
-      const token = getAccessToken()
-      const authHeader = token ? `Bearer ${token}` : `Bearer ${SUPABASE_KEY}`
-
-      try {
-        const [venuesRes, timeSlotsRes, sessionsRes, tracksRes] = await Promise.all([
-          fetch(`${SUPABASE_URL}/rest/v1/venues?event_id=eq.${event.id}&select=*&order=is_primary.desc,name`, {
-            headers: { 'apikey': SUPABASE_KEY, 'Authorization': authHeader },
-          }),
-          fetch(`${SUPABASE_URL}/rest/v1/time_slots?event_id=eq.${event.id}&select=*&order=start_time`, {
-            headers: { 'apikey': SUPABASE_KEY, 'Authorization': authHeader },
-          }),
-          fetch(`${SUPABASE_URL}/rest/v1/sessions?event_id=eq.${event.id}&select=*,track:tracks(id,name,slug,color)&order=total_votes.desc`, {
-            headers: { 'apikey': SUPABASE_KEY, 'Authorization': authHeader },
-          }),
-          fetch(`${SUPABASE_URL}/rest/v1/tracks?event_id=eq.${event.id}&select=*&order=name`, {
-            headers: { 'apikey': SUPABASE_KEY, 'Authorization': authHeader },
-          }),
-        ])
-
-        if (venuesRes.ok) setVenues(await venuesRes.json())
-        if (timeSlotsRes.ok) setTimeSlots(await timeSlotsRes.json())
-        if (sessionsRes.ok) setSessions(await sessionsRes.json())
-        if (tracksRes.ok) setTracks(await tracksRes.json())
-      } catch (err) {
-        console.error('Error fetching data:', err)
-      } finally {
-        setIsLoading(false)
-      }
-    }
-
-    fetchData()
-  }, [event.id])
-
-  // Fetch publish status
-  const fetchPublishStatus = React.useCallback(async () => {
-    const token = getAccessToken()
-    if (!token) return
-
-    try {
-      const response = await fetch(`/api/v1/events/${event.slug}/admin/publish-schedule`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      if (response.ok) {
-        const data = await response.json()
-        setPublishStatus(data)
-      }
-    } catch (err) {
-      console.error('Error fetching publish status:', err)
-    }
-  }, [event.slug])
-
-  React.useEffect(() => {
-    fetchPublishStatus()
-  }, [fetchPublishStatus])
-
-  // Publish schedule handler
-  const handlePublishSchedule = async () => {
-    const token = getAccessToken()
-    if (!token) return
-
-    setIsPublishing(true)
-    setPublishSuccess(false)
-
-    try {
-      const response = await fetch(`/api/v1/events/${event.slug}/admin/publish-schedule`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-      })
-
-      if (response.ok) {
-        setPublishSuccess(true)
-        await fetchPublishStatus()
-        setTimeout(() => {
-          setShowPublishModal(false)
-          setPublishSuccess(false)
-        }, 2000)
-      }
-    } catch (err) {
-      console.error('Error publishing schedule:', err)
-    } finally {
-      setIsPublishing(false)
-    }
+  const refreshAfterChange = async () => {
+    const [s, p] = await Promise.all([
+      apiFetch<AdminSessionsResponse>(`${base}/admin/sessions`),
+      apiFetch<PublishStatus>(`${base}/admin/publish-schedule`),
+    ])
+    setSessions(s.sessions)
+    setPublishStatus(p)
+    const t = await apiFetch<{ timeSlots: AdminTimeSlot[] }>(`${base}/admin/time-slots`)
+    setTimeSlots(t.timeSlots)
+    void loadApprovals()
   }
 
-  // Get time slots for a specific venue and day
-  const getSlotsForVenueAndDay = (venueId: string, dayDate: string) => {
-    return timeSlots.filter(
-      (slot) => slot.venue_id === venueId && slot.day_date === dayDate
-    ).sort((a, b) => new Date(a.start_time).getTime() - new Date(b.start_time).getTime())
+  const recordHistory = (action: HistoryAction) => {
+    const next = history.slice(0, historyIndex + 1)
+    next.push(action)
+    setHistory(next)
+    setHistoryIndex(next.length - 1)
   }
 
-  // Get session assigned to a specific time slot
-  const getSessionForSlot = (slotId: string) => {
-    return slotOccupancy.get(slotId)
+  /** Direct placement or removal of an unpublished session; returns false on failure. */
+  const place = async (sessionId: string, slotId: string | null, opts: { replace?: boolean } = {}): Promise<ScheduleResponse | null> => {
+    const url = `${base}/admin/sessions/${sessionId}/schedule`
+    return slotId
+      ? apiFetch<ScheduleResponse>(url, { method: 'PUT', json: { time_slot_id: slotId, replace: opts.replace === true } })
+      : apiFetch<ScheduleResponse>(url, { method: 'DELETE' })
   }
 
-  // Unscheduled sessions (approved but not assigned to a slot)
-  const unscheduledSessions = sessions.filter(
-    (s) => (s.status === 'approved' || s.status === 'scheduled') && !s.time_slot_id
-  )
-
-  // Add action to history
-  const addToHistory = (action: HistoryAction) => {
-    // Remove any actions after current index (for redo)
-    const newHistory = history.slice(0, historyIndex + 1)
-    newHistory.push(action)
-    setHistory(newHistory)
-    setHistoryIndex(newHistory.length - 1)
-  }
-
-  // Handle drop on slot
-  const handleDropOnSlot = async (slotId: string, venueId: string, force = false) => {
-    if (!draggedSession) return
-
-    // Check for conflict
-    const existingSession = slotOccupancy.get(slotId)
-    if (existingSession && existingSession.id !== draggedSession.id && !force) {
-      setConflictSlotId(slotId)
-      setPendingDrop({ slotId, venueId })
-      setShowConflictWarning(true)
-      return
-    }
-
-    const token = getAccessToken()
-    if (!token) return
-
-    // Save for undo
-    const action: HistoryAction = {
-      type: 'schedule',
-      sessionId: draggedSession.id,
-      fromSlotId: draggedSession.time_slot_id,
-      fromVenueId: draggedSession.venue_id,
-      toSlotId: slotId,
-      toVenueId: venueId,
-    }
-
-    try {
-      // If replacing, unschedule the existing session first
-      if (existingSession && existingSession.id !== draggedSession.id) {
-        await fetch(`${SUPABASE_URL}/rest/v1/sessions?id=eq.${existingSession.id}&event_id=eq.${event.id}`, {
-          method: 'PATCH',
-          headers: {
-            'apikey': SUPABASE_KEY,
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            status: 'approved',
-            venue_id: null,
-            time_slot_id: null,
-          }),
-        })
-
-        setSessions((prev) =>
-          prev.map((s) =>
-            s.id === existingSession.id
-              ? { ...s, status: 'approved', venue_id: null, time_slot_id: null }
-              : s
-          )
-        )
-      }
-
-      await fetch(`${SUPABASE_URL}/rest/v1/sessions?id=eq.${draggedSession.id}&event_id=eq.${event.id}`, {
-        method: 'PATCH',
-        headers: {
-          'apikey': SUPABASE_KEY,
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          status: 'scheduled',
-          venue_id: venueId,
-          time_slot_id: slotId,
-        }),
-      })
-
-      setSessions((prev) =>
-        prev.map((s) =>
-          s.id === draggedSession.id
-            ? { ...s, status: 'scheduled', venue_id: venueId, time_slot_id: slotId }
-            : s
-        )
-      )
-
-      addToHistory(action)
-
-      // Fire-and-forget: notify host via email
-      fetch(`/api/sessions/${draggedSession.id}/notify-host`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-      }).catch((err) => console.error('Notify host error:', err))
-    } catch (err) {
-      console.error('Error scheduling session:', err)
-    }
-
-    setDraggedSession(null)
-    setShowConflictWarning(false)
-    setConflictSlotId(null)
-    setPendingDrop(null)
-  }
-
-  // Handle conflict confirmation
-  const handleConfirmReplace = () => {
-    if (pendingDrop) {
-      handleDropOnSlot(pendingDrop.slotId, pendingDrop.venueId, true)
-    }
-  }
-
-  const handleCancelReplace = () => {
-    setShowConflictWarning(false)
-    setConflictSlotId(null)
-    setPendingDrop(null)
-    setDraggedSession(null)
-  }
-
-  // Remove session from slot
-  const handleRemoveFromSlot = async (sessionId: string) => {
-    const token = getAccessToken()
-    if (!token) return
-
-    const session = sessions.find((s) => s.id === sessionId)
-    if (!session) return
-
-    // Save for undo
-    const action: HistoryAction = {
-      type: 'unschedule',
-      sessionId,
-      fromSlotId: session.time_slot_id,
-      fromVenueId: session.venue_id,
-      toSlotId: null,
-      toVenueId: null,
-    }
-
-    try {
-      await fetch(`${SUPABASE_URL}/rest/v1/sessions?id=eq.${sessionId}&event_id=eq.${event.id}`, {
-        method: 'PATCH',
-        headers: {
-          'apikey': SUPABASE_KEY,
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          status: 'approved',
-          venue_id: null,
-          time_slot_id: null,
-        }),
-      })
-
-      setSessions((prev) =>
-        prev.map((s) =>
-          s.id === sessionId
-            ? { ...s, status: 'approved', venue_id: null, time_slot_id: null }
-            : s
-        )
-      )
-
-      addToHistory(action)
-    } catch (err) {
-      console.error('Error removing session:', err)
-    }
-  }
-
-  // Undo last action
-  const handleUndo = React.useCallback(async () => {
-    if (historyIndex < 0) return
-
-    const action = history[historyIndex]
-    const token = getAccessToken()
-    if (!token) return
-
-    try {
-      if (action.type === 'schedule') {
-        // Reverse a schedule: put session back to original position
-        await fetch(`${SUPABASE_URL}/rest/v1/sessions?id=eq.${action.sessionId}&event_id=eq.${event.id}`, {
-          method: 'PATCH',
-          headers: {
-            'apikey': SUPABASE_KEY,
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            status: action.fromSlotId ? 'scheduled' : 'approved',
-            venue_id: action.fromVenueId,
-            time_slot_id: action.fromSlotId,
-          }),
-        })
-
-        setSessions((prev) =>
-          prev.map((s) =>
-            s.id === action.sessionId
-              ? {
-                  ...s,
-                  status: action.fromSlotId ? 'scheduled' : 'approved',
-                  venue_id: action.fromVenueId,
-                  time_slot_id: action.fromSlotId,
-                }
-              : s
-          )
-        )
-      } else if (action.type === 'unschedule') {
-        // Reverse an unschedule: put session back in slot
-        await fetch(`${SUPABASE_URL}/rest/v1/sessions?id=eq.${action.sessionId}&event_id=eq.${event.id}`, {
-          method: 'PATCH',
-          headers: {
-            'apikey': SUPABASE_KEY,
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            status: 'scheduled',
-            venue_id: action.fromVenueId,
-            time_slot_id: action.fromSlotId,
-          }),
-        })
-
-        setSessions((prev) =>
-          prev.map((s) =>
-            s.id === action.sessionId
-              ? {
-                  ...s,
-                  status: 'scheduled',
-                  venue_id: action.fromVenueId,
-                  time_slot_id: action.fromSlotId,
-                }
-              : s
-          )
-        )
-      }
-
-      setHistoryIndex(historyIndex - 1)
-    } catch (err) {
-      console.error('Undo error:', err)
-    }
-  }, [historyIndex, history, event.id])
-
-  // Redo last undone action
-  const handleRedo = React.useCallback(async () => {
-    if (historyIndex >= history.length - 1) return
-
-    const action = history[historyIndex + 1]
-    const token = getAccessToken()
-    if (!token) return
-
-    try {
-      await fetch(`${SUPABASE_URL}/rest/v1/sessions?id=eq.${action.sessionId}&event_id=eq.${event.id}`, {
-        method: 'PATCH',
-        headers: {
-          'apikey': SUPABASE_KEY,
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          status: action.toSlotId ? 'scheduled' : 'approved',
-          venue_id: action.toVenueId,
-          time_slot_id: action.toSlotId,
-        }),
-      })
-
-      setSessions((prev) =>
-        prev.map((s) =>
-          s.id === action.sessionId
-            ? {
-                ...s,
-                status: action.toSlotId ? 'scheduled' : 'approved',
-                venue_id: action.toVenueId,
-                time_slot_id: action.toSlotId,
-              }
-            : s
-        )
-      )
-
-      setHistoryIndex(historyIndex + 1)
-    } catch (err) {
-      console.error('Redo error:', err)
-    }
-  }, [historyIndex, history, event.id])
-
-  // Reset day (unschedule all sessions for selected day)
-  const handleResetDay = async () => {
-    if (!confirm(`Clear all scheduled sessions for this day? This cannot be undone.`)) return
-
-    const token = getAccessToken()
-    if (!token) return
-
-    const daySlotIds = new Set(
-      timeSlots.filter((s) => s.day_date === selectedDay).map((s) => s.id)
-    )
-    const sessionsToReset = sessions.filter(
-      (s) => s.time_slot_id && daySlotIds.has(s.time_slot_id)
-    )
-
-    for (const session of sessionsToReset) {
-      try {
-        await fetch(`${SUPABASE_URL}/rest/v1/sessions?id=eq.${session.id}&event_id=eq.${event.id}`, {
-          method: 'PATCH',
-          headers: {
-            'apikey': SUPABASE_KEY,
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            status: 'approved',
-            venue_id: null,
-            time_slot_id: null,
-          }),
-        })
-      } catch (err) {
-        console.error('Error resetting session:', err)
-      }
-    }
-
-    setSessions((prev) =>
-      prev.map((s) =>
-        sessionsToReset.find((r) => r.id === s.id)
-          ? { ...s, status: 'approved', venue_id: null, time_slot_id: null }
-          : s
-      )
-    )
-
-    // Clear history after reset
-    setHistory([])
-    setHistoryIndex(-1)
-  }
-
-  // Auto-schedule: fetch preview
-  const handleAutoSchedulePreview = async () => {
-    const token = getAccessToken()
-    if (!token) return
-
-    setAutoScheduleLoading(true)
-    setShowAutoSchedule(true)
-
-    try {
-      const response = await fetch(`/api/v1/events/${event.slug}/admin/auto-schedule`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-
-      if (!response.ok) {
-        const data = await response.json()
-        setNotice({ kind: 'error', message: data.error || 'Failed to generate auto-schedule' })
-        setShowAutoSchedule(false)
+  const dropOnSlot = async (session: AdminSession, slotId: string, replace = false) => {
+    setDragged(null)
+    setPicked(null)
+    const occupant = sessionBySlot.get(slotId)
+    if (occupant && occupant.id !== session.id && !replace) {
+      if (occupant.network_published) {
+        setNotice({ kind: 'error', text: `"${occupant.title}" is published in that slot. Move or cancel it first.` })
         return
       }
-
-      const result = await response.json()
-      setAutoScheduleResult(result)
-      // Select all assignments by default
-      setSelectedAssignments(new Set(result.assignments.map((a: { sessionId: string }) => a.sessionId)))
-    } catch (err) {
-      console.error('Auto-schedule error:', err)
-      setNotice({ kind: 'error', message: 'Failed to generate auto-schedule' })
-      setShowAutoSchedule(false)
-    } finally {
-      setAutoScheduleLoading(false)
-    }
-  }
-
-  // Auto-schedule: apply only selected assignments
-  const handleAutoScheduleApply = async () => {
-    if (!autoScheduleResult) return
-
-    const token = getAccessToken()
-    if (!token) return
-
-    // Filter to only selected assignments
-    const assignmentsToApply = autoScheduleResult.assignments.filter(
-      (a) => selectedAssignments.has(a.sessionId)
-    )
-
-    if (assignmentsToApply.length === 0) {
-      setNotice({ kind: 'error', message: 'No assignments selected' })
+      setConflict({ session, slotId, occupant: occupant.title })
       return
     }
-
-    setAutoScheduleLoading(true)
-
+    if (session.network_published && session.time_slot_id) {
+      setReason('')
+      setNeedsLinkage(false)
+      setConfirmLinkage(false)
+      setDestructive({ kind: 'move', session, slotId })
+      return
+    }
+    setBusy(true)
+    setNotice(null)
     try {
-      const response = await fetch(`/api/v1/events/${event.slug}/admin/auto-schedule`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          assignments: assignmentsToApply,
-        }),
-      })
-
-      if (!response.ok) {
-        const data = await response.json()
-        console.error('[Auto-schedule] Apply failed:', data)
-        setNotice({ kind: 'error', message: data.error || 'Failed to apply auto-schedule' })
-        return
-      }
-
-      const data = await response.json()
-
-      // Update local state with only the applied assignments
-      const assignmentMap = new Map(
-        assignmentsToApply.map((a) => [a.sessionId, { slotId: a.slotId, venueId: a.venueId }])
-      )
-
-      setSessions((prev) =>
-        prev.map((s) => {
-          const assignment = assignmentMap.get(s.id)
-          if (assignment) {
-            return {
-              ...s,
-              status: 'scheduled' as const,
-              venue_id: assignment.venueId,
-              time_slot_id: assignment.slotId,
-            }
-          }
-          return s
-        })
-      )
-
-      // Clear history after auto-schedule
-      setHistory([])
-      setHistoryIndex(-1)
-
-      setShowAutoSchedule(false)
-      setAutoScheduleResult(null)
-      setSelectedAssignments(new Set())
-
+      const res = await place(session.id, slotId, { replace })
+      recordHistory({ sessionId: session.id, fromSlotId: session.time_slot_id, toSlotId: slotId })
       setNotice({
         kind: 'success',
-        message: `Applied ${data.applied} of ${assignmentsToApply.length} assignment${assignmentsToApply.length === 1 ? '' : 's'}.`,
+        text: `Placed "${session.title}"${session.host_id ? '; its host was notified' : ''}.${res?.displaced ? ` "${res.displaced.title}" went back to the tray.` : ''} Publish to update the public schedule.`,
       })
-    } catch (err) {
-      console.error('Apply auto-schedule error:', err)
-      setNotice({ kind: 'error', message: 'Failed to apply auto-schedule' })
+      await refreshAfterChange()
+    } catch (e) {
+      setNotice({ kind: 'error', text: errorText(e, 'The session could not be placed.') })
+      await refreshAfterChange().catch(() => undefined)
     } finally {
-      setAutoScheduleLoading(false)
+      setBusy(false)
+      setConflict(null)
     }
   }
 
-  // Toggle assignment selection
-  const toggleAssignmentSelection = (sessionId: string) => {
-    setSelectedAssignments((prev) => {
-      const next = new Set(prev)
-      if (next.has(sessionId)) {
-        next.delete(sessionId)
-      } else {
-        next.add(sessionId)
-      }
-      return next
-    })
-  }
-
-  // Select/deselect all assignments
-  const toggleAllAssignments = (selectAll: boolean) => {
-    if (selectAll && autoScheduleResult) {
-      setSelectedAssignments(new Set(autoScheduleResult.assignments.map((a) => a.sessionId)))
-    } else {
-      setSelectedAssignments(new Set())
+  const removeFromSlot = async (session: AdminSession) => {
+    if (session.network_published) {
+      setReason('')
+      setNeedsLinkage(false)
+      setConfirmLinkage(false)
+      setDestructive({ kind: 'cancel', session })
+      return
+    }
+    setBusy(true)
+    setNotice(null)
+    try {
+      await place(session.id, null)
+      recordHistory({ sessionId: session.id, fromSlotId: session.time_slot_id, toSlotId: null })
+      setNotice({ kind: 'success', text: `"${session.title}" went back to the tray.` })
+      await refreshAfterChange()
+    } catch (e) {
+      setNotice({ kind: 'error', text: errorText(e, 'The session could not be removed.') })
+    } finally {
+      setBusy(false)
     }
   }
 
-  // Format time for display using event timezone
-  const formatTime = (dateStr: string) => {
-    return formatInEventTimezone(new Date(dateStr), event.timezone, 'time')
-  }
-
-  // Get unique time rows for the selected day (merge all venue slots)
-  const getTimeRowsForDay = (dayDate: string) => {
-    const daySlots = timeSlots.filter((slot) => slot.day_date === dayDate)
-    const uniqueTimes = new Map<string, { start: string; end: string; startTime: Date }>()
-
-    daySlots.forEach((slot) => {
-      const key = `${slot.start_time}-${slot.end_time}`
-      if (!uniqueTimes.has(key)) {
-        uniqueTimes.set(key, {
-          start: slot.start_time,
-          end: slot.end_time,
-          startTime: new Date(slot.start_time),
+  const submitDestructive = async () => {
+    if (!destructive) return
+    if (!reason.trim()) {
+      setNotice({ kind: 'error', text: 'Give a reason; the other organizers see it when they approve.' })
+      return
+    }
+    setBusy(true)
+    setNotice(null)
+    const { session } = destructive
+    try {
+      const url = `${base}/admin/sessions/${session.id}/schedule`
+      const payload = { reason: reason.trim(), ...(confirmLinkage ? { confirmPublicLinkage: true } : {}) }
+      const res = destructive.kind === 'move'
+        ? await apiFetch<ScheduleResponse>(url, { method: 'PUT', json: { time_slot_id: destructive.slotId, ...payload } })
+        : await apiFetch<ScheduleResponse>(url, { method: 'DELETE', json: payload })
+      setDestructive(null)
+      if (res.status === 'awaiting_approval') {
+        const needed = res.approvalsNeeded ?? 1
+        setNotice({
+          kind: 'info',
+          text: `Awaiting approval: "${session.title}" ${destructive.kind === 'move' ? 'will move' : 'will be cancelled'} once ${needed} more organizer${needed === 1 ? '' : 's'} approve${needed === 1 ? 's' : ''}. Your approval is recorded.`,
         })
+      } else {
+        setNotice({ kind: 'success', text: destructive.kind === 'move' ? `"${session.title}" moved and the network calendar was updated.` : `"${session.title}" is cancelled on the network calendar. The proposal stays with its author.` })
       }
-    })
-
-    return Array.from(uniqueTimes.values()).sort(
-      (a, b) => a.startTime.getTime() - b.startTime.getTime()
-    )
+      await refreshAfterChange()
+    } catch (e) {
+      if (e instanceof ApiError && e.code === 'confirm_public_linkage') {
+        setNeedsLinkage(true)
+        setNotice({ kind: 'error', text: e.message })
+      } else {
+        setNotice({ kind: 'error', text: errorText(e, 'The request could not be sent.') })
+      }
+    } finally {
+      setBusy(false)
+    }
   }
 
-  const timeRows = getTimeRowsForDay(selectedDay)
+  const approveRequest = async (request: ApprovalRequest) => {
+    setBusy(true)
+    setNotice(null)
+    try {
+      const res = await apiFetch<{ status: 'applied' | 'awaiting_approval'; approvalsNeeded: number }>(`${base}/approvals`, {
+        method: 'POST',
+        json: { action: 'approve', requestId: request.id, ...(confirmLinkage ? { confirmPublicLinkage: true } : {}) },
+      })
+      setNotice(res.status === 'applied'
+        ? { kind: 'success', text: `Approved and applied: ${request.action === 'move' ? 'moved' : 'cancelled'} "${request.sessionTitle ?? 'session'}".` }
+        : { kind: 'info', text: `Approval recorded. ${res.approvalsNeeded} more needed.` })
+      await refreshAfterChange()
+    } catch (e) {
+      if (e instanceof ApiError && e.code === 'confirm_public_linkage') setNeedsLinkage(true)
+      setNotice({ kind: 'error', text: errorText(e, 'Your approval could not be recorded.') })
+      void loadApprovals()
+    } finally {
+      setBusy(false)
+    }
+  }
 
-  // Keyboard shortcuts for undo/redo
+  const undo = React.useCallback(async () => {
+    if (historyIndex < 0 || busy) return
+    const action = history[historyIndex]
+    setBusy(true)
+    try {
+      await place(action.sessionId, action.fromSlotId)
+      setHistoryIndex(historyIndex - 1)
+      await refreshAfterChange()
+    } catch (e) {
+      setNotice({ kind: 'error', text: errorText(e, 'That change could not be undone.') })
+    } finally {
+      setBusy(false)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [history, historyIndex, busy])
+
+  const redo = React.useCallback(async () => {
+    if (historyIndex >= history.length - 1 || busy) return
+    const action = history[historyIndex + 1]
+    setBusy(true)
+    try {
+      await place(action.sessionId, action.toSlotId)
+      setHistoryIndex(historyIndex + 1)
+      await refreshAfterChange()
+    } catch (e) {
+      setNotice({ kind: 'error', text: errorText(e, 'That change could not be redone.') })
+    } finally {
+      setBusy(false)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [history, historyIndex, busy])
+
   React.useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
-        if (e.shiftKey) {
-          handleRedo()
-        } else {
-          handleUndo()
-        }
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
         e.preventDefault()
+        if (e.shiftKey) void redo()
+        else void undo()
+      }
+      if (e.key === 'Escape') setPicked(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [undo, redo])
+
+  const resetDay = async () => {
+    setConfirmReset(false)
+    const daySlotIds = new Set(timeSlots.filter((t) => t.day_date === selectedDay).map((t) => t.id))
+    const targets = sessions.filter((s) => s.time_slot_id && daySlotIds.has(s.time_slot_id) && !s.network_published)
+    const kept = sessions.filter((s) => s.time_slot_id && daySlotIds.has(s.time_slot_id) && s.network_published).length
+    setBusy(true)
+    const failures: string[] = []
+    for (const s of targets) {
+      try {
+        await place(s.id, null)
+      } catch (e) {
+        failures.push(`${s.title}: ${errorText(e, 'failed')}`)
       }
     }
-
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [handleUndo, handleRedo])
-
-  if (authLoading || roleLoading || isLoading) {
-    return (
-      <div className="flex items-center justify-center py-12">
-        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-      </div>
-    )
+    setHistory([])
+    setHistoryIndex(-1)
+    setNotice({
+      kind: failures.length ? 'error' : 'success',
+      text: `Cleared ${targets.length - failures.length} draft placement${targets.length - failures.length === 1 ? '' : 's'}${kept ? `; ${kept} published session${kept === 1 ? '' : 's'} kept (move or cancel them individually)` : ''}.`,
+      details: failures,
+    })
+    await refreshAfterChange().catch(() => undefined)
+    setBusy(false)
   }
 
-  if (!isAdmin) {
-    return null
+  const previewAutoSchedule = async () => {
+    setAutoOpen(true)
+    setAutoLoading(true)
+    setAutoResult(null)
+    setNotice(null)
+    try {
+      const result = await apiFetch<AutoScheduleResult>(`${base}/admin/auto-schedule`)
+      setAutoResult(result)
+      setSelectedAssignments(new Set(result.assignments.map((a) => a.sessionId)))
+    } catch (e) {
+      setAutoOpen(false)
+      setNotice({ kind: e instanceof ApiError && e.code === 'RoundOpen' ? 'info' : 'error', text: errorText(e, 'The auto-schedule could not be generated.') })
+    } finally {
+      setAutoLoading(false)
+    }
   }
+
+  const applyAutoSchedule = async () => {
+    if (!autoResult) return
+    const chosen = autoResult.assignments.filter((a) => selectedAssignments.has(a.sessionId))
+    if (chosen.length === 0) return
+    setAutoLoading(true)
+    try {
+      const res = await apiFetch<{ applied: number; skipped: Array<{ title: string; reason: string }> }>(`${base}/admin/auto-schedule`, {
+        method: 'POST',
+        json: { assignments: chosen.map((a) => ({ sessionId: a.sessionId, slotId: a.slotId })) },
+      })
+      setAutoOpen(false)
+      setAutoResult(null)
+      setHistory([])
+      setHistoryIndex(-1)
+      setNotice({
+        kind: 'success',
+        text: `Applied ${res.applied} of ${chosen.length} assignment${chosen.length === 1 ? '' : 's'} to the draft schedule.`,
+        details: res.skipped.map((s) => `${s.title}: ${s.reason}`),
+      })
+      await refreshAfterChange()
+    } catch (e) {
+      setNotice({ kind: 'error', text: errorText(e, 'The assignments could not be applied.') })
+    } finally {
+      setAutoLoading(false)
+    }
+  }
+
+  const publish = async () => {
+    setPublishing(true)
+    setPublishResult(null)
+    try {
+      const res = await apiFetch<PublishResponse>(`${base}/admin/publish-schedule`, { method: 'POST' })
+      setPublishResult(res)
+      await refreshAfterChange()
+    } catch (e) {
+      setNotice({ kind: 'error', text: errorText(e, 'The schedule could not be published.') })
+      setPublishOpen(false)
+    } finally {
+      setPublishing(false)
+    }
+  }
+
+  if (isLoading) {
+    return <div className="flex items-center justify-center py-12" role="status" aria-label="Loading schedule"><Loader2 className="h-8 w-8 animate-spin text-muted-foreground" /></div>
+  }
+  if (!canSchedule) {
+    return <Card><CardContent className="py-10 text-center text-muted-foreground">Only owners and admins can edit the schedule.</CardContent></Card>
+  }
+
+  const slotFor = (venueId: string, row: { start: string; end: string }) =>
+    timeSlots.find((t) => t.venue_id === venueId && t.start_time === row.start && t.end_time === row.end)
+  const destructiveSlot = destructive?.kind === 'move' ? timeSlots.find((t) => t.id === destructive.slotId) : null
+  const changeCount = publishStatus ? publishStatus.changes.added.length + publishStatus.changes.moved.length + publishStatus.changes.removed.length : 0
 
   return (
     <>
-    <div className="mb-6"><h1 className="font-semibold">Schedule builder</h1><p className="text-muted-foreground mt-2">Bring ideas into the room. Arrange sessions, resolve conflicts, and publish when you’re ready.</p></div>
-    {notice && (
-      <p
-        role={notice.kind === 'error' ? 'alert' : 'status'}
-        className={cn(
-          'mb-4 rounded-xl border bg-card p-4 text-sm',
-          notice.kind === 'error' ? 'border-destructive/30 text-destructive' : 'border-primary/30'
-        )}
-      >
-        {notice.message}
-      </p>
-    )}
-    <div className="relative flex min-h-[600px] h-[calc(100dvh-220px)] calendar-workspace overflow-hidden bg-card">
-        {/* Session Tray - Left Sidebar */}
-        <div className={cn(
-          "border-r bg-muted/30 flex flex-col transition-all duration-200",
-          showSidebar ? "absolute inset-y-0 left-0 z-10 w-72 bg-card shadow-xl lg:static lg:w-72 lg:shadow-none shrink-0" : "w-0 overflow-hidden"
-        )}>
+      <div className="mb-6">
+        <h1 className="font-semibold">Schedule builder</h1>
+        <p className="text-muted-foreground mt-2">Bring ideas into the room. Arrange sessions as a draft, then publish when you&rsquo;re ready. Moving or cancelling a session that is already published needs another organizer&rsquo;s approval.</p>
+      </div>
+
+      {loadError && (
+        <div role="alert" className="mb-4 rounded-xl border border-destructive/30 bg-destructive/5 p-4 flex flex-wrap items-center justify-between gap-3">
+          <p className="text-sm text-destructive">{loadError}</p>
+          <Button variant="outline" size="sm" onClick={() => { setIsLoading(true); void load() }}>Try again</Button>
+        </div>
+      )}
+
+      {notice && (
+        <div role={notice.kind === 'error' ? 'alert' : 'status'} className={cn('mb-4 rounded-xl border bg-card p-4 text-sm', notice.kind === 'error' ? 'border-destructive/30 text-destructive' : notice.kind === 'info' ? 'border-amber-500/40' : 'border-primary/30')}>
+          <div className="flex items-start justify-between gap-3">
+            <p>{notice.text}</p>
+            <button onClick={() => setNotice(null)} aria-label="Dismiss" className="text-muted-foreground hover:text-foreground"><X className="h-4 w-4" /></button>
+          </div>
+          {notice.details && notice.details.length > 0 && (
+            <ul className="mt-2 list-disc pl-5 text-xs text-muted-foreground">{notice.details.slice(0, 8).map((d) => <li key={d}>{d}</li>)}</ul>
+          )}
+        </div>
+      )}
+
+      {(pendingRequests.length > 0 || approvalsError) && (
+        <section aria-labelledby="approvals-heading" className="mb-4 rounded-xl border border-amber-500/40 bg-amber-500/5 p-4">
+          <h2 id="approvals-heading" className="flex items-center gap-2 font-semibold text-sm"><ShieldCheck className="h-4 w-4 text-amber-600" />Changes awaiting approval</h2>
+          {approvalsError && <p className="mt-2 text-sm text-destructive">{approvalsError}</p>}
+          <ul className="mt-3 space-y-3">
+            {pendingRequests.map((r) => {
+              const approvedByCount = r.approvals.length
+              const when = r.target.startsAt ? `${formatInEventTimezone(new Date(r.target.startsAt), event.timezone, 'datetime')}` : null
+              return (
+                <li key={r.id} className="flex flex-wrap items-start justify-between gap-3 rounded-lg border bg-card p-3 text-sm">
+                  <div className="min-w-0">
+                    <p className="font-medium">
+                      {r.action === 'move' ? 'Move' : r.action === 'cancel' ? 'Cancel' : 'Remove listing for'} &ldquo;{r.sessionTitle ?? 'session'}&rdquo;{r.action === 'move' && when ? ` to ${when}` : ''}
+                    </p>
+                    <p className="text-muted-foreground">&ldquo;{r.reason}&rdquo;{r.requestedBy?.handle ? ` — requested by @${r.requestedBy.handle}` : ''}</p>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      {r.status === 'failed' ? `Approved, but applying failed: ${r.error ?? 'unknown error'}` : `${approvedByCount} of ${r.threshold} approvals`}
+                      {r.approvals.length > 0 && ` (${r.approvals.map((a) => (a.handle ? `@${a.handle}` : 'an organizer')).join(', ')})`}
+                    </p>
+                  </div>
+                  {(() => {
+                    const mine = r.approvals.some((a) => a.accountId === viewerAccountId)
+                    if (mine && r.status === 'pending') return <Badge variant="outline" className="shrink-0">You approved</Badge>
+                    return (
+                      <div className="flex flex-col items-end gap-2">
+                        {needsLinkage && (
+                          <label className="flex items-start gap-2 text-xs max-w-xs">
+                            <input type="checkbox" checked={confirmLinkage} onChange={(e) => setConfirmLinkage(e.target.checked)} className="mt-0.5" />
+                            <span>My approval is a public record in my own repository naming me as an organizer.</span>
+                          </label>
+                        )}
+                        <Button size="sm" onClick={() => void approveRequest(r)} disabled={busy || r.status === 'applying' || (needsLinkage && !confirmLinkage)}>
+                          {r.status === 'failed' ? 'Retry' : 'Approve'}
+                        </Button>
+                      </div>
+                    )
+                  })()}
+                </li>
+              )
+            })}
+          </ul>
+        </section>
+      )}
+
+      {picked && (
+        <p role="status" className="mb-3 rounded-lg border border-primary/40 bg-primary/5 p-3 text-sm flex items-center justify-between gap-2">
+          <span>Placing &ldquo;{picked.title}&rdquo; — choose a free slot in the grid.</span>
+          <Button size="sm" variant="ghost" onClick={() => setPicked(null)}>Cancel</Button>
+        </p>
+      )}
+
+      <div className="relative flex min-h-[600px] h-[calc(100dvh-220px)] calendar-workspace overflow-hidden bg-card">
+        <div className={cn('border-r bg-muted/30 flex flex-col transition-all duration-200', showSidebar ? 'absolute inset-y-0 left-0 z-10 w-72 bg-card shadow-xl lg:static lg:w-72 lg:shadow-none shrink-0' : 'w-0 overflow-hidden')}>
           <div className="p-3 sm:p-4 border-b bg-background flex items-center justify-between gap-2">
             <div className="min-w-0">
-              <h2 className="font-semibold text-sm">Unscheduled</h2>
-              <p className="text-xs text-muted-foreground mt-0.5 hidden sm:block">
-                Drag sessions to schedule
-              </p>
+              <h2 className="font-semibold text-sm">Unscheduled ({unscheduled.length})</h2>
+              <p className="text-xs text-muted-foreground mt-0.5 hidden sm:block">Drag to a slot, or choose Place</p>
             </div>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8 flex-shrink-0"
-              aria-label="Close unscheduled sessions"
-              onClick={() => setShowSidebar(false)}
-            >
+            <Button variant="ghost" size="icon" className="h-8 w-8 flex-shrink-0" aria-label="Close unscheduled sessions" onClick={() => setShowSidebar(false)}>
               <PanelLeftClose className="h-4 w-4" />
             </Button>
           </div>
           <div className="flex-1 overflow-y-auto p-3 sm:p-4 space-y-2">
-            {unscheduledSessions.length === 0 ? (
-              <p className="text-sm text-muted-foreground text-center py-8">
-                All approved sessions have been scheduled
-              </p>
+            {unscheduled.length === 0 ? (
+              <p className="text-sm text-muted-foreground text-center py-8">All approved sessions are scheduled</p>
             ) : (
-              unscheduledSessions.map((session) => (
-                <SessionTrayItem
-                  key={session.id}
-                  session={session}
-                  selectedDay={selectedDay}
-                  dayToPreferences={dayToPreferences}
-                  onDragStart={() => setDraggedSession(session)}
-                  onDragEnd={() => setDraggedSession(null)}
-                />
-              ))
+              unscheduled.map((session) => {
+                const prefs = session.time_preferences ?? []
+                const matchesDay = prefs.some((p) => dayPrefs.includes(p))
+                return (
+                  <div
+                    key={session.id}
+                    draggable
+                    onDragStart={() => setDragged(session)}
+                    onDragEnd={() => setDragged(null)}
+                    className={cn('p-3 bg-background rounded-lg border shadow-sm cursor-move hover:shadow-md transition-shadow group', matchesDay && 'ring-2 ring-green-500/50 border-green-500/30', picked?.id === session.id && 'ring-2 ring-primary')}
+                  >
+                    <div className="flex items-start gap-2">
+                      <GripVertical className="h-4 w-4 mt-0.5 text-muted-foreground shrink-0 opacity-50 group-hover:opacity-100" aria-hidden />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 mb-1">
+                          {session.format && <Badge variant="outline" className="text-xs capitalize shrink-0">{session.format}</Badge>}
+                          {session.duration && <span className="text-xs text-muted-foreground">{session.duration} min</span>}
+                        </div>
+                        <h3 className="text-sm font-medium line-clamp-2">{session.title}</h3>
+                        {hostLabel(session) && <p className="text-xs text-muted-foreground mt-1">{hostLabel(session)}</p>}
+                        <div className="flex flex-wrap items-center gap-1 mt-2">
+                          {session.track && (
+                            <Badge variant="secondary" className="text-xs" style={{ backgroundColor: session.track.color ?? undefined }}>{session.track.name}</Badge>
+                          )}
+                          {prefs.map((pref) => (
+                            <Badge key={pref} variant="outline" className={cn('text-[10px]', dayPrefs.includes(pref) ? 'border-green-500 text-green-700 dark:text-green-400 bg-green-500/10' : 'text-muted-foreground')}>
+                              {PREF_LABELS[pref] || pref}
+                            </Badge>
+                          ))}
+                        </div>
+                        <Button size="sm" variant="ghost" className="mt-2 h-7 px-2 text-xs" onClick={() => setPicked(picked?.id === session.id ? null : session)} aria-pressed={picked?.id === session.id}>
+                          {picked?.id === session.id ? 'Cancel placing' : 'Place…'}
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                )
+              })
             )}
           </div>
         </div>
 
-        {/* Main Schedule Grid */}
         <div className="flex-1 flex flex-col overflow-hidden">
-          {/* Day Tabs and Actions */}
           <div className="flex items-center gap-2 p-3 sm:p-4 border-b bg-background overflow-x-auto">
             {!showSidebar && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setShowSidebar(true)}
-                className="flex-shrink-0"
-              >
+              <Button variant="outline" size="sm" onClick={() => setShowSidebar(true)} className="flex-shrink-0">
                 <PanelLeft className="h-4 w-4 mr-1" />
                 <span className="hidden sm:inline">Sessions</span>
-                <Badge variant="secondary" className="ml-1 text-xs">
-                  {unscheduledSessions.length}
-                </Badge>
+                <Badge variant="secondary" className="ml-1 text-xs">{unscheduled.length}</Badge>
               </Button>
             )}
-            {eventDays.map((dayDate) => {
-              const dayLabel = getEventDayLabel(dayDate, event.timezone)
-              return (
-                <Button
-                  key={dayDate}
-                  variant={selectedDay === dayDate ? 'default' : 'outline'}
-                  size="sm"
-                  onClick={() => setSelectedDay(dayDate)}
-                  aria-pressed={selectedDay === dayDate}
-                  className="calendar-day whitespace-nowrap flex-shrink-0"
-                >
-                  <span>{dayLabel}</span>
-                </Button>
-              )
-            })}
-
-            {/* Action buttons */}
+            {eventDays.map((day) => (
+              <Button key={day} variant={selectedDay === day ? 'default' : 'outline'} size="sm" onClick={() => setSelectedDay(day)} aria-pressed={selectedDay === day} className="calendar-day whitespace-nowrap flex-shrink-0">
+                {getEventDayLabel(day, event.timezone)}
+              </Button>
+            ))}
             <div className="ml-auto flex items-center gap-1">
-              {unscheduledSessions.length > 0 && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={handleAutoSchedulePreview}
-                  disabled={autoScheduleLoading}
-                  className="gap-1.5"
-                >
-                  <Wand2 className="h-4 w-4" />
+              {unscheduled.length > 0 && (
+                <Button variant="outline" size="sm" onClick={previewAutoSchedule} disabled={autoLoading || busy} className="gap-1.5" title={votingStatus === 'open' ? 'Available after voting closes' : undefined}>
+                  {votingStatus === 'open' ? <Lock className="h-4 w-4" /> : <Wand2 className="h-4 w-4" />}
                   <span className="hidden sm:inline">Auto-schedule</span>
                 </Button>
               )}
               <div className="w-px h-6 bg-border mx-1 hidden sm:block" />
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={handleUndo}
-                disabled={historyIndex < 0}
-                title="Undo (Ctrl+Z)"
-              >
-                <Undo2 className="h-4 w-4" />
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={handleRedo}
-                disabled={historyIndex >= history.length - 1}
-                title="Redo (Ctrl+Shift+Z)"
-              >
-                <Redo2 className="h-4 w-4" />
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={handleResetDay}
-                title="Reset Day"
-                className="text-destructive hover:text-destructive"
-              >
-                <RotateCcw className="h-4 w-4" />
-              </Button>
+              <Button variant="ghost" size="sm" onClick={() => void undo()} disabled={historyIndex < 0 || busy} aria-label="Undo (Ctrl+Z)" title="Undo (Ctrl+Z)"><Undo2 className="h-4 w-4" /></Button>
+              <Button variant="ghost" size="sm" onClick={() => void redo()} disabled={historyIndex >= history.length - 1 || busy} aria-label="Redo (Ctrl+Shift+Z)" title="Redo (Ctrl+Shift+Z)"><Redo2 className="h-4 w-4" /></Button>
+              <Button variant="ghost" size="sm" onClick={() => setConfirmReset(true)} disabled={busy} aria-label="Clear this day" title="Clear this day" className="text-destructive hover:text-destructive"><RotateCcw className="h-4 w-4" /></Button>
               <div className="w-px h-6 bg-border mx-1 hidden sm:block" />
-              {/* Draft indicator */}
               {publishStatus?.hasUnpublishedChanges && (
-                <Badge variant="outline" className="bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/20">
-                  <FileText className="h-3 w-3 mr-1" />
-                  Draft
-                </Badge>
+                <Badge variant="outline" className="bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/20"><FileText className="h-3 w-3 mr-1" />{changeCount} unpublished</Badge>
               )}
-              {/* Publish button */}
-              <Button
-                variant={publishStatus?.hasUnpublishedChanges ? 'default' : 'outline'}
-                size="sm"
-                onClick={() => setShowPublishModal(true)}
-                className="gap-1.5"
-              >
+              <Button variant={publishStatus?.hasUnpublishedChanges ? 'default' : 'outline'} size="sm" onClick={() => { setPublishResult(null); setPublishOpen(true) }} className="gap-1.5">
                 <Send className="h-4 w-4" />
-                <span className="hidden sm:inline">
-                  {publishStatus?.schedulePublishedAt ? 'Update' : 'Publish'}
-                </span>
+                <span className="hidden sm:inline">{publishStatus?.schedulePublishedAt ? 'Publish changes' : 'Publish'}</span>
               </Button>
             </div>
           </div>
 
-          {/* Mobile hint */}
-          <div className="sm:hidden px-3 py-2 bg-amber-500/10 border-b border-amber-500/20 text-xs text-amber-700 dark:text-amber-400">
-            Scroll horizontally to view full schedule. Best viewed on desktop.
-          </div>
+          {confirmReset && (
+            <div role="alertdialog" aria-label="Clear this day" className="flex flex-wrap items-center justify-between gap-2 border-b bg-destructive/5 px-4 py-3 text-sm">
+              <span>Remove every draft placement on {getEventDayLabel(selectedDay, event.timezone)}? Published sessions stay where they are.</span>
+              <div className="flex gap-2">
+                <Button size="sm" variant="outline" onClick={() => setConfirmReset(false)}>Keep</Button>
+                <Button size="sm" variant="destructive" onClick={() => void resetDay()}>Clear day</Button>
+              </div>
+            </div>
+          )}
 
-          {/* Grid */}
+          <div className="sm:hidden px-3 py-2 bg-amber-500/10 border-b border-amber-500/20 text-xs text-amber-700 dark:text-amber-400">Scroll horizontally to see every room.</div>
+
           <div className="flex-1 overflow-auto p-4">
             {timeRows.length === 0 ? (
               <Card>
                 <CardContent className="py-12 text-center text-muted-foreground">
-                  No time slots configured for this day.
+                  No time slots for this day.
                   <br />
-                  <Link href={`/e/${event.slug}/admin/setup`} className="text-primary hover:underline">
-                    Configure time slots in Event Setup
-                  </Link>
+                  <Link href={`/e/${event.slug}/admin/setup`} className="text-primary hover:underline">Add availability in Spaces &amp; times</Link>
                 </CardContent>
               </Card>
             ) : (
-              <div
-                className="grid gap-2"
-                style={{ gridTemplateColumns: `80px repeat(${venues.length}, minmax(130px, 1fr))` }}
-              >
-                {/* Header Row - Venues */}
-                <div className="h-12" /> {/* Time column header */}
+              <div className="grid gap-2" style={{ gridTemplateColumns: `80px repeat(${venues.length}, minmax(140px, 1fr))` }}>
+                <div className="h-12" />
                 {venues.map((venue) => (
-                  <div
-                    key={venue.id}
-                    className={cn(
-                      'h-12 rounded-lg flex items-center justify-center px-2 text-center',
-                      venue.is_primary ? 'bg-primary text-primary-foreground' : 'bg-muted'
-                    )}
-                  >
+                  <div key={venue.id} className={cn('h-12 rounded-lg flex items-center justify-center px-2 text-center', venue.is_primary ? 'bg-primary text-primary-foreground' : 'bg-muted')}>
                     <div>
                       <div className="font-semibold text-sm truncate">{venue.name}</div>
-                      {venue.capacity && (
-                        <div className="text-xs opacity-80">{venue.capacity} cap</div>
-                      )}
+                      {venue.capacity && <div className="text-xs opacity-80">{venue.capacity} cap</div>}
                     </div>
                   </div>
                 ))}
-
-                {/* Time Rows */}
-                {timeRows.map((timeRow) => (
-                  <React.Fragment key={`${timeRow.start}-${timeRow.end}`}>
-                    {/* Time Label */}
-                    <div className="flex flex-col justify-center text-xs text-muted-foreground pr-2 text-right h-20">
-                      <div className="font-medium">{formatTime(timeRow.start)}</div>
-                      <div>{formatTime(timeRow.end)}</div>
+                {timeRows.map((row) => (
+                  <React.Fragment key={`${row.start}|${row.end}`}>
+                    <div className="flex flex-col justify-center text-xs text-muted-foreground pr-2 text-right h-24">
+                      <div className="font-medium">{formatTime(row.start)}</div>
+                      <div>{formatTime(row.end)}</div>
                     </div>
-
-                    {/* Venue Cells */}
                     {venues.map((venue) => {
-                      const slot = timeSlots.find(
-                        (s) =>
-                          s.venue_id === venue.id &&
-                          s.start_time === timeRow.start &&
-                          s.end_time === timeRow.end
-                      )
-                      const scheduledSession = slot ? getSessionForSlot(slot.id) : null
-
-                      if (!slot) {
-                        return (
-                          <div
-                            key={venue.id}
-                            className="h-20 rounded-lg bg-muted/20 border border-dashed border-muted-foreground/20"
-                          />
-                        )
-                      }
-
+                      const slot = slotFor(venue.id, row)
+                      if (!slot) return <div key={venue.id} className="h-24 rounded-lg bg-muted/20 border border-dashed border-muted-foreground/20" />
                       if (slot.is_break) {
                         return (
-                          <div
-                            key={venue.id}
-                            className="h-20 rounded-lg bg-amber-100 dark:bg-amber-950/30 flex items-center justify-center overflow-hidden"
-                          >
-                            <span className="text-xs text-amber-700 dark:text-amber-400 font-medium truncate px-2">
-                              {slot.label || 'Break'}
-                            </span>
+                          <div key={venue.id} className="h-24 rounded-lg bg-amber-100 dark:bg-amber-950/30 flex items-center justify-center overflow-hidden">
+                            <span className="text-xs text-amber-700 dark:text-amber-400 font-medium truncate px-2">{slot.label || 'Break'}</span>
                           </div>
                         )
                       }
-
-                      if (scheduledSession) {
-                        const slotDuration = getSlotDuration(slot)
-                        const hasDurationMismatch = scheduledSession.duration !== slotDuration
-
+                      const session = sessionBySlot.get(slot.id)
+                      const mover = dragged ?? picked
+                      if (session) {
+                        const request = openRequestBySession.get(session.id)
+                        const duration = slotMinutes(slot)
+                        const mismatch = session.duration !== null && session.duration !== duration
+                        const overCapacity = Boolean(venue.capacity && session.expected_attendance && session.expected_attendance > venue.capacity)
                         return (
-                          <ScheduledSlot
+                          <div
                             key={venue.id}
-                            session={scheduledSession}
-                            slot={slot}
-                            venue={venue}
-                            hasDurationMismatch={hasDurationMismatch}
-                            slotDuration={slotDuration}
-                            onRemove={() => handleRemoveFromSlot(scheduledSession.id)}
-                          />
+                            onDragOver={(e) => { if (dragged) e.preventDefault() }}
+                            onDrop={(e) => { e.preventDefault(); if (dragged) void dropOnSlot(dragged, slot.id) }}
+                            className={cn('min-h-24 rounded-xl border-l-4 border p-3 relative group overflow-hidden', session.proposal_withdrawn_at ? 'bg-destructive/5 border-destructive/40' : mismatch || overCapacity || session.proposal_drift_at ? 'bg-amber-500/10 border-amber-500/30' : 'bg-secondary border-primary/60')}
+                          >
+                            <button
+                              onClick={() => void removeFromSlot(session)}
+                              disabled={busy || Boolean(request)}
+                              aria-label={session.network_published ? `Cancel published session ${session.title}` : `Remove ${session.title} from this time slot`}
+                              title={session.network_published ? 'Cancel (needs approval)' : 'Remove from slot'}
+                              className="absolute top-1 right-1 p-1 rounded bg-background/80 opacity-100 lg:opacity-0 lg:group-hover:opacity-100 focus-visible:opacity-100 transition-opacity hover:bg-destructive hover:text-destructive-foreground z-10 disabled:opacity-40"
+                            >
+                              <X className="h-3 w-3" />
+                            </button>
+                            <div className="flex flex-wrap items-center gap-1">
+                              {session.network_published && <Badge variant="outline" className="text-[10px] gap-0.5 px-1"><Globe className="h-2.5 w-2.5" />Published</Badge>}
+                              {request && <Badge variant="outline" className="text-[10px] gap-0.5 px-1 border-amber-500/60 text-amber-700 dark:text-amber-400"><Hourglass className="h-2.5 w-2.5" />Awaiting approval</Badge>}
+                              {mismatch && <span title={`Session is ${session.duration} min; slot is ${duration} min`}><Clock className="h-3 w-3 text-amber-600" aria-label="Duration mismatch" /></span>}
+                              {overCapacity && <span title={`Expected ${session.expected_attendance}; room holds ${venue.capacity}`}><AlertTriangle className="h-3 w-3 text-amber-600" aria-label="Over capacity" /></span>}
+                            </div>
+                            <h3 className="text-xs font-medium line-clamp-2 mt-1">{session.title}</h3>
+                            {hostLabel(session) && <p className="text-xs text-muted-foreground mt-0.5 truncate">{hostLabel(session)}</p>}
+                            {session.proposal_withdrawn_at && <p className="text-[11px] text-destructive mt-0.5">Withdrawn by proposer</p>}
+                            {!session.proposal_withdrawn_at && session.proposal_drift_at && <p className="text-[11px] text-amber-700 dark:text-amber-400 mt-0.5">Proposer edited — re-publish</p>}
+                            {session.network_published && !request && (
+                              <button
+                                draggable
+                                onDragStart={() => setDragged(session)}
+                                onDragEnd={() => setDragged(null)}
+                                onClick={() => setPicked(picked?.id === session.id ? null : session)}
+                                className="mt-1 text-[11px] text-primary hover:underline"
+                              >
+                                {picked?.id === session.id ? 'Cancel move' : 'Move…'}
+                              </button>
+                            )}
+                            {!session.network_published && (
+                              <button draggable onDragStart={() => setDragged(session)} onDragEnd={() => setDragged(null)} onClick={() => setPicked(picked?.id === session.id ? null : session)} className="mt-1 text-[11px] text-primary hover:underline">
+                                {picked?.id === session.id ? 'Cancel move' : 'Move…'}
+                              </button>
+                            )}
+                          </div>
                         )
                       }
-
-                      // Check if this is a conflict slot
-                      const isConflict = conflictSlotId === slot.id
-
+                      const duration = slotMinutes(slot)
+                      const durationWarning = mover && mover.duration !== null && mover.duration !== duration
                       return (
-                        <DropZone
+                        <button
                           key={venue.id}
-                          slot={slot}
-                          venue={venue}
-                          isDragging={!!draggedSession}
-                          draggedSession={draggedSession}
-                          isConflict={isConflict}
-                          onDrop={() => handleDropOnSlot(slot.id, venue.id)}
-                        />
+                          type="button"
+                          disabled={!picked || busy}
+                          onClick={() => { if (picked) void dropOnSlot(picked, slot.id) }}
+                          onDragOver={(e) => { if (dragged) e.preventDefault() }}
+                          onDrop={(e) => { e.preventDefault(); if (dragged) void dropOnSlot(dragged, slot.id) }}
+                          aria-label={picked ? `Place ${picked.title} in ${venue.name} at ${formatTime(slot.start_time)}` : `Free slot in ${venue.name} at ${formatTime(slot.start_time)}`}
+                          className={cn(
+                            'h-24 w-full rounded-lg border-2 border-dashed transition-colors flex flex-col items-center justify-center overflow-hidden gap-1 disabled:cursor-default',
+                            mover ? (durationWarning ? 'border-amber-500/60 bg-amber-500/5' : 'border-primary/50 bg-primary/5 hover:bg-primary/10') : 'border-muted-foreground/20 bg-muted/10',
+                          )}
+                        >
+                          <span className="text-xs text-muted-foreground">{slot.label || `${duration} min`}</span>
+                          {durationWarning && <span className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400"><Clock className="h-3 w-3" />Session is {mover.duration} min</span>}
+                        </button>
                       )
                     })}
                   </React.Fragment>
@@ -1140,181 +811,113 @@ export default function AdminSchedulePage() {
         </div>
       </div>
 
-      {/* Conflict Warning Modal */}
-      {showConflictWarning && pendingDrop && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm p-4"
-          onClick={handleCancelReplace}
-        >
-          <div
-            className="w-full max-w-md bg-card border rounded-xl shadow-xl p-5"
-            onClick={(e) => e.stopPropagation()}
-          >
+      {conflict && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm p-4" role="dialog" aria-modal="true" aria-labelledby="conflict-title">
+          <div className="w-full max-w-md bg-card border rounded-xl shadow-xl p-5">
             <div className="flex items-start gap-3 mb-4">
-              <div className="p-2 rounded-full bg-amber-500/10">
-                <AlertTriangle className="h-5 w-5 text-amber-500" />
-              </div>
+              <div className="p-2 rounded-full bg-amber-500/10"><AlertTriangle className="h-5 w-5 text-amber-500" /></div>
               <div>
-                <h3 className="font-semibold">Slot Already Occupied</h3>
-                <p className="text-sm text-muted-foreground mt-1">
-                  This time slot already has a session scheduled. Would you like to replace it?
-                </p>
+                <h2 id="conflict-title" className="font-semibold">That slot is taken</h2>
+                <p className="text-sm text-muted-foreground mt-1">&ldquo;{conflict.occupant}&rdquo; is already there. Replace it? It goes back to the tray.</p>
               </div>
             </div>
-
-            {conflictSlotId && slotOccupancy.get(conflictSlotId) && (
-              <div className="bg-muted rounded-lg p-3 mb-4">
-                <p className="text-xs text-muted-foreground mb-1">Current session:</p>
-                <p className="font-medium text-sm">{slotOccupancy.get(conflictSlotId)?.title}</p>
-              </div>
-            )}
-
             <div className="flex gap-2">
-              <Button
-                variant="outline"
-                className="flex-1"
-                onClick={handleCancelReplace}
-              >
-                Cancel
-              </Button>
-              <Button
-                variant="destructive"
-                className="flex-1"
-                onClick={handleConfirmReplace}
-              >
-                Replace Session
+              <Button variant="outline" className="flex-1" onClick={() => setConflict(null)}>Cancel</Button>
+              <Button variant="destructive" className="flex-1" disabled={busy} onClick={() => void dropOnSlot(conflict.session, conflict.slotId, true)}>Replace</Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {destructive && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm p-4" role="dialog" aria-modal="true" aria-labelledby="destructive-title">
+          <div className="w-full max-w-md bg-card border rounded-xl shadow-xl p-5 space-y-4">
+            <div>
+              <h2 id="destructive-title" className="font-semibold flex items-center gap-2"><ShieldCheck className="h-5 w-5 text-amber-600" />{destructive.kind === 'move' ? 'Move a published session' : 'Cancel a published session'}</h2>
+              <p className="text-sm text-muted-foreground mt-2">
+                &ldquo;{destructive.session.title}&rdquo; is on the published calendar, so people may already have it saved.
+                {destructive.kind === 'move'
+                  ? ` Moving it${destructiveSlot ? ` to ${formatInEventTimezone(new Date(destructiveSlot.start_time), event.timezone, 'datetime')}` : ''} needs approval from other organizers. Your request counts as the first approval.`
+                  : ' Cancelling marks its calendar event cancelled once other organizers approve. The proposal stays with its author.'}
+              </p>
+            </div>
+            <div className="space-y-2">
+              <label htmlFor="destructive-reason" className="text-sm font-medium">Reason (shown to approvers)</label>
+              <textarea id="destructive-reason" value={reason} onChange={(e) => setReason(e.target.value)} maxLength={2000} className="w-full min-h-[80px] rounded-md border bg-background px-3 py-2 text-sm" />
+            </div>
+            {needsLinkage && (
+              <label className="flex items-start gap-2 text-sm">
+                <input type="checkbox" checked={confirmLinkage} onChange={(e) => setConfirmLinkage(e.target.checked)} className="mt-1" />
+                <span>I understand my approval is a public record in my own repository that names me as an organizer of this gathering.</span>
+              </label>
+            )}
+            <div className="flex gap-2">
+              <Button variant="outline" className="flex-1" onClick={() => setDestructive(null)} disabled={busy}>Keep as is</Button>
+              <Button className="flex-1" onClick={() => void submitDestructive()} disabled={busy || !reason.trim() || (needsLinkage && !confirmLinkage)}>
+                {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Request change'}
               </Button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Auto-Schedule Modal */}
-      {showAutoSchedule && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm p-4"
-          onClick={() => !autoScheduleLoading && setShowAutoSchedule(false)}
-        >
-          <div
-            className="w-full max-w-2xl max-h-[80vh] bg-card border rounded-xl shadow-xl flex flex-col"
-            onClick={(e) => e.stopPropagation()}
-          >
+      {autoOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm p-4" role="dialog" aria-modal="true" aria-labelledby="auto-title">
+          <div className="w-full max-w-2xl max-h-[80vh] bg-card border rounded-xl shadow-xl flex flex-col">
             <div className="p-5 border-b flex items-center justify-between">
               <div className="flex items-center gap-3">
-                <div className="p-2 rounded-full bg-primary/10">
-                  <Wand2 className="h-5 w-5 text-primary" />
-                </div>
+                <div className="p-2 rounded-full bg-primary/10"><Wand2 className="h-5 w-5 text-primary" /></div>
                 <div>
-                  <h3 className="font-semibold">Auto-Schedule Preview</h3>
-                  <p className="text-sm text-muted-foreground">
-                    Review proposed assignments before applying
-                  </p>
+                  <h2 id="auto-title" className="font-semibold">Auto-schedule preview</h2>
+                  <p className="text-sm text-muted-foreground">Review proposed placements before adding them to the draft</p>
                 </div>
               </div>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setShowAutoSchedule(false)}
-                disabled={autoScheduleLoading}
-              >
-                <X className="h-4 w-4" />
-              </Button>
+              <Button variant="ghost" size="sm" onClick={() => setAutoOpen(false)} disabled={autoLoading} aria-label="Close"><X className="h-4 w-4" /></Button>
             </div>
-
             <div className="flex-1 overflow-y-auto p-5">
-              {autoScheduleLoading && !autoScheduleResult ? (
-                <div className="flex items-center justify-center py-12">
-                  <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-                </div>
-              ) : autoScheduleResult ? (
+              {autoLoading && !autoResult ? (
+                <div className="flex items-center justify-center py-12"><Loader2 className="h-8 w-8 animate-spin text-muted-foreground" /></div>
+              ) : autoResult ? (
                 <div className="space-y-4">
-                  {/* Stats */}
                   <div className="grid grid-cols-3 gap-3">
-                    <div className="bg-muted rounded-lg p-3 text-center">
-                      <div className="text-2xl font-bold">{autoScheduleResult.stats.assigned}</div>
-                      <div className="text-xs text-muted-foreground">Assigned</div>
-                    </div>
-                    <div className="bg-muted rounded-lg p-3 text-center">
-                      <div className="text-2xl font-bold">{autoScheduleResult.stats.unassigned}</div>
-                      <div className="text-xs text-muted-foreground">Unassigned</div>
-                    </div>
-                    <div className="bg-muted rounded-lg p-3 text-center">
-                      <div className="text-2xl font-bold">{autoScheduleResult.stats.averageScore}</div>
-                      <div className="text-xs text-muted-foreground">Avg Score</div>
-                    </div>
+                    <div className="bg-muted rounded-lg p-3 text-center"><div className="text-2xl font-bold">{autoResult.stats.assigned}</div><div className="text-xs text-muted-foreground">Placed</div></div>
+                    <div className="bg-muted rounded-lg p-3 text-center"><div className="text-2xl font-bold">{autoResult.stats.unassigned}</div><div className="text-xs text-muted-foreground">Not placed</div></div>
+                    <div className="bg-muted rounded-lg p-3 text-center"><div className="text-2xl font-bold">{autoResult.stats.averageScore}</div><div className="text-xs text-muted-foreground">Average fit</div></div>
                   </div>
-
-                  {/* Assignments */}
-                  {autoScheduleResult.assignments.length > 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    {autoResult.stats.usedBallots
+                      ? 'Ordering and overlap use the closed round’s ballots. Overlap compares anonymous ballot tokens, never people.'
+                      : 'No closed voting round yet: placements use duration, preferences, rooms and tracks only.'}
+                  </p>
+                  {autoResult.assignments.length > 0 && (
                     <div>
                       <div className="flex items-center justify-between mb-2">
-                        <h4 className="font-medium">
-                          Proposed Assignments ({selectedAssignments.size}/{autoScheduleResult.assignments.length} selected)
-                        </h4>
+                        <h3 className="font-medium">Proposed ({selectedAssignments.size}/{autoResult.assignments.length} selected)</h3>
                         <div className="flex gap-2">
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => toggleAllAssignments(true)}
-                            disabled={selectedAssignments.size === autoScheduleResult.assignments.length}
-                          >
-                            Select All
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => toggleAllAssignments(false)}
-                            disabled={selectedAssignments.size === 0}
-                          >
-                            Deselect All
-                          </Button>
+                          <Button variant="ghost" size="sm" onClick={() => setSelectedAssignments(new Set(autoResult.assignments.map((a) => a.sessionId)))}>Select all</Button>
+                          <Button variant="ghost" size="sm" onClick={() => setSelectedAssignments(new Set())}>Clear</Button>
                         </div>
                       </div>
                       <div className="space-y-2 max-h-60 overflow-y-auto">
-                        {autoScheduleResult.assignments.map((a) => {
-                          const slot = timeSlots.find((s) => s.id === a.slotId)
+                        {autoResult.assignments.map((a) => {
+                          const slot = timeSlots.find((t) => t.id === a.slotId)
                           const venue = venues.find((v) => v.id === a.venueId)
-                          const isSelected = selectedAssignments.has(a.sessionId)
+                          const checked = selectedAssignments.has(a.sessionId)
+                          const toggle = () => setSelectedAssignments((prev) => { const next = new Set(prev); if (next.has(a.sessionId)) next.delete(a.sessionId); else next.add(a.sessionId); return next })
                           return (
-                            <div
-                              key={a.sessionId}
-                              className={cn(
-                                'p-3 rounded-lg border text-sm cursor-pointer transition-colors',
-                                isSelected
-                                  ? a.warnings.length > 0
-                                    ? 'bg-amber-500/10 border-amber-500/50'
-                                    : 'bg-green-500/10 border-green-500/50'
-                                  : 'bg-muted/50 border-muted-foreground/20 opacity-60'
-                              )}
-                              onClick={() => toggleAssignmentSelection(a.sessionId)}
-                            >
+                            <div key={a.sessionId} className={cn('p-3 rounded-lg border text-sm', checked ? (a.warnings.length ? 'bg-amber-500/10 border-amber-500/50' : 'bg-green-500/10 border-green-500/50') : 'bg-muted/50 opacity-60')}>
                               <div className="flex items-start gap-3">
-                                <Checkbox
-                                  checked={isSelected}
-                                  onCheckedChange={() => toggleAssignmentSelection(a.sessionId)}
-                                  className="mt-0.5"
-                                />
+                                <Checkbox checked={checked} onCheckedChange={toggle} className="mt-0.5" aria-label={`Include ${a.sessionTitle}`} />
                                 <div className="flex-1 min-w-0">
                                   <div className="flex items-start justify-between gap-2">
                                     <div className="min-w-0">
                                       <p className="font-medium truncate">{a.sessionTitle}</p>
-                                      <p className="text-xs text-muted-foreground">
-                                        {venue?.name} · {slot ? formatTime(slot.start_time) : 'Unknown'}
-                                        {slot?.day_date && ` · ${new Date(slot.day_date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}`}
-                                      </p>
+                                      <p className="text-xs text-muted-foreground">{venue?.name} · {slot ? formatInEventTimezone(new Date(slot.start_time), event.timezone, 'datetime') : 'Unknown slot'}</p>
                                     </div>
-                                    <Badge variant="outline" className="text-xs shrink-0">
-                                      Score: {a.score}
-                                    </Badge>
+                                    <Badge variant="outline" className="text-xs shrink-0">Fit {a.score}</Badge>
                                   </div>
                                   {a.warnings.length > 0 && (
-                                    <div className="mt-2 flex flex-wrap gap-1">
-                                      {a.warnings.map((w, i) => (
-                                        <span key={i} className="text-xs text-amber-600 dark:text-amber-400">
-                                          ⚠️ {w}
-                                        </span>
-                                      ))}
-                                    </div>
+                                    <ul className="mt-2 space-y-0.5">{a.warnings.map((w) => <li key={w} className="text-xs text-amber-700 dark:text-amber-400 flex gap-1"><AlertTriangle className="h-3 w-3 mt-0.5 shrink-0" />{w}</li>)}</ul>
                                   )}
                                 </div>
                               </div>
@@ -1324,58 +927,20 @@ export default function AdminSchedulePage() {
                       </div>
                     </div>
                   )}
-
-                  {/* Unassigned */}
-                  {autoScheduleResult.unassigned.length > 0 && (
+                  {autoResult.unassigned.length > 0 && (
                     <div>
-                      <h4 className="font-medium mb-2 text-amber-600 dark:text-amber-400">
-                        Could Not Assign ({autoScheduleResult.unassigned.length})
-                      </h4>
-                      <div className="space-y-2">
-                        {autoScheduleResult.unassigned.map((u) => (
-                          <div key={u.sessionId} className="p-3 rounded-lg bg-muted text-sm">
-                            <p className="font-medium">{u.sessionTitle}</p>
-                            <p className="text-xs text-muted-foreground">{u.reason}</p>
-                          </div>
-                        ))}
-                      </div>
+                      <h3 className="font-medium mb-2 text-amber-700 dark:text-amber-400">Could not place ({autoResult.unassigned.length})</h3>
+                      <div className="space-y-2">{autoResult.unassigned.map((u) => <div key={u.sessionId} className="p-3 rounded-lg bg-muted text-sm"><p className="font-medium">{u.sessionTitle}</p><p className="text-xs text-muted-foreground">{u.reason}</p></div>)}</div>
                     </div>
                   )}
                 </div>
-              ) : (
-                <div className="text-center py-12 text-muted-foreground">
-                  No results available
-                </div>
-              )}
+              ) : null}
             </div>
-
-            {autoScheduleResult && autoScheduleResult.assignments.length > 0 && (
+            {autoResult && autoResult.assignments.length > 0 && (
               <div className="p-5 border-t flex gap-2">
-                <Button
-                  variant="outline"
-                  className="flex-1"
-                  onClick={() => {
-                    setShowAutoSchedule(false)
-                    setAutoScheduleResult(null)
-                    setSelectedAssignments(new Set())
-                  }}
-                  disabled={autoScheduleLoading}
-                >
-                  Cancel
-                </Button>
-                <Button
-                  className="flex-1"
-                  onClick={handleAutoScheduleApply}
-                  disabled={autoScheduleLoading || selectedAssignments.size === 0}
-                >
-                  {autoScheduleLoading ? (
-                    <>
-                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                      Applying...
-                    </>
-                  ) : (
-                    <>Apply {selectedAssignments.size} of {autoScheduleResult.assignments.length} Assignments</>
-                  )}
+                <Button variant="outline" className="flex-1" onClick={() => setAutoOpen(false)} disabled={autoLoading}>Cancel</Button>
+                <Button className="flex-1" onClick={() => void applyAutoSchedule()} disabled={autoLoading || selectedAssignments.size === 0}>
+                  {autoLoading ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Applying…</> : <>Add {selectedAssignments.size} to draft</>}
                 </Button>
               </div>
             )}
@@ -1383,107 +948,81 @@ export default function AdminSchedulePage() {
         </div>
       )}
 
-      {/* Publish Schedule Modal */}
-      {showPublishModal && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-          <div className="bg-background rounded-xl shadow-xl w-full max-w-md">
+      {publishOpen && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="publish-title">
+          <div className="bg-background rounded-xl shadow-xl w-full max-w-lg max-h-[85vh] flex flex-col">
             <div className="p-5 border-b flex items-center justify-between">
-              <h3 className="font-semibold">
-                {publishSuccess ? 'Schedule Published!' : 'Publish Schedule'}
-              </h3>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => {
-                  setShowPublishModal(false)
-                  setPublishSuccess(false)
-                }}
-              >
-                <X className="h-4 w-4" />
-              </Button>
+              <h2 id="publish-title" className="font-semibold">{publishResult ? 'Schedule published' : 'Publish schedule'}</h2>
+              <Button variant="ghost" size="sm" onClick={() => setPublishOpen(false)} aria-label="Close" disabled={publishing}><X className="h-4 w-4" /></Button>
             </div>
-
-            <div className="p-5">
-              {publishSuccess ? (
-                <div className="text-center py-4">
-                  <div className="rounded-full bg-green-500/10 p-4 w-fit mx-auto mb-4">
-                    <CheckCircle className="h-12 w-12 text-green-500" />
+            <div className="p-5 overflow-y-auto space-y-4 text-sm">
+              {publishResult ? (
+                <>
+                  <div className="flex items-center gap-3">
+                    <CheckCircle className="h-8 w-8 text-green-500" />
+                    <div>
+                      <p className="font-medium">{publishResult.message}</p>
+                      <p className="text-muted-foreground">{publishResult.notified.members} member{publishResult.notified.members === 1 ? '' : 's'} notified that the schedule is live.</p>
+                    </div>
                   </div>
-                  <p className="font-medium">Schedule published successfully!</p>
-                  <p className="text-sm text-muted-foreground mt-1">
-                    Attendees can now see the schedule.
-                  </p>
-                </div>
+                  {publishResult.network.attempted ? (
+                    <div className="rounded-lg border p-3 space-y-2">
+                      <p className="font-medium flex items-center gap-2"><Globe className="h-4 w-4" />Network calendar</p>
+                      {publishResult.network.error ? (
+                        <p role="alert" className="text-destructive">{publishResult.network.error}</p>
+                      ) : (
+                        <p className="text-muted-foreground">{publishResult.network.published} session{publishResult.network.published === 1 ? '' : 's'} written; {publishResult.network.failed} failed.</p>
+                      )}
+                      {publishResult.network.results.length > 0 && (
+                        <ul className="max-h-48 overflow-y-auto space-y-1 text-xs">
+                          {publishResult.network.results.map((r, i) => {
+                            const title = sessions.find((s) => s.id === r.id)?.title ?? r.id
+                            return (
+                              <li key={`${r.kind}-${r.id}-${i}`} className={cn('flex gap-2', r.error ? 'text-destructive' : 'text-muted-foreground')}>
+                                <span className="shrink-0">{r.error ? '✕' : '✓'}</span>
+                                <span className="break-all">{title} · {r.kind}{r.error ? ` — ${r.error}` : ''}</span>
+                              </li>
+                            )
+                          })}
+                        </ul>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="text-muted-foreground">This gathering is not on the network yet, so only the app schedule was published.</p>
+                  )}
+                </>
               ) : (
                 <>
-                  <div className="space-y-4">
-                    {/* Status summary */}
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between text-sm">
-                        <span className="text-muted-foreground">Scheduled sessions:</span>
-                        <span className="font-medium">{publishStatus?.scheduledSessions || 0}</span>
-                      </div>
-                      {publishStatus?.schedulePublishedAt && (
-                        <div className="flex items-center justify-between text-sm">
-                          <span className="text-muted-foreground">Last published:</span>
-                          <span className="font-medium">
-                            {new Date(publishStatus.schedulePublishedAt).toLocaleString()}
-                          </span>
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Info message */}
-                    <div className="p-3 bg-muted rounded-lg text-sm">
-                      {publishStatus?.schedulePublishedAt ? (
-                        <p>
-                          This will update the public schedule with your latest changes.
-                          Attendees will be notified of the update.
-                        </p>
-                      ) : (
-                        <p>
-                          Publishing will make the schedule visible to all attendees.
-                          You can update it again anytime after publishing.
-                        </p>
-                      )}
-                    </div>
-
-                    {/* Warning if no sessions scheduled */}
-                    {publishStatus?.scheduledSessions === 0 && (
-                      <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg text-sm text-amber-700 dark:text-amber-400 flex items-start gap-2">
-                        <AlertTriangle className="h-4 w-4 flex-shrink-0 mt-0.5" />
-                        <p>No sessions are currently scheduled. Consider scheduling some sessions first.</p>
-                      </div>
-                    )}
+                  <div className="space-y-1">
+                    <div className="flex justify-between"><span className="text-muted-foreground">Scheduled sessions</span><span className="font-medium">{publishStatus?.scheduledSessions ?? 0}</span></div>
+                    {publishStatus?.schedulePublishedAt && <div className="flex justify-between"><span className="text-muted-foreground">Last published</span><span className="font-medium">{new Date(publishStatus.schedulePublishedAt).toLocaleString()}</span></div>}
                   </div>
-
-                  <div className="flex gap-2 mt-6">
-                    <Button
-                      variant="outline"
-                      className="flex-1"
-                      onClick={() => setShowPublishModal(false)}
-                      disabled={isPublishing}
-                    >
-                      Cancel
-                    </Button>
-                    <Button
-                      className="flex-1"
-                      onClick={handlePublishSchedule}
-                      disabled={isPublishing}
-                    >
-                      {isPublishing ? (
-                        <>
-                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                          Publishing...
-                        </>
-                      ) : (
-                        <>
-                          <Send className="h-4 w-4 mr-2" />
-                          {publishStatus?.schedulePublishedAt ? 'Update Schedule' : 'Publish Schedule'}
-                        </>
-                      )}
-                    </Button>
-                  </div>
+                  {publishStatus && changeCount > 0 ? (
+                    <div className="rounded-lg bg-muted p-3 space-y-1">
+                      <p className="font-medium">Changes since the last publish</p>
+                      {publishStatus.changes.added.length > 0 && <p>{publishStatus.changes.added.length} added</p>}
+                      {publishStatus.changes.moved.length > 0 && <p>{publishStatus.changes.moved.length} moved</p>}
+                      {publishStatus.changes.removed.length > 0 && <p>{publishStatus.changes.removed.length} removed</p>}
+                    </div>
+                  ) : (
+                    <p className="text-muted-foreground">No placement changes since the last publish. Publishing again re-sends the schedule to the network and tells members it is live.</p>
+                  )}
+                  {publishStatus?.networkLinked && <p className="text-muted-foreground flex gap-2"><Globe className="h-4 w-4 shrink-0 mt-0.5" />Each scheduled session is also written to the gathering&rsquo;s public calendar on the network.</p>}
+                  {publishStatus?.scheduledSessions === 0 && (
+                    <p className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg text-amber-700 dark:text-amber-400 flex gap-2"><AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />No sessions are scheduled yet.</p>
+                  )}
+                </>
+              )}
+            </div>
+            <div className="p-5 border-t flex gap-2">
+              {publishResult ? (
+                <Button className="flex-1" onClick={() => setPublishOpen(false)}>Done</Button>
+              ) : (
+                <>
+                  <Button variant="outline" className="flex-1" onClick={() => setPublishOpen(false)} disabled={publishing}>Cancel</Button>
+                  <Button className="flex-1" onClick={() => void publish()} disabled={publishing}>
+                    {publishing ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Publishing…</> : <><Send className="h-4 w-4 mr-2" />Publish</>}
+                  </Button>
                 </>
               )}
             </div>
@@ -1491,219 +1030,5 @@ export default function AdminSchedulePage() {
         </div>
       )}
     </>
-  )
-}
-
-// Session item in the tray
-function SessionTrayItem({
-  session,
-  selectedDay,
-  dayToPreferences,
-  onDragStart,
-  onDragEnd,
-}: {
-  session: Session
-  selectedDay: string
-  dayToPreferences: Record<string, string[]>
-  onDragStart: () => void
-  onDragEnd: () => void
-}) {
-  const prefs = session.time_preferences || []
-  const dayPrefs = dayToPreferences[selectedDay] || []
-  const matchesDay = prefs.length > 0 && prefs.some((p) => dayPrefs.includes(p))
-
-  return (
-    <div
-      draggable
-      onDragStart={onDragStart}
-      onDragEnd={onDragEnd}
-      className={cn(
-        'p-3 bg-background rounded-lg border shadow-sm cursor-move hover:shadow-md transition-shadow group',
-        matchesDay && 'ring-2 ring-green-500/50 border-green-500/30'
-      )}
-    >
-      <div className="flex items-start gap-2">
-        <GripVertical className="h-4 w-4 mt-0.5 text-muted-foreground shrink-0 opacity-50 group-hover:opacity-100" />
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 mb-1">
-            <Badge variant="outline" className="text-xs capitalize shrink-0">
-              {session.format}
-            </Badge>
-            <span className="text-xs text-muted-foreground">{session.duration}min</span>
-            <span className="text-xs font-medium text-primary ml-auto">
-              {session.total_votes}v
-            </span>
-          </div>
-          <h4 className="text-sm font-medium line-clamp-2">{session.title}</h4>
-          {session.host_name && (
-            <p className="text-xs text-muted-foreground mt-1">{session.host_name}</p>
-          )}
-          <div className="flex flex-wrap items-center gap-1 mt-2">
-            {session.track && (
-              <Badge
-                variant="secondary"
-                className="text-xs"
-                style={{ backgroundColor: session.track.color || undefined }}
-              >
-                {session.track.name}
-              </Badge>
-            )}
-            {prefs.map((pref) => (
-              <Badge
-                key={pref}
-                variant="outline"
-                className={cn(
-                  'text-[10px]',
-                  dayPrefs.includes(pref)
-                    ? 'border-green-500 text-green-700 dark:text-green-400 bg-green-500/10'
-                    : 'text-muted-foreground'
-                )}
-              >
-                {PREF_LABELS[pref] || pref}
-              </Badge>
-            ))}
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// Drop zone for empty slots
-function DropZone({
-  slot,
-  venue,
-  isDragging,
-  draggedSession,
-  isConflict,
-  onDrop,
-}: {
-  slot: TimeSlot
-  venue: Venue
-  isDragging: boolean
-  draggedSession: Session | null
-  isConflict: boolean
-  onDrop: () => void
-}) {
-  const [isOver, setIsOver] = React.useState(false)
-
-  // Check for duration mismatch
-  const slotDuration = getSlotDuration(slot)
-  const hasDurationWarning = draggedSession && draggedSession.duration !== slotDuration
-
-  // Check for capacity warning
-  const hasCapacityWarning = draggedSession && venue.capacity && draggedSession.total_votes > venue.capacity
-
-  return (
-    <div
-      onDragOver={(e) => {
-        e.preventDefault()
-        setIsOver(true)
-      }}
-      onDragLeave={() => setIsOver(false)}
-      onDrop={(e) => {
-        e.preventDefault()
-        setIsOver(false)
-        onDrop()
-      }}
-      className={cn(
-        'h-20 rounded-lg border-2 border-dashed transition-colors flex flex-col items-center justify-center overflow-hidden gap-1',
-        isConflict && 'border-red-500 bg-red-500/10',
-        !isConflict && isDragging && 'border-primary/50 bg-primary/5',
-        !isConflict && isOver && !hasDurationWarning && 'border-primary bg-primary/10',
-        !isConflict && isOver && hasDurationWarning && 'border-amber-500 bg-amber-500/10',
-        !isDragging && !isConflict && 'border-muted-foreground/20 bg-muted/10'
-      )}
-    >
-      <span className="text-xs text-muted-foreground">
-        {slot.label || (slot.slot_type === 'unconference' ? 'Open Slot' : `${slotDuration}min`)}
-      </span>
-
-      {/* Duration warning when hovering */}
-      {isOver && hasDurationWarning && (
-        <div className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
-          <Clock className="h-3 w-3" />
-          Session is {draggedSession.duration}min
-        </div>
-      )}
-
-      {/* Capacity warning when hovering */}
-      {isOver && hasCapacityWarning && (
-        <div className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
-          <AlertTriangle className="h-3 w-3" />
-          {draggedSession.total_votes} votes &gt; {venue.capacity} cap
-        </div>
-      )}
-    </div>
-  )
-}
-
-// Scheduled session in a slot
-function ScheduledSlot({
-  session,
-  slot,
-  venue,
-  hasDurationMismatch,
-  slotDuration,
-  onRemove,
-}: {
-  session: Session
-  slot: TimeSlot
-  venue: Venue
-  hasDurationMismatch: boolean
-  slotDuration: number
-  onRemove: () => void
-}) {
-  // Capacity warning
-  const hasCapacityWarning = venue.capacity && session.total_votes > venue.capacity
-
-  return (
-    <div
-      className={cn(
-        'min-h-24 rounded-xl border-l-4 border p-3 relative group overflow-hidden',
-        hasDurationMismatch || hasCapacityWarning
-          ? 'bg-amber-500/10 border-amber-500/30'
-          : 'bg-secondary border-primary/60'
-      )}
-    >
-      <button
-        onClick={onRemove}
-        aria-label={`Remove ${session.title} from this time slot`}
-        className="absolute top-1 right-1 p-1 rounded bg-background/80 opacity-100 lg:opacity-0 lg:group-hover:opacity-100 focus-visible:opacity-100 transition-opacity hover:bg-destructive hover:text-destructive-foreground z-10"
-      >
-        <X className="h-3 w-3" />
-      </button>
-
-      {/* Warning indicators */}
-      <div className="absolute top-1 left-1 flex gap-1">
-        {hasDurationMismatch && (
-          <div
-            className="p-0.5 rounded bg-amber-500/20"
-            title={`Session duration (${session.duration}min) doesn't match slot (${slotDuration}min)`}
-          >
-            <Clock className="h-3 w-3 text-amber-600 dark:text-amber-400" />
-          </div>
-        )}
-        {hasCapacityWarning && (
-          <div
-            className="p-0.5 rounded bg-amber-500/20"
-            title={`Expected attendance (${session.total_votes}) exceeds venue capacity (${venue.capacity})`}
-          >
-            <AlertTriangle className="h-3 w-3 text-amber-600 dark:text-amber-400" />
-          </div>
-        )}
-      </div>
-
-      <div className="flex items-start gap-1 mt-3">
-        <Badge variant="outline" className="text-xs capitalize shrink-0">
-          {session.format}
-        </Badge>
-        <span className="text-xs text-muted-foreground">{session.duration}m</span>
-      </div>
-      <h4 className="text-xs font-medium line-clamp-2 mt-0.5">{session.title}</h4>
-      {session.host_name && (
-        <p className="text-xs text-muted-foreground mt-0.5 truncate">{session.host_name}</p>
-      )}
-    </div>
   )
 }

@@ -1,206 +1,181 @@
 /**
- * Publish Schedule API
+ * Publish the schedule (spec §6: draft → publish).
+ *   GET  /api/v1/events/[slug]/admin/publish-schedule   publish status and what changed since
+ *   POST /api/v1/events/[slug]/admin/publish-schedule   publish
  *
- * POST /api/v1/events/[slug]/admin/publish-schedule
- * Publishes the current schedule, updating schedule_published_at
+ * POST, in one transaction: stamp `events.schedule_published_at`; tell every member the
+ * schedule is live (`schedule_published`); record each session's published slot (hosts already
+ * heard about their placements when they were made). The response summarises what changed
+ * since the previous publish. After commit, when
+ * the gathering has an actor, package F's `publishSchedule` writes the calendar event, config
+ * and slot records; the per-record results are returned. A network failure never undoes the
+ * app-side publish — it is reported so the organizer can retry.
  */
+import { sql, tx, type Sql } from '@/lib/db'
+import { notify } from '@/lib/notifications'
+import { errorResponse, json, requireOrganizer, rolesWith } from '@/lib/scheduling/admin-api'
+import { loadEvent } from '@/lib/scheduling/program'
 
-import { NextRequest, NextResponse } from 'next/server'
-import { createAdminClient } from '@/lib/supabase/server'
-import { getUserFromRequest } from '@/lib/api/getUser'
-import { publishSchedule } from '@/lib/atproto/publish'
+export const dynamic = 'force-dynamic'
 
-/**
- * Mirror the published schedule onto the ATProto network when the event has a
- * gathering actor. Counts SESSIONS: one whose slot record was written is
- * `published`, one with any failed record is `failed`. A network failure never
- * fails the HTTP request — the app-side publish already succeeded.
- */
-async function publishScheduleToNetwork(eventId: string, userId: string): Promise<{ published: number; failed: number; error?: string }> {
-  try {
-    const { results } = await publishSchedule({ eventId, callerUserId: userId })
-    const failedIds = new Set(results.filter((r) => r.error).map((r) => r.id))
-    const publishedIds = new Set(results.filter((r) => r.kind === 'slot' && !r.error).map((r) => r.id))
-    for (const id of failedIds) publishedIds.delete(id)
-    return { published: publishedIds.size, failed: failedIds.size }
-  } catch (err) {
-    console.error('[publish-schedule] atproto publish failed:', err)
-    return { published: 0, failed: 0, error: err instanceof Error ? err.message : 'Network publish failed' }
-  }
+const ROLES = rolesWith('manageSchedule')
+
+interface ChangeRow {
+  id: string
+  title: string
+  status: string
+  time_slot_id: string | null
+  published_slot_id: string | null
 }
 
-async function notifySchedulePublished(
-  supabase: Awaited<ReturnType<typeof createAdminClient>>,
-  eventId: string,
-  slug: string,
-  eventName: string,
-  scheduledCount: number
-): Promise<number> {
-  try {
-    const { data: members, error } = await supabase
-      .from('event_members')
-      .select('user_id')
-      .eq('event_id', eventId)
-    if (error) {
-      console.error('Error loading members for schedule notification:', error)
-      return 0
-    }
-    if (!members || members.length === 0) return 0
-
-    const rows = members.map((member) => ({
-      user_id: member.user_id,
-      event_id: eventId,
-      type: 'schedule_published',
-      title: `The schedule for ${eventName} is live`,
-      body: `${scheduledCount} session${scheduledCount === 1 ? '' : 's'} are on the schedule. Plan your days and add favorites.`,
-      action_url: `/e/${slug}/schedule`,
-      data: { scheduled_sessions: scheduledCount },
-    }))
-    const { error: insertError } = await supabase.from('notifications').insert(rows)
-    if (insertError) {
-      console.error('Error creating schedule_published notifications:', insertError)
-      return 0
-    }
-    return rows.length
-  } catch (err) {
-    console.error('Unexpected error sending schedule_published notifications:', err)
-    return 0
-  }
+function classify(rows: ChangeRow[]) {
+  const added = rows.filter((r) => r.status === 'scheduled' && r.time_slot_id && !r.published_slot_id)
+  const moved = rows.filter((r) => r.status === 'scheduled' && r.time_slot_id && r.published_slot_id && r.time_slot_id !== r.published_slot_id)
+  const removed = rows.filter((r) => r.published_slot_id && (r.status !== 'scheduled' || !r.time_slot_id))
+  return { added, moved, removed }
 }
 
-export async function POST(
-  request: NextRequest,
-  { params }: { params: Promise<{ slug: string }> }
-) {
+async function changeRows(eventId: string, db: Sql = sql) {
+  return db<ChangeRow[]>`
+    select id, title, status, time_slot_id, published_slot_id
+    from sessions
+    where event_id = ${eventId}
+      and ((status = 'scheduled' and time_slot_id is distinct from published_slot_id)
+        or (published_slot_id is not null and (status <> 'scheduled' or time_slot_id is null)))
+  `
+}
+
+export async function GET(request: Request, { params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params
-
-  // Auth
-  const user = await getUserFromRequest(request)
-  if (!user) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  const ctx = await requireOrganizer(request, slug, ROLES)
+  if (ctx instanceof Response) return ctx
+  try {
+    const [event, rows, [counts]] = await Promise.all([
+      loadEvent(ctx.event.id),
+      changeRows(ctx.event.id),
+      sql<{ scheduled: number; network_published: number }[]>`
+        select count(*) filter (where status = 'scheduled' and time_slot_id is not null)::int as scheduled,
+               count(*) filter (where calendar_event_uri is not null and slot_uri is not null and cancelled_at is null)::int as network_published
+        from sessions where event_id = ${ctx.event.id}
+      `,
+    ])
+    const { added, moved, removed } = classify(rows)
+    return json({
+      schedulePublishedAt: event.schedule_published_at,
+      lastScheduleChangeAt: event.last_schedule_change_at,
+      hasUnpublishedChanges: rows.length > 0,
+      scheduledSessions: counts.scheduled,
+      networkPublishedSessions: counts.network_published,
+      networkLinked: Boolean(event.actor_did),
+      changes: {
+        added: added.map((r) => ({ id: r.id, title: r.title })),
+        moved: moved.map((r) => ({ id: r.id, title: r.title })),
+        removed: removed.map((r) => ({ id: r.id, title: r.title })),
+      },
+    })
+  } catch (e) {
+    return errorResponse(e, 'publish status')
   }
-
-  const supabase = await createAdminClient()
-
-  // Get event
-  const { data: event, error: eventError } = await supabase
-    .from('events')
-    .select('id, name, schedule_published_at, last_schedule_change_at, actor_did')
-    .eq('slug', slug)
-    .single()
-
-  if (eventError || !event) {
-    return NextResponse.json({ error: 'Event not found' }, { status: 404 })
-  }
-
-  // Check admin permission
-  const { data: membership } = await supabase
-    .from('event_members')
-    .select('role')
-    .eq('event_id', event.id)
-    .eq('user_id', user.id)
-    .single()
-
-  if (!membership || !['owner', 'admin'].includes(membership.role)) {
-    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
-  }
-
-  // Get scheduled sessions count for the response
-  const { count: scheduledCount } = await supabase
-    .from('sessions')
-    .select('id', { count: 'exact', head: true })
-    .eq('event_id', event.id)
-    .eq('status', 'scheduled')
-    .not('time_slot_id', 'is', null)
-
-  // Update schedule_published_at
-  const now = new Date().toISOString()
-  const { error: updateError } = await supabase
-    .from('events')
-    .update({ schedule_published_at: now })
-    .eq('id', event.id)
-
-  if (updateError) {
-    console.error('Error publishing schedule:', updateError)
-    return NextResponse.json(
-      { error: 'Failed to publish schedule' },
-      { status: 500 }
-    )
-  }
-
-  // Let every member know the schedule is live. A notification failure must
-  // never undo a successful publish, so it is logged and reported, not thrown.
-  const notified = await notifySchedulePublished(supabase, event.id, slug, event.name, scheduledCount || 0)
-
-  // Same rule for the network: linked gatherings mirror the schedule, errors are reported, never thrown.
-  const atproto = event.actor_did ? await publishScheduleToNetwork(event.id, user.id) : undefined
-
-  return NextResponse.json({
-    success: true,
-    publishedAt: now,
-    scheduledSessions: scheduledCount || 0,
-    notified,
-    ...(atproto ? { atproto } : {}),
-    message: `Schedule published with ${scheduledCount || 0} scheduled sessions`,
-  })
 }
 
-// GET endpoint to check publish status
-export async function GET(
-  request: NextRequest,
-  { params }: { params: Promise<{ slug: string }> }
-) {
+export async function POST(request: Request, { params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params
+  const ctx = await requireOrganizer(request, slug, ROLES)
+  if (ctx instanceof Response) return ctx
+  const eventId = ctx.event.id
 
-  // Auth
-  const user = await getUserFromRequest(request)
-  if (!user) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  try {
+    const committed = await tx(async (t) => {
+      // Serialize concurrent publishes of the same event.
+      const [event] = await t<{ name: string; slug: string; actor_did: string | null }[]>`
+        select name, slug, actor_did from events where id = ${eventId} for update
+      `
+      const rows = await changeRows(eventId, t)
+      const { added, moved, removed } = classify(rows)
+      const [{ scheduled }] = await t<{ scheduled: number }[]>`
+        select count(*)::int as scheduled from sessions
+        where event_id = ${eventId} and status = 'scheduled' and time_slot_id is not null
+      `
+      const publishedAt = new Date().toISOString()
+      await t`update events set schedule_published_at = ${publishedAt} where id = ${eventId}`
+
+      const members = await t<{ user_id: string }[]>`select user_id from event_members where event_id = ${eventId}`
+      const membersNotified = await notify(t, {
+        eventId,
+        userIds: members.map((m) => m.user_id),
+        type: 'schedule_published',
+        title: `The schedule for ${event.name} is live`,
+        body: `${scheduled} session${scheduled === 1 ? ' is' : 's are'} on the schedule. Plan your days and add favorites.`,
+        actionUrl: `/e/${event.slug}/schedule`,
+        data: { scheduled_sessions: scheduled },
+      })
+
+      await t`
+        update sessions
+        set published_slot_id = case when status = 'scheduled' then time_slot_id else null end
+        where event_id = ${eventId}
+          and published_slot_id is distinct from (case when status = 'scheduled' then time_slot_id else null end)
+      `
+      return {
+        publishedAt,
+        scheduled,
+        actorDid: event.actor_did,
+        changes: { added: added.length, moved: moved.length, removed: removed.length },
+        notified: { members: membersNotified },
+      }
+    })
+
+    let network:
+      | { attempted: false }
+      | { attempted: true; published: number; failed: number; skipped: number; results: Array<{ kind: string; id: string; uri?: string; error?: string }>; error?: string }
+      = { attempted: false }
+    if (committed.actorDid) {
+      try {
+        const { publishSchedule } = await import('@/lib/atproto/publish')
+        const { results } = await publishSchedule({ eventId, callerUserId: ctx.viewer.accountId })
+        const failedIds = new Set(results.filter((r) => r.error).map((r) => r.id))
+        const skipped = results.filter((r) => r.skipped)
+        const publishedIds = new Set(results.filter((r) => r.kind === 'slot' && !r.error && !r.skipped).map((r) => r.id))
+        for (const id of failedIds) publishedIds.delete(id)
+        network = {
+          attempted: true,
+          published: publishedIds.size,
+          failed: failedIds.size,
+          skipped: skipped.length,
+          results: results.map((r) => ({
+            kind: r.kind,
+            id: r.id,
+            uri: r.uri,
+            error: r.error ?? (r.skipped === 'requires-approval'
+              ? 'Moved since it was published: move it in the schedule builder, which asks for approvals'
+              : r.skipped === 'proposal-withdrawn'
+                ? 'The proposer withdrew this proposal: cancel the session or fill its slot'
+                : r.skipped ? `Skipped (${r.skipped})` : undefined),
+          })),
+        }
+      } catch (e) {
+        console.error('[publish-schedule] network publish failed:', e instanceof Error ? e.message : e)
+        network = {
+          attempted: true,
+          published: 0,
+          failed: 0,
+          skipped: 0,
+          results: [],
+          error: 'The schedule is published here, but the network copy could not be written. Retry the publish.',
+        }
+      }
+    }
+
+    return json({
+      success: true,
+      publishedAt: committed.publishedAt,
+      scheduledSessions: committed.scheduled,
+      changes: committed.changes,
+      notified: committed.notified,
+      network,
+      message: `Schedule published with ${committed.scheduled} scheduled session${committed.scheduled === 1 ? '' : 's'}`,
+    })
+  } catch (e) {
+    return errorResponse(e, 'publish schedule')
   }
-
-  const supabase = await createAdminClient()
-
-  // Get event with schedule timestamps
-  const { data: event, error: eventError } = await supabase
-    .from('events')
-    .select('id, schedule_published_at, last_schedule_change_at')
-    .eq('slug', slug)
-    .single()
-
-  if (eventError || !event) {
-    return NextResponse.json({ error: 'Event not found' }, { status: 404 })
-  }
-
-  // Check admin permission
-  const { data: membership } = await supabase
-    .from('event_members')
-    .select('role')
-    .eq('event_id', event.id)
-    .eq('user_id', user.id)
-    .single()
-
-  if (!membership || !['owner', 'admin'].includes(membership.role)) {
-    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
-  }
-
-  // Get scheduled sessions count
-  const { count: scheduledCount } = await supabase
-    .from('sessions')
-    .select('id', { count: 'exact', head: true })
-    .eq('event_id', event.id)
-    .eq('status', 'scheduled')
-    .not('time_slot_id', 'is', null)
-
-  // Determine if there are unpublished changes
-  const hasUnpublishedChanges = !event.schedule_published_at || (
-    event.last_schedule_change_at &&
-    new Date(event.last_schedule_change_at) > new Date(event.schedule_published_at)
-  )
-
-  return NextResponse.json({
-    schedulePublishedAt: event.schedule_published_at,
-    lastScheduleChangeAt: event.last_schedule_change_at,
-    hasUnpublishedChanges,
-    scheduledSessions: scheduledCount || 0,
-  })
 }

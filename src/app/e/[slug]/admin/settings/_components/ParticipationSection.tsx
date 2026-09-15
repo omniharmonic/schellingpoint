@@ -96,7 +96,7 @@ export function ParticipationSection({ event }: { event: Event }) {
       {!unlimited ? <Field label="Proposals per person" htmlFor="max-proposals" className="pl-14" error={fieldError('max_proposals_per_user')}>
         <Input id="max-proposals" type="number" min={1} max={1000} value={maxProposals} onChange={e => { const v = parseInt(e.target.value, 10); if (!Number.isNaN(v) && v >= 0) setMaxProposals(v) }} className="max-w-[160px]" />
       </Field> : null}
-      <Toggle id="require-approval" checked={requireApproval} onChange={setRequireApproval} label="Require organizer approval" description="Proposals stay hidden until an organizer approves them for voting." />
+      <Toggle id="require-approval" checked={requireApproval} onChange={setRequireApproval} label="Require organizer approval" description="Off by default: proposals are listed as soon as they are written, and organizers decline by not scheduling. Turn on to review each one before it appears." />
     </div>
 
     <Field label="Suggested topics" htmlFor="topic-input" hint="Shown to proposers as prompts. Press Enter or use commas to add several." error={fieldError('suggested_topics')}>

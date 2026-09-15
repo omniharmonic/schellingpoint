@@ -1,142 +1,107 @@
-import { NextResponse } from 'next/server'
-import { createAdminClient } from '@/lib/supabase/server'
-import { getUserFromRequest } from '@/lib/api/getUser'
-import { publishCohost } from '@/lib/atproto/participant'
+import { tx, dbErrorResponse } from '@/lib/db'
+import { assertSameOrigin, requireViewer } from '@/lib/auth/viewer'
+import { notify } from '@/lib/notifications'
+import { json, jsonError } from '@/app/api/v1/sessions/_lib/access'
+import { publishCohostFor } from '@/app/api/v1/sessions/_lib/atproto'
 
-// POST /api/invite/[token]/accept — Accept a co-host invite
-export async function POST(
-  request: Request,
-  { params }: { params: Promise<{ token: string }> }
-) {
+/**
+ * POST /api/invite/[token]/accept — the second half of the co-host double opt-in.
+ *
+ * In one transaction: the invite is claimed (row-locked, pending, unexpired), the acceptor
+ * becomes a co-host, and the proposer is notified (`cohost_accepted`). After commit the
+ * co-host's own `schellingpoint.draft.cohost` is written into THEIR repository, strongRef'ing
+ * the proposal's current record (F) — custodial accounts always, Bluesky-door accounts once
+ * they have confirmed public linkage.
+ */
+class Refusal extends Error {
+  constructor(readonly status: number, message: string, readonly extra: Record<string, unknown> = {}) {
+    super(message)
+  }
+}
+
+export async function POST(request: Request, { params }: { params: Promise<{ token: string }> }) {
+  const bad = assertSameOrigin(request)
+  if (bad) return bad
   const { token } = await params
+  if (!/^[0-9a-f]{64}$/.test(token)) return jsonError(404, 'Invite not found')
+  const viewer = await requireViewer(request)
+  if (viewer instanceof Response) return jsonError(401, 'Sign in to accept this invitation')
 
-  if (!token || token.length !== 64) {
-    return NextResponse.json({ error: 'Invalid invite token' }, { status: 400 })
-  }
+  let accepted: { sessionId: string; eventSlug: string }
+  try {
+    accepted = await tx(async (t) => {
+      const invites = await t<{ id: string; session_id: string; event_id: string; status: string; expires_at: string }[]>`
+        select id, session_id, event_id, status, expires_at
+        from cohost_invites where token = ${token}
+        for update
+      `
+      const invite = invites[0]
+      if (!invite) throw new Refusal(404, 'Invite not found')
 
-  // Require authentication
-  const user = await getUserFromRequest(request)
-  if (!user) {
-    return NextResponse.json({ error: 'You must be signed in to accept an invite' }, { status: 401 })
-  }
+      const sessions = await t<{ host_id: string | null; title: string; slug: string; visibility: string; status: string }[]>`
+        select s.host_id, s.title, e.slug, e.visibility, e.status
+        from sessions s join events e on e.id = s.event_id
+        where s.id = ${invite.session_id} and s.event_id = ${invite.event_id}
+      `
+      const session = sessions[0]
+      if (!session) throw new Refusal(404, 'Session not found')
 
-  const admin = await createAdminClient()
+      const already = await t`select 1 from session_cohosts where session_id = ${invite.session_id} and user_id = ${viewer.accountId}`
+      if (already.length) {
+        throw new Refusal(409, 'You are already a co-host of this session', { session_id: invite.session_id, event_slug: session.slug })
+      }
+      if (invite.status !== 'pending') throw new Refusal(409, `This invite has been ${invite.status}`)
+      if (new Date(invite.expires_at).getTime() < Date.now()) {
+        await t`update cohost_invites set status = 'expired' where id = ${invite.id}`
+        return { expired: true as const }
+      }
+      if (session.host_id === viewer.accountId) throw new Refusal(400, 'You already host this session')
 
-  // Fetch the invite
-  const { data: invite, error: fetchError } = await admin
-    .from('cohost_invites')
-    .select('id, session_id, status, expires_at')
-    .eq('token', token)
-    .single()
+      // A co-host takes part in the gathering: public events admit them as attendees; a private
+      // event's organizers must have invited them to the event first.
+      const member = await t`select 1 from event_members where event_id = ${invite.event_id} and user_id = ${viewer.accountId}`
+      if (!member.length) {
+        if (session.visibility !== 'public' || session.status === 'draft') {
+          throw new Refusal(403, 'Ask an organizer to invite you to this event before accepting')
+        }
+        await t`
+          insert into event_members (event_id, user_id, role) values (${invite.event_id}, ${viewer.accountId}, 'attendee')
+          on conflict (event_id, user_id) do nothing
+        `
+      }
 
-  if (fetchError || !invite) {
-    return NextResponse.json({ error: 'Invite not found' }, { status: 404 })
-  }
-
-  // Validate status
-  if (invite.status !== 'pending') {
-    return NextResponse.json({ error: `Invite is ${invite.status}` }, { status: 400 })
-  }
-
-  // Check expiry
-  if (new Date(invite.expires_at) < new Date()) {
-    await admin.from('cohost_invites').update({ status: 'expired' }).eq('id', invite.id)
-    return NextResponse.json({ error: 'Invite has expired' }, { status: 400 })
-  }
-
-  // Load the session (and its event) so we can scope the co-host row and
-  // return a routable event slug to the client.
-  const { data: session } = await admin
-    .from('sessions')
-    .select('id, host_id, event_id, event:events(slug)')
-    .eq('id', invite.session_id)
-    .single()
-
-  if (!session) {
-    return NextResponse.json({ error: 'Session not found' }, { status: 404 })
-  }
-
-  const eventSlug: string | null = (session as any).event?.slug ?? null
-
-  // Check if user is already the primary host
-  if (session.host_id === user.id) {
-    return NextResponse.json({ error: 'You are already the primary host of this session' }, { status: 400 })
-  }
-
-  // Check if already a co-host
-  const { data: existing } = await admin
-    .from('session_cohosts')
-    .select('id')
-    .eq('session_id', invite.session_id)
-    .eq('user_id', user.id)
-    .maybeSingle()
-
-  if (existing) {
-    return NextResponse.json({
-      error: 'You are already a co-host of this session',
-      session_id: invite.session_id,
-      event_slug: eventSlug,
-    }, { status: 409 })
-  }
-
-  // Claim the invite first. The status guard makes this atomic against a
-  // concurrent accept, and checking the error means a failed transition can
-  // never leave a silently reusable "pending" invite behind.
-  const { data: claimed, error: claimError } = await admin
-    .from('cohost_invites')
-    .update({
-      status: 'accepted',
-      accepted_by: user.id,
-      accepted_at: new Date().toISOString(),
+      const order = await t<{ n: number }[]>`select count(*)::int as n from session_cohosts where session_id = ${invite.session_id}`
+      await t`
+        insert into session_cohosts (session_id, event_id, user_id, display_order)
+        values (${invite.session_id}, ${invite.event_id}, ${viewer.accountId}, ${order[0]?.n ?? 0})
+      `
+      await t`
+        update cohost_invites set status = 'accepted', accepted_by = ${viewer.accountId}, accepted_at = now()
+        where id = ${invite.id}
+      `
+      const acceptor = await t<{ display_name: string | null }[]>`select display_name from profiles where id = ${viewer.accountId}`
+      const who = acceptor[0]?.display_name?.trim() || 'Someone'
+      await notify(t, {
+        eventId: invite.event_id,
+        userIds: [session.host_id],
+        type: 'cohost_accepted',
+        title: 'Co-host invitation accepted',
+        body: `${who} is now co-hosting "${session.title}".`,
+        actionUrl: `/e/${session.slug}/sessions/${invite.session_id}`,
+        data: { session_id: invite.session_id, session_title: session.title },
+      })
+      return { sessionId: invite.session_id, eventSlug: session.slug }
+    }).then((r) => {
+      if ('expired' in r) throw new Refusal(410, 'This invite has expired')
+      return r
     })
-    .eq('id', invite.id)
-    .eq('status', 'pending')
-    .select('id')
-    .maybeSingle()
-
-  if (claimError) {
-    console.error('[invite/accept] failed to mark invite accepted:', claimError.message)
-    return NextResponse.json({ error: claimError.message }, { status: 500 })
-  }
-  if (!claimed) {
-    return NextResponse.json({ error: 'Invite is no longer pending' }, { status: 409 })
+  } catch (e) {
+    if (e instanceof Refusal) return jsonError(e.status, e.message, e.extra)
+    const mapped = dbErrorResponse(e)
+    if (mapped) return mapped
+    throw e
   }
 
-  // Add as co-host (event-scoped)
-  const { error: insertError } = await admin
-    .from('session_cohosts')
-    .insert({
-      session_id: invite.session_id,
-      user_id: user.id,
-      event_id: session.event_id,
-    })
-
-  if (insertError) {
-    // Best-effort rollback so the invite can be retried
-    await admin
-      .from('cohost_invites')
-      .update({ status: 'pending', accepted_by: null, accepted_at: null })
-      .eq('id', invite.id)
-    return NextResponse.json({ error: insertError.message }, { status: 500 })
-  }
-
-  // ATProto: if the acceptor has a linked DID and the author has published the
-  // proposal, write the co-host's own `schellingpoint.draft.cohost` record.
-  // Best-effort: a network failure never undoes the acceptance.
-  let atproto: { uri?: string; error?: string } | undefined
-  const [{ data: acceptorProfile }, { data: sessionRefs }] = await Promise.all([
-    admin.from('profiles').select('did').eq('id', user.id).maybeSingle(),
-    admin.from('sessions').select('proposal_uri, proposal_cid').eq('id', invite.session_id).maybeSingle(),
-  ])
-  if (acceptorProfile?.did && sessionRefs?.proposal_uri && sessionRefs?.proposal_cid) {
-    try {
-      const result = await publishCohost({ sessionId: invite.session_id, userId: user.id })
-      atproto = { uri: result.uri }
-    } catch (e) {
-      console.error('[invite/accept] atproto cohost publish failed:', e)
-      atproto = { error: e instanceof Error ? e.message : 'publish failed' }
-    }
-  }
-
-  return NextResponse.json({ session_id: invite.session_id, event_slug: eventSlug, ...(atproto ? { atproto } : {}) })
+  const atproto = await publishCohostFor(accepted.sessionId, viewer.accountId)
+  return json({ session_id: accepted.sessionId, event_slug: accepted.eventSlug, atproto })
 }

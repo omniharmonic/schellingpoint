@@ -1,29 +1,19 @@
-import { createAdminClient } from '@/lib/supabase/server'
-import { validateApiKey, resolvePartnerEvent } from '@/lib/api/auth'
-import { apiSuccess, unauthorized, badRequest, methodNotAllowed } from '@/lib/api/response'
+import { resolvePublicEvent } from '@/lib/api/auth'
+import { methodNotAllowed } from '@/lib/api/response'
+import { publicJson, publishedVenues } from '../schedule/public-read'
 
-const VENUE_FIELDS = 'id,name,slug,capacity,features,style,address,notes,is_primary,created_at'
+/**
+ * GET /api/v1/venues?event=<slug> — the gathering's published venues
+ * (`schellingpoint.draft.venue` records). Public; no key. Addresses are coarsened to locality,
+ * region and country; organizer notes are not served.
+ */
+export const dynamic = 'force-dynamic'
 
 export async function GET(request: Request) {
-  if (!validateApiKey(request)) return unauthorized()
-
-  const supabase = await createAdminClient()
-
-  const resolved = await resolvePartnerEvent(request, supabase)
+  const resolved = await resolvePublicEvent(request)
   if ('error' in resolved) return resolved.error
-
-  const { data, error } = await supabase
-    .from('venues')
-    .select(VENUE_FIELDS)
-    .eq('event_id', resolved.event.id)
-    .order('is_primary', { ascending: false })
-    .order('name')
-
-  if (error) {
-    return badRequest(error.message)
-  }
-
-  return apiSuccess(data, data?.length ?? 0)
+  const venues = await publishedVenues(resolved.event.id)
+  return publicJson(venues, venues.length)
 }
 
 export async function POST() { return methodNotAllowed() }

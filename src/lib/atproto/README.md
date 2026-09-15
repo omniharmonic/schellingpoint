@@ -1,72 +1,95 @@
 # `src/lib/atproto`
 
-The ATProto foundation for Schelling Point: lexicons, record builders, identity,
-OAuth, custody, the gathering-actor port and a public record index. Design source:
-`docs/ATPROTO_MIGRATION_SPEC.md` (§3–§5, §8). Reference implementation: Free School.
+The ATProto layer of unconference.events: our own PDS (`pds.unconference.events`; locally
+`http://localhost:2583`, handles `*.test`), custodial and OAuth identities, gathering actors, and a
+Postgres AppView. Design sources: `docs/ATPROTO_MIGRATION_SPEC.md` (§3, §4, §6, §8, §9, §10),
+`docs/ATPROTO_APPVIEW_PLAN.md` (§6 items 4–10, 16–22, 27, 31; §7.2). Reference implementation:
+Free School (`packages/school-actor`, `apps/appview/src/lib/{school-actors,events,membership-claims,tls-check}.ts`).
 
-Two rules bind everything here:
+Three rules bind everything here:
 
-- **R9** — no public record may name a DID its holder did not write. Enforced by
-  `assertNoForeignDid` (`records.ts`) and by the actor port before every write.
-- **Sidecar** — never add a field to a borrowed lexicon. `buildSessionCalendarEvent`
-  emits only what `community.lexicon.calendar.event` defines; everything else rides in
-  `schellingpoint.draft.*` sidecars that strongRef it. `assertNoUnknownFields` checks it.
+- **R9** — no public record names a DID its holder did not write. `assertNoForeignDid` runs before
+  every gathering write and every participant write. The single exemption is a
+  `coop.lexicon.membership` role claim whose subject passed all three gates.
+- **Sidecar** — never add a field to a borrowed lexicon (`community.lexicon.*`, `coop.lexicon.*`,
+  `freeschool.draft.*`). `assertNoUnknownFields` runs on every borrowed write.
+- **Every write as a gathering goes through its actor port** — validated, R9-checked, authorised,
+  audited (`at_audit`, approvals included), CAS'd, and upserted into `at_records` (read-your-writes).
 
 ## Modules
 
-| Module | Server-only | What it does |
-|---|---|---|
-| `nsids.ts` | no | `NSID` map of every collection, `SCHELLINGPOINT_COLLECTIONS`, `INDEXED_COLLECTIONS`, `EVENT_MODE`/`EVENT_STATUS`/`RSVP_STATUS` fragment tokens. |
-| `types.ts` | no | TS shape of every record (ours and borrowed) and `StrongRef`. |
-| `rkey.ts` | no | `tid()` (monotonic 13-char TID), `deterministicRkey(...parts)` (13 chars of base32 SHA-256, pure TS), `SELF_RKEY`. |
-| `records.ts` | no | Pure builders `build*Record` / `buildSessionCalendarEvent` / `buildEventConfig` / `buildTallyRecord` (k-suppression) etc., plus `assertNoForeignDid`. Plain inputs, no I/O. |
-| `validate.ts` | node (not `server-only`, tests import it) | Loads every JSON under `lexicons/` into `@atproto/lexicon`. `assertValidRecord`, `isValidRecord`, `lexiconRecordProperties`, `assertNoUnknownFields`. |
-| `config.ts` | yes | Env readers, `oauthMode()` (`confidential` on https + real host, else `loopback`), `isAtprotoConfigured()`. |
-| `crypto.ts` | yes | AES-256-GCM `wrapSecret` / `unwrapSecret` under `ATPROTO_CUSTODY_KEY`, plus bytea text helpers for PostgREST. |
-| `identity.ts` | yes | `resolveHandle`, `resolveDidDoc` (`@atproto/identity` + XRPC fallback), `atUri`, `parseAtUri`. |
-| `oauth.ts` | yes | `getOAuthClient()` singleton (`NodeOAuthClient`, Supabase-backed state/session stores, ES256 key in `at_oauth_client_key`), `clientMetadata`, `jwks`, `authorizeUrl`, `handleCallback`, `restoreOAuthSession`, `revokeOAuthSession`. |
-| `session.ts` | yes | `sp_at_session` HttpOnly cookie: `createAtSession`, `readAtSession`, `destroyAtSession`, header helpers. |
-| `agent.ts` | yes | `agentForDid` / `agentForUser` / `withAgentForDid` — app-password (custodied, cached, re-login on 401) or OAuth session → `Agent`. |
-| `write.ts` | yes | `putRecord` (local validation, `validate:false` on the wire, optional CAS), `deleteRecord`, unauthenticated `getRecord` / `listRecords` via the repo's own PDS, 2-attempt retry on network errors. |
-| `actor.ts` | yes | `GatheringActorPort`: `putRecordAsGathering`, `deleteRecordAsGathering`, `authorizeGatheringAction`. Authorises via `event_members`, validates + R9-checks, audits every call in `at_audit`. `DESTRUCTIVE_ACTIONS` need owner/admin. |
-| `index-store.ts` | yes | `at_records` index: `upsertIndexedRecord`, `deleteIndexedRecord`, `getIndexedRecord`, `listIndexed`, `getCursor`, `setCursor`. |
-| `index.ts` | yes | Re-exports everything. Client code must import the four isomorphic modules directly. |
-
-`lexicons/` at the repo root holds the JSON: `schellingpoint/draft/*` (ours, ten
-records), `vendor/*` (copied verbatim from Free School: `community.lexicon.*`,
-`coop.lexicon.*`, `freeschool/{policy,approval}.json`) and `atproto/` (the
-`com.atproto.repo.strongRef` def every `ref` needs). `npm run lexicons:validate`
-loads them all and fails on any parse or unresolved-ref error.
+| Module | What it does |
+|---|---|
+| `nsids.ts`, `types.ts`, `rkey.ts`, `records.ts`, `recurrence.ts` | Isomorphic. NSIDs and collection sets (`GATHERING_COLLECTIONS`, `PARTICIPANT_COLLECTIONS`, `JETSTREAM_COLLECTIONS`), record types, TIDs and `deterministicRkey`, pure builders (incl. `venueLocation` coarsening, listings, membership claims + `membershipClaimRkey`, approvals, time preferences, series/occurrence, `decideListingEdit`, `routesOnTags`), RRULE expansion. |
+| `validate.ts` | Loads `lexicons/**` into `@atproto/lexicon`; `assertValidRecord`, `assertNoUnknownFields`. |
+| `identity.ts` | Handle/DID resolution. A DID hosted on OUR PDS is answered by `describeOwnRepo` (internal URL); foreign DIDs via PLC (`ATPROTO_PLC_URL` optional). |
+| `write.ts` | Repo I/O: `putRecord`/`deleteRecord` (local validation, `swapRecord` only when passed), unauthenticated `getRecord`/`listRecords`/`listAllRecords` (100-row pages, cursor-followed), `isInvalidSwap`. |
+| `index-store.ts` | `at_records` on `sql`; cursors in `at_sync_cursor`, `advanceCursor` is monotonic. |
+| `actor.ts` | `GatheringActorPort` + `AppCustodyGatheringActor` (dependency-injected): MIN_ROLE per action, destructive threshold, role-claim gates, audit, read-your-writes. |
+| `actors.ts` | The registry: `actorForEvent` (LRU 64 + TTL, lazy credential), `CredentialGatheringSession` (one re-login, persistent auth failure → evict + `disabled_at` after 3), `putRecordAsGathering`/`deleteRecordAsGathering`, `mintGatheringActor`, `gatheringActorHealth` (organiser banner), `resetGatheringCredential`, `deriveGatheringRole`, `configureGatheringActors` (test seam). |
+| `publish.ts` | Gathering publishing: `publishGathering`, `publishPolicy`, `setPolicyThresholds`, `publishVenues`, `publishTracks`, `publishSlotGrids`, `publishSchedule`, `republishSession`, and the destructive `moveSession`/`cancelSession`. CAS with one re-read retry. |
+| `approvals.ts` | `requestSessionMove`, `requestSessionCancel`, `requestListingRemoval`, `approveRequest`, `withdrawApproval`, `listApprovalRequests`. Approvals are `freeschool.draft.approval` records in each organiser's own repo. |
+| `participant.ts` | Records in a person's own repo: proposal, co-host, endorsement, opt-in RSVP, opt-in time preference; `publishingIdentity` (OAuth linkage gate). |
+| `drift.ts` | cid drift and withdrawal flags + `proposal_changed` notifications; `flaggedSessions`. |
+| `listings.ts` | `coop.lexicon.event.listing` routing (sticky removal), `restoreListing`, `applyListingRemoval`, peers (`upsertPeer`, `removePeer`, `routePeerListings`). |
+| `role-claims.ts` | Triple-gated `coop.lexicon.membership`: `syncRoleClaim`, `setRoleClaimOptIn`, `syncRoleClaimsForEvent`. |
+| `skills.ts` | The Free School skills authority's taxonomy cached in `at_records` (24 h): `ensureSkillsFresh`, `searchSkills`, `getSkills`, `validateSkillUris`. |
+| `series.ts` | Recurring gatherings: `createGatheringSeries`, `materializeSeries`, `materializeAllSeries`. |
+| `ingest.ts` | `ingestRecord` (relevance filter, validation, per-record error boundary), Jetstream frames, `reconcileRepo`/`reconcileAll` (our PDS via `listRepos`, OAuth accounts, actors, peers; deletion diff), `persistJetstreamCursor`. |
+| `hosts.ts` | `resolveGatheringHost(host)` for middleware; `allowCertificateFor(domain)` — the on-demand TLS gate. |
+| `http.ts` | `atprotoErrorResponse(e)` — one error → JSON mapping for every route. |
+| `config.ts`, `crypto.ts`, `agent.ts`, `oauth.ts`, `session.ts`, `bridge.ts`, `bsky-profile.ts` | Wave-0 identity (shared, read-only for this package). |
+| `tally.ts` | Package C: the k-suppressed tally, written through `publish.ts`. |
 
 ## Who writes what, where
 
 | Record | Repo | Through |
 |---|---|---|
-| `gathering` (`rkey=self`), `policy`, `venue`, `track`, `slotGrid`, `slot`, `tally`, the gathering's and each scheduled session's `calendar.event` + `event.config`, listings, stub proposals | gathering actor | `actor.ts` only |
-| `proposal`, `timePreference` | the proposer | `agentForUser` + `write.ts` |
-| `cohost`, `endorsement`, opt-in `rsvp` | the co-host / participant / attendee | `agentForUser` + `write.ts` |
+| `gathering@self`, `freeschool.draft.policy`, `venue`, `track`, `slotGrid`, calendar events + configs (gathering and sessions), `slot`, `tally`, listings, role claims, stub proposals, series/occurrences | gathering actor | `actors.ts` port only |
+| `proposal`, `timePreference` (opt-in) | the proposer | `participant.ts` |
+| `cohost`, `endorsement`, `community.lexicon.calendar.rsvp` (opt-in) | the co-host / participant / attendee | `participant.ts` |
+| `freeschool.draft.approval` | each approving organiser | `approvals.ts` |
+
+## HTTP
+
+| Route | Auth |
+|---|---|
+| `GET/POST/DELETE /api/v1/events/[slug]/admin/atproto` (status, mint, link, reset-credential, set-policy, peers, restore-listing, role claims, series) | organisers |
+| `POST /api/v1/events/[slug]/admin/atproto/publish` `{ what }` | owner/admin |
+| `POST /api/v1/events/[slug]/admin/atproto/sessions/[id]` `{ action: republish \| move \| cancel }` | owner/admin |
+| `GET/POST /api/v1/events/[slug]/approvals` | owner/admin |
+| `GET/POST /api/v1/events/[slug]/sessions/[id]/atproto` | public read / signed-in writes to own repo |
+| `GET /api/atproto/records?event=` | public (private/draft gatherings: members only) |
+| `GET /api/atproto/skills?q=` / `?uris=` | public |
+| `GET /api/atproto/sync` | `Bearer $CRON_SECRET` |
+| `GET /internal/tls-check?domain=` | container-local (Caddy `ask`) |
 
 ## Environment
 
-| Variable | Required | Purpose |
-|---|---|---|
-| `NEXT_PUBLIC_APP_URL` | yes | Public origin; decides `oauthMode()` and the `Secure` cookie flag. |
-| `ATPROTO_SESSION_SECRET` | yes | HMAC key for the session cookie (32+ chars). |
-| `ATPROTO_CUSTODY_KEY` | yes | 64 hex chars; AES-256-GCM key for `at_credentials.wrapped`. |
-| `ATPROTO_OAUTH_PRIVATE_JWK` | no | Pre-provisioned ES256 private JWK; otherwise generated and stored in `at_oauth_client_key`. |
-| `ATPROTO_JETSTREAM_URL` | no | Default `wss://jetstream2.us-east.bsky.network/subscribe`. |
-| `ATPROTO_DEFAULT_PDS_URL` | no | Default `https://bsky.social`; PDS for custodial accounts. |
-| `ATPROTO_HANDLE_RESOLVER` | no | Default `https://bsky.social`; XRPC fallback for handle → DID. |
+| Variable | Purpose |
+|---|---|
+| `PDS_URL` / `PDS_INTERNAL_URL` / `PDS_ADMIN_PASSWORD` / `PDS_HANDLE_DOMAIN` | Our PDS (public URL named by DID documents; internal URL for all I/O). |
+| `ATPROTO_SESSION_SECRET`, `ATPROTO_CUSTODY_KEY` | Session cookie HMAC; AES-256-GCM custody key. |
+| `ATPROTO_PLC_URL` | Optional PLC directory for foreign DIDs (default plc.directory). |
+| `ATPROTO_JETSTREAM_URL` | Jetstream for `scripts/atproto-indexer.ts`. |
+| `SKILLS_AUTHORITY_DID` | Default `did:plc:yekh7akcatgn7o7foedjpgj4` (Free School skills). |
+| `GATHERING_ACTOR_CACHE_TTL_MS` | Port cache TTL (default 30 min). |
+| `CRON_SECRET` | Scheduler bearer for `/api/atproto/sync`. |
 
-## Local development notes
+## Tables (migration `db/migrations/0004_atproto_layer.sql`)
 
-- In loopback mode the OAuth redirect is `http://127.0.0.1:<port>/oauth/callback`
-  (the loopback client id requires an IP literal), so the session cookie lands on the
-  `127.0.0.1` origin — open the dev server there, not on `localhost`, when testing OAuth.
-- `validate.ts` reads `lexicons/` from `process.cwd()` at module init. On Vercel the
-  directory must be traced into the function bundle; if a deploy ever reports the
-  directory missing, add `lexicons/**` to `outputFileTracingIncludes` in `next.config.js`.
-- Tables: `at_oauth_state`, `at_oauth_session`, `at_oauth_client_key`, `at_sessions`,
-  `at_credentials`, `at_audit`, `at_sync_cursor`, `at_slot_grids` (RLS on, no policies →
-  service role only) and `at_records` (public SELECT). Migration
-  `supabase/migrations/20260916000001_atproto_foundation.sql`.
+`approval_requests`, `approval_request_approvals`, `listings`, `peers`, `role_claims`, `time_preferences`,
+`at_repo_state`, `at_series`, `at_occurrences` (RLS on, no policies); columns `sessions.{skill_uris,
+public_place, proposal_drift_cid, proposal_drift_at, proposal_withdrawn_at, cancelled_at}`,
+`venues.{locality, region, postal_code, country, is_private_residence}`,
+`at_credentials.{consecutive_failures, disabled_at}`, `at_audit.{approvals, policy_source}`.
+Policy thresholds live on `events.policy_thresholds` (0007), track skills on `tracks.skill_uris` (0006),
+the role-claim opt-in on `event_members.public_role` (0008).
+
+## Scripts and tests
+
+- `npm run atproto:audit` — the spec §9 privacy audit (index AND live PDS). Release blocker.
+- `npm run atproto:indexer` — Jetstream consumer (relevance-filtered, monotonic cursor).
+- `tests/atproto-e2e.spec.ts` — the whole flow against the real local PDS; `atproto-publish`
+  (port/registry failure paths, revoked credential isolation), `atproto-participant`, `atproto-ingest`,
+  `atproto-records`, `atproto-auth`.

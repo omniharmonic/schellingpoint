@@ -1,100 +1,60 @@
 import type { Metadata } from 'next'
 import { getEventBySlug, getEventAccessReason } from '@/lib/events'
 import { EventAccessGate } from '@/components/EventAccessGate'
-import { createAccessClient } from '@/lib/supabase/server'
+import { loadEventAccess, isUuid } from '@/app/api/v1/sessions/_lib/access'
+import { getSession } from '@/app/api/v1/sessions/_lib/read'
+import { hostByline } from '@/app/api/v1/sessions/_lib/byline'
 import { SessionDetailClient } from './SessionDetailClient'
 
 interface SessionPageProps {
   params: Promise<{ slug: string; id: string }>
 }
 
-// Fetch session data for metadata generation (server-side)
-async function getSession(id: string, eventId: string) {
-  const db = await createAccessClient()
-  const { data } = await db.from('sessions')
-    .select('*,host:profiles!host_id(id,display_name,bio,avatar_url,affiliation,building,telegram,ens,interests),cohosts:session_cohosts(user_id,display_order,profile:profiles(id,display_name,bio,avatar_url,affiliation,building,telegram,ens,interests)),track:tracks(id,name,color),venue:venues(*),time_slot:time_slots(*)')
-    .eq('id', id).eq('event_id', eventId).maybeSingle()
-  return data
+/** The session as the current viewer may see it (same R9 filter as the API). */
+async function loadSession(slug: string, id: string) {
+  if (!isUuid(id)) return null
+  const access = await loadEventAccess(undefined, slug)
+  if (access instanceof Response) return null
+  return getSession(access, id)
 }
 
-// Generate dynamic metadata for social sharing
 export async function generateMetadata({ params }: SessionPageProps): Promise<Metadata> {
   const { slug, id } = await params
   const event = await getEventBySlug(slug)
-
   if (!event) {
-    return {
-      title: 'Event Not Found - Schelling Point',
-      description: 'This event could not be found.',
-    }
+    return { title: 'Event Not Found', description: 'This event could not be found.' }
   }
-
-  const session = await getSession(id, event.id)
-
+  const session = await loadSession(slug, id)
   if (!session) {
-    return {
-      title: 'Session Not Found - Schelling Point',
-      description: 'This session could not be found.',
-    }
+    return { title: `Session Not Found - ${event.name}`, description: 'This session could not be found.' }
   }
 
-  // Build a concise description for social cards
-  const primaryHostName = session.host?.display_name || session.host_name || 'Anonymous'
-  const cohostNames = (session.cohosts || [])
-    .map((c: any) => c.profile?.display_name)
-    .filter(Boolean)
-  const allHostNames = [primaryHostName, ...cohostNames]
-  const hostName = allHostNames.length > 1
-    ? allHostNames.slice(0, -1).join(', ') + ' & ' + allHostNames[allHostNames.length - 1]
-    : primaryHostName
+  const byline = hostByline({ ...session, listed_as: undefined })
   const trackName = session.track?.name ? ` | ${session.track.name}` : ''
-  const format = session.format ? session.format.charAt(0).toUpperCase() + session.format.slice(1) : ''
-
-  // Truncate description to ~155 chars for optimal display
+  const format = session.format ? session.format.charAt(0).toUpperCase() + session.format.slice(1) : 'Session'
   const rawDescription = session.description || `Join this session at ${event.name}`
-  const truncatedDescription = rawDescription.length > 155
-    ? rawDescription.substring(0, 152) + '...'
-    : rawDescription
-
-  const title = `${session.title} - ${event.name} | Schelling Point`
-  const description = `${format} by ${hostName}${trackName}. ${truncatedDescription}`
-
-  // Build the canonical URL
-  const siteUrl = process.env.NEXT_PUBLIC_APP_URL ||
-    (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000')
+  const truncated = rawDescription.length > 155 ? `${rawDescription.substring(0, 152)}...` : rawDescription
+  const description = `${format} · ${byline}${trackName}. ${truncated}`
+  const siteUrl = (process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3001').replace(/\/+$/, '')
   const sessionUrl = `${siteUrl}/e/${slug}/sessions/${id}`
+  const image = event.bannerUrl || '/og-image.png'
 
   return {
-    title,
+    title: `${session.title} - ${event.name}`,
     description,
     openGraph: {
       title: session.title,
       description,
       url: sessionUrl,
-      siteName: `${event.name} | Schelling Point`,
-      images: event.bannerUrl ? [
-        {
-          url: event.bannerUrl,
-          width: 1200,
-          height: 630,
-          alt: `${session.title} - ${event.name} Session`,
-        },
-      ] : [
-        {
-          url: '/og-image.png',
-          width: 1200,
-          height: 630,
-          alt: `${session.title} - ${event.name} Session`,
-        },
-      ],
+      siteName: event.name,
+      images: [{ url: image, width: 1200, height: 630, alt: `${session.title} - ${event.name}` }],
       type: 'article',
-      authors: allHostNames,
     },
     twitter: {
       card: 'summary_large_image',
       title: session.title,
       description,
-      images: event.bannerUrl ? [event.bannerUrl] : ['/og-image.png'],
+      images: [image],
     },
   }
 }
@@ -102,13 +62,9 @@ export async function generateMetadata({ params }: SessionPageProps): Promise<Me
 export default async function SessionDetailPage({ params }: SessionPageProps) {
   const { slug, id } = await params
   const event = await getEventBySlug(slug)
-
   if (!event) {
     return <EventAccessGate reason={await getEventAccessReason(slug)} />
   }
-
-  // Fetch session data server-side for initial render
-  const session = await getSession(id, event.id)
-
+  const session = await loadSession(slug, id)
   return <SessionDetailClient sessionId={id} initialSession={session} />
 }

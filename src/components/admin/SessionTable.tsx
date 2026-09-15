@@ -10,6 +10,8 @@ import {
   ChevronUp,
   ArrowUpDown,
   ThumbsUp,
+  AlertTriangle,
+  Globe,
   Clock,
   MapPin,
   ExternalLink,
@@ -17,41 +19,17 @@ import {
   Mail,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { hostLabel, type AdminSession, type SessionResult } from './types'
 
-type SessionStatus = 'pending' | 'approved' | 'rejected' | 'scheduled'
-type SortField = 'votes' | 'title' | 'duration' | 'created_at'
-type SortDirection = 'asc' | 'desc'
+type Session = AdminSession
 
-export interface Session {
-  id: string
-  title: string
-  description: string | null
-  format: string
-  duration: number
-  host_name: string | null
-  topic_tags: string[] | null
-  total_votes: number
-  status: SessionStatus
-  time_preferences: string[] | null
-  venue_id: string | null
-  time_slot_id: string | null
-  host_notified_at: string | null
-  track_id: string | null
-  created_at: string
-  venue?: { id: string; name: string } | null
-  time_slot?: { id: string; label: string; start_time: string } | null
-  track?: { id: string; name: string; color: string } | null
-  cohosts?: { user_id: string }[] | null
-}
-
-export interface Track {
-  id: string
-  name: string
-  color: string
-}
+export type SortField = 'votes' | 'title' | 'duration' | 'created_at'
+export type SortDirection = 'asc' | 'desc'
 
 interface SessionTableProps {
   sessions: Session[]
+  /** Voting results, only after the round closes (organizer-only). Hidden entirely while voting is open. */
+  results?: Record<string, SessionResult> | null
   eventSlug: string
   selectedIds: Set<string>
   onSelectionChange: (ids: Set<string>) => void
@@ -63,6 +41,7 @@ interface SessionTableProps {
 
 export function SessionTable({
   sessions,
+  results = null,
   eventSlug,
   selectedIds,
   onSelectionChange,
@@ -143,14 +122,14 @@ export function SessionTable({
   return (
     <div className="border rounded-lg overflow-hidden">
       {/* Table Header */}
-      <div className="bg-muted/50 border-b px-4 py-3 hidden sm:grid sm:grid-cols-[auto_1fr_auto_auto_auto] gap-4 items-center">
+      <div className={cn('bg-muted/50 border-b px-4 py-3 hidden sm:grid gap-4 items-center', results ? 'sm:grid-cols-[auto_1fr_auto_auto_auto]' : 'sm:grid-cols-[auto_1fr_auto_auto]')}>
         <Checkbox
           checked={allSelected || (someSelected ? 'indeterminate' : false)}
           onCheckedChange={handleSelectAll}
           aria-label="Select all"
         />
         <SortHeader field="title">Session</SortHeader>
-        <SortHeader field="votes">Votes</SortHeader>
+        {results && <SortHeader field="votes">Votes</SortHeader>}
         <SortHeader field="duration">Duration</SortHeader>
         <span className="text-xs font-medium text-muted-foreground">Status</span>
       </div>
@@ -176,7 +155,7 @@ export function SessionTable({
               onClick={() => onRowClick?.(session)}
             >
               {/* Main Row */}
-              <div className="grid grid-cols-[auto_1fr_auto] sm:grid-cols-[auto_1fr_auto_auto_auto] gap-4 items-center">
+              <div className={cn('grid grid-cols-[auto_1fr_auto] gap-4 items-center', results ? 'sm:grid-cols-[auto_1fr_auto_auto_auto]' : 'sm:grid-cols-[auto_1fr_auto_auto]')}>
                 {/* Checkbox */}
                 <div onClick={(e) => handleSelectOne(session.id, e)}>
                   <Checkbox
@@ -196,9 +175,9 @@ export function SessionTable({
                         variant="outline"
                         className="text-xs"
                         style={{
-                          borderColor: session.track.color,
-                          color: session.track.color,
-                          backgroundColor: `${session.track.color}10`,
+                          borderColor: session.track.color ?? undefined,
+                          color: session.track.color ?? undefined,
+                          backgroundColor: session.track.color ? `${session.track.color}10` : undefined,
                         }}
                       >
                         {session.track.name}
@@ -206,22 +185,35 @@ export function SessionTable({
                     )}
                   </div>
                   <h4 className="font-medium line-clamp-1">{session.title}</h4>
-                  {session.host_name && (
+                  {hostLabel(session) && (
                     <p className="text-sm text-muted-foreground line-clamp-1">
-                      by {session.host_name}
+                      {session.host_id ? `by ${hostLabel(session)}` : hostLabel(session)}
                     </p>
+                  )}
+                  {(session.proposal_withdrawn_at || session.proposal_drift_at || session.network_published) && (
+                    <div className="flex flex-wrap gap-1.5 pt-0.5">
+                      {session.network_published && (
+                        <Badge variant="outline" className="text-xs gap-1"><Globe className="h-3 w-3" />Published</Badge>
+                      )}
+                      {session.proposal_withdrawn_at ? (
+                        <Badge variant="outline" className="text-xs gap-1 border-destructive/40 text-destructive"><AlertTriangle className="h-3 w-3" />Withdrawn by proposer</Badge>
+                      ) : session.proposal_drift_at ? (
+                        <Badge variant="outline" className="text-xs gap-1 border-amber-500/50 text-amber-700 dark:text-amber-400"><AlertTriangle className="h-3 w-3" />Edited after scheduling</Badge>
+                      ) : null}
+                    </div>
                   )}
                 </div>
 
-                {/* Votes - hidden on mobile, shown inline */}
-                <div className="hidden sm:flex items-center gap-1 text-sm">
-                  <ThumbsUp className="h-3.5 w-3.5 text-primary" />
-                  <span className="font-medium">{session.total_votes}</span>
-                </div>
+                {results && (
+                  <div className="hidden sm:flex items-center gap-1 text-sm" title="Votes in the closed round">
+                    <ThumbsUp className="h-3.5 w-3.5 text-primary" />
+                    <span className="font-medium">{results[session.id]?.votes ?? 0}</span>
+                  </div>
+                )}
 
                 {/* Duration - hidden on mobile */}
                 <div className="hidden sm:block text-sm text-muted-foreground">
-                  {session.duration}m
+                  {session.duration ? `${session.duration}m` : '—'}
                 </div>
 
                 {/* Status & Expand */}
@@ -238,11 +230,12 @@ export function SessionTable({
                     {session.status}
                   </Badge>
 
-                  {/* Mobile: Show votes inline */}
-                  <span className="sm:hidden text-xs text-muted-foreground flex items-center gap-1">
-                    <ThumbsUp className="h-3 w-3" />
-                    {session.total_votes}
-                  </span>
+                  {results && (
+                    <span className="sm:hidden text-xs text-muted-foreground flex items-center gap-1">
+                      <ThumbsUp className="h-3 w-3" />
+                      {results[session.id]?.votes ?? 0}
+                    </span>
+                  )}
 
                   <Button
                     variant="ghost"
@@ -252,6 +245,8 @@ export function SessionTable({
                       setExpandedId(isExpanded ? null : session.id)
                     }}
                     className="h-8 w-8 p-0"
+                    aria-label={isExpanded ? `Collapse ${session.title}` : `Expand ${session.title}`}
+                    aria-expanded={isExpanded}
                   >
                     {isExpanded ? (
                       <ChevronUp className="h-4 w-4" />
@@ -274,7 +269,7 @@ export function SessionTable({
                   {session.time_slot && (
                     <span className="flex items-center gap-1">
                       <Clock className="h-3.5 w-3.5" />
-                      {session.time_slot.label}
+                      {session.time_slot.label || new Date(session.time_slot.start_time).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })}
                     </span>
                   )}
                   {session.host_notified_at ? (
@@ -297,6 +292,27 @@ export function SessionTable({
                   {session.description && (
                     <p className="text-sm text-muted-foreground">
                       {session.description}
+                    </p>
+                  )}
+
+                  {session.rejection_reason && session.status === 'rejected' && (
+                    <p className="text-sm text-muted-foreground">Reason given: {session.rejection_reason}</p>
+                  )}
+
+                  {session.listed_host_name && !session.host_id && (
+                    <p className="text-xs text-muted-foreground">
+                      Listed as {session.listed_host_name} (unclaimed). This name is visible to organizers only and is never published.
+                    </p>
+                  )}
+
+                  {session.proposal_withdrawn_at && (
+                    <p role="status" className="text-sm text-destructive">
+                      The proposer withdrew this proposal. Cancel the session or fill its slot; their record cannot be restored.
+                    </p>
+                  )}
+                  {!session.proposal_withdrawn_at && session.proposal_drift_at && (
+                    <p role="status" className="text-sm text-amber-700 dark:text-amber-400">
+                      The proposer edited this session after it was scheduled. Review the change and re-publish the schedule.
                     </p>
                   )}
 

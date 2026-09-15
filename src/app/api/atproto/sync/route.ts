@@ -1,51 +1,32 @@
 /**
- * GET /api/atproto/sync — reconciliation (Vercel cron, hourly; see vercel.json).
+ * GET /api/atproto/sync — reconciliation job (scheduler, hourly).
  *
- * `listRecords` every gathering actor and every linked profile, upsert what
- * they hold, delete what they no longer hold. This is the at-least-once safety
- * net behind the Jetstream consumer and the only index path when that
- * consumer is not deployed (docs/ATPROTO_IMPLEMENTATION.md §4).
+ * `listRecords` every repo we follow (discovered with `com.atproto.sync.listRepos` on our PDS,
+ * plus linked OAuth accounts, gathering actors and peers), upsert what they hold, remove what they
+ * no longer hold, route peer listings, refresh the skills cache. The at-least-once safety net
+ * behind the Jetstream consumer, and the only index path where the consumer is not running.
  *
- * Auth mirrors /api/notifications/dispatch: Vercel Cron sends
- * `Authorization: Bearer $CRON_SECRET`; a wrong bearer is 401, an unset secret
- * is 503 outside development.
+ * `Authorization: Bearer $CRON_SECRET`; 401 otherwise (allowed without the secret in development).
+ * The response carries counts and error summaries, never record bodies.
  */
-import { NextRequest, NextResponse } from 'next/server'
+import { authorizeCron } from '@/lib/notifications/cron'
 import { reconcileAll } from '@/lib/atproto/ingest'
 
+export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 export const maxDuration = 300
 
-function verifyAuth(request: NextRequest): NextResponse | null {
-  const authHeader = request.headers.get('authorization')
-  const cronSecret = process.env.CRON_SECRET
-
-  if (!cronSecret) {
-    if (process.env.NODE_ENV === 'development') {
-      console.warn('CRON_SECRET not set, allowing /api/atproto/sync in development')
-      return null
-    }
-    console.error('CRON_SECRET not configured; refusing to reconcile')
-    return NextResponse.json({ error: 'CRON_SECRET not configured' }, { status: 503 })
-  }
-
-  if (authHeader !== `Bearer ${cronSecret}`) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  }
-
-  return null
-}
-
-export async function GET(request: NextRequest) {
-  const denied = verifyAuth(request)
+export async function GET(request: Request): Promise<Response> {
+  const denied = authorizeCron(request)
   if (denied) return denied
-
   try {
     const result = await reconcileAll()
-    return NextResponse.json(result, { headers: { 'Cache-Control': 'no-store' } })
+    return Response.json(
+      { ...result, errors: result.errors.map((e) => ({ repo: e.did.startsWith('did:') ? 'repo' : e.did, error: e.error.slice(0, 300) })) },
+      { headers: { 'Cache-Control': 'no-store' } },
+    )
   } catch (e) {
-    const message = e instanceof Error ? e.message : String(e)
-    console.error('[atproto:sync] reconcileAll failed', message)
-    return NextResponse.json({ error: message }, { status: 500 })
+    console.error('[atproto:sync] reconcileAll failed:', e instanceof Error ? e.name : 'error')
+    return Response.json({ error: 'Reconciliation failed' }, { status: 500, headers: { 'Cache-Control': 'no-store' } })
   }
 }

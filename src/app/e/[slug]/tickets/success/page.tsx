@@ -8,9 +8,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { useEvent } from '@/contexts/EventContext'
 import { useAuth } from '@/hooks/useAuth'
-
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+import { apiFetch } from '@/lib/api/client'
 
 interface TicketDetails {
   id: string
@@ -20,25 +18,11 @@ interface TicketDetails {
   }
 }
 
-function getAccessToken(): string | null {
-  const storageKey = `sb-${new URL(SUPABASE_URL).hostname.split('.')[0]}-auth-token`
-  const stored = localStorage.getItem(storageKey)
-  if (stored) {
-    try {
-      const session = JSON.parse(stored)
-      return session?.access_token || null
-    } catch {
-      return null
-    }
-  }
-  return null
-}
-
 export default function TicketSuccessPage() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const event = useEvent()
-  const { user } = useAuth()
+  const { user, isLoading: authLoading } = useAuth()
 
   const [ticket, setTicket] = React.useState<TicketDetails | null>(null)
   const [loading, setLoading] = React.useState(true)
@@ -47,53 +31,41 @@ export default function TicketSuccessPage() {
   const ticketId = searchParams.get('ticket')
 
   React.useEffect(() => {
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let attempts = 0
+
+    if (authLoading) return
     async function fetchTicket() {
       if (!ticketId || !user) {
         setLoading(false)
         return
       }
-
       try {
-        const token = getAccessToken()
-        if (!token) {
-          setError('Please log in to view your ticket')
-          setLoading(false)
-          return
-        }
-
-        // Fetch ticket with tier info
-        const response = await fetch(
-          `${SUPABASE_URL}/rest/v1/tickets?id=eq.${ticketId}&select=id,status,tier:ticket_tiers(name)`,
-          {
-            headers: {
-              'apikey': SUPABASE_KEY,
-              'Authorization': `Bearer ${token}`,
-            },
-          }
+        const data = await apiFetch<{ ticket: TicketDetails }>(
+          `/api/v1/events/${encodeURIComponent(event.slug)}/tickets/${encodeURIComponent(ticketId)}`,
         )
-
-        const data = await response.json()
-
-        if (data && data.length > 0) {
-          setTicket({
-            id: data[0].id,
-            status: data[0].status,
-            tier: data[0].tier,
-          })
-        } else {
-          // Ticket might still be processing, show generic success
-          setTicket(null)
+        if (cancelled) return
+        setTicket(data.ticket)
+        setError(null)
+        // Paid tickets are confirmed by the payment webhook; check again for a short while.
+        if (data.ticket.status === 'pending' && attempts < 10) {
+          attempts++
+          timer = setTimeout(fetchTicket, 3000)
         }
-      } catch (err) {
-        console.error('Error fetching ticket:', err)
-        setError('Failed to load ticket details')
+      } catch {
+        if (!cancelled) setError('Failed to load ticket details')
       } finally {
-        setLoading(false)
+        if (!cancelled) setLoading(false)
       }
     }
 
     fetchTicket()
-  }, [ticketId, user])
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [ticketId, user, event.slug, authLoading])
 
   if (loading) {
     return (
@@ -113,9 +85,13 @@ export default function TicketSuccessPage() {
             <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-green-100 dark:bg-green-900/30 flex items-center justify-center">
               <CheckCircle className="h-10 w-10 text-green-600" />
             </div>
-            <CardTitle className="text-2xl">You&apos;re In!</CardTitle>
+            <CardTitle className="text-2xl">
+              {ticket?.status === 'pending' ? 'Almost there' : 'You\u2019re In!'}
+            </CardTitle>
             <CardDescription>
-              Your ticket for {event.name} has been confirmed.
+              {ticket?.status === 'pending'
+                ? `We are waiting for the payment confirmation for ${event.name}.`
+                : `Your ticket for ${event.name} has been confirmed.`}
             </CardDescription>
           </CardHeader>
 
@@ -137,7 +113,7 @@ export default function TicketSuccessPage() {
             ) : (
               <div className="bg-muted rounded-lg p-4 text-center">
                 <p className="text-sm text-muted-foreground">
-                  Your ticket is being processed. You&apos;ll receive a confirmation email shortly.
+                  Your ticket is being processed. You&apos;ll get a confirmation as soon as it is ready.
                 </p>
               </div>
             )}
@@ -151,9 +127,9 @@ export default function TicketSuccessPage() {
                     <span className="text-xs font-medium">1</span>
                   </div>
                   <div>
-                    <p className="font-medium">Check your email</p>
+                    <p className="font-medium">Keep your ticket handy</p>
                     <p className="text-muted-foreground">
-                      We&apos;ve sent your ticket confirmation with QR code.
+                      Open your ticket page at the door to show its check-in QR code.
                     </p>
                   </div>
                 </div>

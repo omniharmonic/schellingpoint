@@ -1,21 +1,27 @@
 'use client'
 
+/**
+ * Organiser view of the gathering on the network: its identity and credential health (the banner
+ * a revoked credential raises), publishing, destructive-action approvals, sessions that need review
+ * (cid drift, withdrawn proposals), peers and listings, and the audit trail.
+ * Everything goes through `/api/v1/events/[slug]/admin/atproto` and `/approvals` with the session cookie.
+ */
 import * as React from 'react'
 import { useRouter } from 'next/navigation'
-import { AlertCircle, CheckCircle2, ExternalLink, Globe, Loader2, Unplug, X } from 'lucide-react'
+import Link from 'next/link'
+import { AlertCircle, AlertTriangle, CheckCircle2, ExternalLink, Globe, Loader2, Unplug } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
 import { useAuth } from '@/hooks/useAuth'
 import { useEvent, useEventRole } from '@/contexts/EventContext'
-import { getAccessToken } from '@/lib/supabase/client'
+import { apiFetch, ApiError } from '@/lib/api/client'
 
 interface AuditRow {
   id: string
   action: string
   collection: string | null
-  rkey: string | null
   uri: string | null
   decision: 'allow' | 'deny'
   reason: string
@@ -28,25 +34,47 @@ interface Status {
   actorDid: string | null
   actorHandle: string | null
   credentialKind: 'oauth' | 'app-password' | null
-  credentialHealth: { lastOkAt: string | null; lastErrorAt: string | null; lastError: string | null } | null
+  health: { state: 'unlinked' | 'ok' | 'failing' | 'disabled'; lastOkAt: string | null; lastErrorAt: string | null; banner: string | null }
   gatheringUri: string | null
   publishedAt: string | null
+  tags: string[]
+  policy: { destructiveActionStewards: number; feedbackK: number; publishRoles: boolean }
   counts: {
     venues: { total: number; published: number }
     tracks: { total: number; published: number }
     sessionsScheduled: number
     sessionsPublished: number
+    sessionsCancelled: number
+    approvalsPending: number
   }
+  flagged: Array<{ id: string; title: string; kind: 'cid-drift' | 'withdrawn'; since: string; proposalUri: string | null }>
+  peers: Array<{ peer_did: string; label: string | null; cross_listing_enabled: boolean; created_at: string }>
+  listings: Array<{ id: string; session_id: string | null; subject_uri: string; record_uri: string | null; origin: 'own' | 'peer'; status: 'listed' | 'removed'; tags: string[]; updated_at: string }>
   recentAudit: AuditRow[]
-  links: { pdsls: string; bsky: string } | null
+  links: { pdsls: string } | null
 }
 
 interface PublishResult {
   kind: string
   id: string
   uri?: string
-  cid?: string
   error?: string
+  skipped?: string
+}
+
+interface ApprovalRequest {
+  id: string
+  action: 'move' | 'cancel' | 'remove-listing'
+  status: string
+  reason: string
+  threshold: number
+  sessionId: string | null
+  sessionTitle: string | null
+  target: { startsAt?: string | null }
+  requestedBy: { accountId: string; handle: string | null } | null
+  approvals: Array<{ accountId: string; handle: string | null; recordUri: string; createdAt: string }>
+  error: string | null
+  createdAt: string
 }
 
 type What = 'gathering' | 'venues' | 'tracks' | 'grids' | 'schedule' | 'all'
@@ -61,26 +89,25 @@ const PUBLISH_BUTTONS: Array<{ what: What; label: string; hint: string }> = [
 ]
 
 const PUBLIC_RECORDS: Array<{ record: string; what: string }> = [
-  { record: 'Gathering', what: 'Name, description, dates, region, phase, website, tags, and a link to the policy.' },
-  { record: 'Calendar event + config', what: 'The gathering as a calendar entry any ATProto calendar can read: dates, address (if set), event page URL, timezone, capacity.' },
-  { record: 'Policy', what: 'The voting method, credits per voter, proposal rules and deadlines, in plain text.' },
-  { record: 'Venues', what: 'Name, capacity, features, style, address and notes of each space.' },
-  { record: 'Tracks', what: 'Name, description, color and order. Track leads are never published.' },
-  { record: 'Slot grids', what: 'The time slots offered per venue and day, including breaks.' },
-  { record: 'Scheduled sessions', what: 'Title, public description, start/end, venue address and the session page URL for each session on the schedule, plus a slot record pointing at the proposal it came from.' },
-  { record: 'Stub proposals', what: 'For sessions whose proposer has not published their own proposal: title, description, format, duration and topics — marked as imported and naming no host.' },
-  { record: 'Tally', what: 'After voting closes: per-session voter, vote and credit counts, with every session under the k threshold suppressed. Never who voted.' },
+  { record: 'Gathering', what: 'Name, description, dates, region, phase, website, routing tags, peer gatherings, and a link to the policy.' },
+  { record: 'Policy', what: 'Voting method, credits, proposal rules and the approval and privacy thresholds, in plain text.' },
+  { record: 'Venues', what: 'Name, capacity, features and address. A private residence shows only its locality.' },
+  { record: 'Tracks', what: 'Name, description, colour, order and shared-taxonomy skills. Track leads are never published.' },
+  { record: 'Scheduled sessions', what: 'A calendar event per session plus a slot record pointing at the proposal it came from.' },
+  { record: 'Stub proposals', what: 'Only for sessions whose author has no proposal of their own: content only, marked imported, naming no one.' },
+  { record: 'Listings', what: 'Sessions whose tags match the gathering’s routing tags, and events of peers you enabled.' },
+  { record: 'Tally', what: 'After voting closes: counts per session, with sessions under the privacy threshold suppressed. Never who voted.' },
 ]
-
-function short(value: string | null | undefined, keep = 14): string {
-  if (!value) return ''
-  return value.length > keep * 2 + 1 ? `${value.slice(0, keep)}…${value.slice(-keep)}` : value
-}
 
 function when(iso: string | null | undefined): string {
   if (!iso) return '—'
   const d = new Date(iso)
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString()
+}
+
+function short(value: string | null | undefined, keep = 14): string {
+  if (!value) return ''
+  return value.length > keep * 2 + 1 ? `${value.slice(0, keep)}…${value.slice(-keep)}` : value
 }
 
 export default function AdminAtprotoPage() {
@@ -89,362 +116,462 @@ export default function AdminAtprotoPage() {
   const event = useEvent()
   const { role, isAdmin, isOwner, isLoading: roleLoading } = useEventRole()
   const allowed = isAdmin || role === 'moderator'
+  const canManage = isAdmin
 
   const [status, setStatus] = React.useState<Status | null>(null)
-  const [loading, setLoading] = React.useState(true)
+  const [approvals, setApprovals] = React.useState<{ threshold: number; viewerAccountId: string; requests: ApprovalRequest[] } | null>(null)
   const [error, setError] = React.useState<string | null>(null)
   const [notice, setNotice] = React.useState<string | null>(null)
+  const [busy, setBusy] = React.useState<string | null>(null)
+  const [results, setResults] = React.useState<{ what: What; published: number; skipped: number; failed: number; results: PublishResult[] } | null>(null)
+  const [confirmLinkage, setConfirmLinkage] = React.useState<null | (() => Promise<void>)>(null)
 
   const [oauthHandle, setOauthHandle] = React.useState('')
-  const [oauthBusy, setOauthBusy] = React.useState(false)
   const [handle, setHandle] = React.useState('')
   const [appPassword, setAppPassword] = React.useState('')
-  const [linking, setLinking] = React.useState(false)
+  const [peerDid, setPeerDid] = React.useState('')
+  const [peerLabel, setPeerLabel] = React.useState('')
   const [unlinkConfirm, setUnlinkConfirm] = React.useState(false)
-  const [unlinking, setUnlinking] = React.useState(false)
 
-  const [publishing, setPublishing] = React.useState<What | null>(null)
-  const [results, setResults] = React.useState<{ what: What; published: number; failed: number; results: PublishResult[] } | null>(null)
-
-  const authHeaders = React.useCallback((): Record<string, string> => {
-    const token = getAccessToken()
-    return token ? { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' }
-  }, [])
-  const apiBase = `/api/v1/events/${event.slug}/admin/atproto`
+  const apiBase = `/api/v1/events/${encodeURIComponent(event.slug)}/admin/atproto`
+  const approvalsBase = `/api/v1/events/${encodeURIComponent(event.slug)}/approvals`
 
   React.useEffect(() => {
     if (!authLoading && !roleLoading && (!user || !allowed)) router.push(`/e/${event.slug}/sessions`)
   }, [user, allowed, authLoading, roleLoading, router, event.slug])
 
-  const fetchStatus = React.useCallback(async () => {
+  const refresh = React.useCallback(async () => {
     try {
-      const res = await fetch(apiBase, { headers: authHeaders() })
-      if (!res.ok) throw new Error((await res.json().catch(() => null))?.error || 'Could not load network status')
-      setStatus(await res.json())
+      setStatus(await apiFetch<Status>(apiBase))
+      if (canManage) setApprovals(await apiFetch(approvalsBase))
       setError(null)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not load network status')
-    } finally {
-      setLoading(false)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not load network status')
     }
-  }, [apiBase, authHeaders])
+  }, [apiBase, approvalsBase, canManage])
 
   React.useEffect(() => {
     if (authLoading || roleLoading || !user || !allowed) return
-    fetchStatus()
-    // Returning from the OAuth consent screen: ?linked=1
+    void refresh()
     if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('linked') === '1') {
       setNotice('Gathering account connected.')
       window.history.replaceState(null, '', window.location.pathname)
     }
-  }, [authLoading, roleLoading, user, allowed, fetchStatus])
+  }, [authLoading, roleLoading, user, allowed, refresh])
 
-  const startOAuth = async () => {
-    const h = oauthHandle.trim().replace(/^@/, '')
-    if (!h) { setError('Enter the handle of the gathering account.'); return }
-    setOauthBusy(true)
-    setError(null)
-    try {
-      const next = `/e/${event.slug}/admin/atproto?linked=1`
-      const url = `/api/atproto/auth/start?handle=${encodeURIComponent(h)}&purpose=gathering&event=${encodeURIComponent(event.id)}&next=${encodeURIComponent(next)}`
-      const res = await fetch(url, { headers: authHeaders() })
-      const body = await res.json().catch(() => null)
-      if (!res.ok || !body?.url) throw new Error(body?.error || 'Could not start the sign-in flow')
-      window.location.assign(body.url)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not start the sign-in flow')
-      setOauthBusy(false)
-    }
-  }
-
-  const linkWithAppPassword = async (e: React.FormEvent) => {
-    e.preventDefault()
-    setLinking(true)
-    setError(null)
-    try {
-      const res = await fetch(apiBase, { method: 'POST', headers: authHeaders(), body: JSON.stringify({ handle, appPassword }) })
-      const body = await res.json().catch(() => null)
-      if (!res.ok) throw new Error(body?.error || 'Could not connect the account')
-      setStatus(body)
-      setAppPassword('')
-      setHandle('')
-      setNotice('Gathering account connected.')
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not connect the account')
-    } finally {
-      setLinking(false)
-    }
-  }
-
-  const unlink = async () => {
-    setUnlinking(true)
-    setError(null)
-    try {
-      const res = await fetch(apiBase, { method: 'DELETE', headers: authHeaders() })
-      const body = await res.json().catch(() => null)
-      if (!res.ok) throw new Error(body?.error || 'Could not disconnect the account')
-      setStatus(body)
-      setResults(null)
-      setNotice('Gathering account disconnected. Records already on the network stay where they are.')
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not disconnect the account')
-    } finally {
-      setUnlinking(false)
-      setUnlinkConfirm(false)
-    }
-  }
-
-  const publish = async (what: What) => {
-    setPublishing(what)
+  /** Run an action; a `confirm_public_linkage` answer asks once and retries with the confirmation. */
+  const act = async (key: string, fn: (confirm: boolean) => Promise<unknown>, success?: string) => {
+    setBusy(key)
     setError(null)
     setNotice(null)
     try {
-      const res = await fetch(`${apiBase}/publish`, { method: 'POST', headers: authHeaders(), body: JSON.stringify({ what }) })
-      const body = await res.json().catch(() => null)
-      if (!res.ok) throw new Error(body?.error || 'Publish failed')
-      setResults(body)
-      await fetchStatus()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Publish failed')
+      await fn(false)
+      if (success) setNotice(success)
+      await refresh()
+    } catch (e) {
+      if (e instanceof ApiError && e.code === 'confirm_public_linkage') {
+        setConfirmLinkage(() => async () => {
+          setConfirmLinkage(null)
+          await act(key, () => fn(true), success)
+        })
+      } else {
+        setError(e instanceof Error ? e.message : 'Something went wrong')
+      }
     } finally {
-      setPublishing(null)
+      setBusy(null)
     }
   }
 
-  if (authLoading || roleLoading || loading) {
-    return <div className="flex items-center justify-center py-12"><Loader2 className="h-8 w-8 animate-spin text-muted-foreground" /></div>
-  }
-  if (!allowed) return null
+  const post = (json: Record<string, unknown>) => apiFetch<Status>(apiBase, { method: 'POST', json })
 
-  const linked = !!status?.linked
+  const publish = (what: What) =>
+    act(`publish:${what}`, async () => {
+      const out = await apiFetch<{ what: What; published: number; skipped: number; failed: number; results: PublishResult[] }>(`${apiBase}/publish`, { method: 'POST', json: { what } })
+      setResults(out)
+    })
+
+  const startOAuth = async () => {
+    const h = oauthHandle.trim().replace(/^@/, '')
+    if (!h) return setError('Enter the handle of the gathering account.')
+    const next = `/e/${event.slug}/admin/atproto?linked=1`
+    window.location.assign(`/api/atproto/auth/start?handle=${encodeURIComponent(h)}&purpose=gathering&event=${encodeURIComponent(event.id)}&next=${encodeURIComponent(next)}`)
+  }
+
+  const askReason = (prompt: string): string | null => {
+    const reason = typeof window !== 'undefined' ? window.prompt(prompt) : null
+    return reason && reason.trim() ? reason.trim() : null
+  }
+
+  if (authLoading || roleLoading || !status) {
+    return (
+      <div className="flex items-center gap-2 p-6 text-sm text-muted-foreground">
+        {error ? <AlertCircle className="h-4 w-4" aria-hidden /> : <Loader2 className="h-4 w-4 animate-spin" aria-hidden />}
+        {error ?? 'Loading network status…'}
+      </div>
+    )
+  }
+
+  const pendingRequests = approvals?.requests.filter((r) => r.status === 'pending' || r.status === 'applying') ?? []
+  const recentRequests = approvals?.requests.filter((r) => r.status !== 'pending' && r.status !== 'applying').slice(0, 10) ?? []
 
   return (
-    <div className="max-w-4xl space-y-6">
-      <div className="page-heading">
-        <div>
-          <h1 className="text-2xl font-display font-bold">Network</h1>
-          <p className="text-muted-foreground">Publish this gathering to the ATProto network so other calendars and apps can read it.</p>
-        </div>
-      </div>
+    <div className="mx-auto max-w-5xl space-y-6 p-4 sm:p-6">
+      <header className="space-y-1">
+        <h1 className="flex items-center gap-2 text-2xl font-semibold">
+          <Globe className="h-6 w-6" aria-hidden /> On the network
+        </h1>
+        <p className="text-sm text-muted-foreground">
+          What this gathering publishes to ATProto, and the changes that need more than one organiser.
+        </p>
+      </header>
 
-      {error && (
-        <div className="p-4 bg-destructive/10 border border-destructive/20 rounded-lg flex items-start gap-3">
-          <AlertCircle className="h-5 w-5 text-destructive shrink-0" />
-          <p className="text-sm text-destructive flex-1 break-words">{error}</p>
-          <Button variant="ghost" size="sm" onClick={() => setError(null)} aria-label="Dismiss"><X className="h-4 w-4" /></Button>
+      {status.health.banner ? (
+        <div role="alert" className={`flex items-start gap-3 rounded-lg border p-4 text-sm ${status.health.state === 'disabled' ? 'border-destructive/50 bg-destructive/10' : 'border-amber-300 bg-amber-50 dark:border-amber-700 dark:bg-amber-950/40'}`}>
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+          <div className="space-y-2">
+            <p>{status.health.banner}</p>
+            {status.health.state === 'disabled' && canManage ? (
+              <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => act('reset', () => post({ action: 'reset-credential' }), 'Credential re-enabled. The next publish will try again.')}>
+                I reconnected it — try again
+              </Button>
+            ) : null}
+          </div>
         </div>
-      )}
-      {notice && (
-        <div className="p-4 bg-primary/10 border border-primary/20 rounded-lg flex items-start gap-3">
-          <CheckCircle2 className="h-5 w-5 text-primary shrink-0" />
-          <p className="text-sm flex-1">{notice}</p>
-          <Button variant="ghost" size="sm" onClick={() => setNotice(null)} aria-label="Dismiss"><X className="h-4 w-4" /></Button>
+      ) : null}
+      {notice ? (
+        <p className="flex items-center gap-2 rounded-md border border-emerald-300 bg-emerald-50 p-3 text-sm dark:border-emerald-800 dark:bg-emerald-950/40">
+          <CheckCircle2 className="h-4 w-4" aria-hidden /> {notice}
+        </p>
+      ) : null}
+      {error ? (
+        <p role="alert" className="flex items-center gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm">
+          <AlertCircle className="h-4 w-4" aria-hidden /> {error}
+        </p>
+      ) : null}
+      {confirmLinkage ? (
+        <div className="space-y-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm dark:border-amber-700 dark:bg-amber-950/40">
+          <p>Approving writes a public record in your own ATProto repository that permanently links your account to organising this gathering.</p>
+          <div className="flex gap-2">
+            <Button size="sm" onClick={() => void confirmLinkage()}>I understand, continue</Button>
+            <Button size="sm" variant="ghost" onClick={() => setConfirmLinkage(null)}>Cancel</Button>
+          </div>
         </div>
-      )}
+      ) : null}
 
-      {/* Status */}
+      {/* ───────────── identity ───────────── */}
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2"><Globe className="h-5 w-5 text-primary" />Gathering account</CardTitle>
-          <CardDescription>
-            {!status?.configured
-              ? 'ATProto is not configured on this deployment.'
-              : linked
-                ? 'This gathering writes its public records as the account below.'
-                : 'Not connected. Connect an ATProto account that will act as this gathering.'}
-          </CardDescription>
+          <CardTitle>Gathering identity</CardTitle>
+          <CardDescription>A DID of its own on a neutral PDS. Every record the gathering writes is audited below.</CardDescription>
         </CardHeader>
-        <CardContent className="space-y-4">
-          {linked && status && (
-            <div className="space-y-3">
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge>{status.actorHandle ? `@${status.actorHandle}` : 'linked'}</Badge>
-                <Badge variant="outline">{status.credentialKind === 'oauth' ? 'OAuth' : 'App password'}</Badge>
-                {status.credentialHealth?.lastError && <Badge variant="destructive">Last write failed</Badge>}
-              </div>
-              <p className="text-xs text-muted-foreground font-mono break-all">{status.actorDid}</p>
-              {status.links && (
-                <div className="flex flex-wrap gap-3 text-sm">
-                  <a className="inline-flex items-center gap-1 underline underline-offset-4" href={status.links.pdsls} target="_blank" rel="noreferrer">Records on pdsls.dev <ExternalLink className="h-3.5 w-3.5" /></a>
-                  <a className="inline-flex items-center gap-1 underline underline-offset-4" href={status.links.bsky} target="_blank" rel="noreferrer">Profile on Bluesky <ExternalLink className="h-3.5 w-3.5" /></a>
+        <CardContent className="space-y-4 text-sm">
+          {!status.configured ? <p className="text-muted-foreground">ATProto is not configured on this deployment.</p> : null}
+          {status.linked ? (
+            <dl className="grid gap-2 sm:grid-cols-2">
+              <div><dt className="text-xs uppercase text-muted-foreground">Handle</dt><dd className="font-mono">{status.actorHandle ? `@${status.actorHandle}` : '—'}</dd></div>
+              <div><dt className="text-xs uppercase text-muted-foreground">DID</dt><dd className="font-mono" title={status.actorDid ?? ''}>{short(status.actorDid)}</dd></div>
+              <div><dt className="text-xs uppercase text-muted-foreground">Credential</dt><dd>{status.credentialKind === 'app-password' ? 'Custodied by this app' : 'OAuth session'} · <Badge variant={status.health.state === 'ok' ? 'secondary' : 'destructive'}>{status.health.state}</Badge></dd></div>
+              <div><dt className="text-xs uppercase text-muted-foreground">Gathering record</dt><dd>{status.gatheringUri ? `published ${when(status.publishedAt)}` : 'not yet published'}</dd></div>
+              {status.links ? (
+                <div className="sm:col-span-2">
+                  <a className="inline-flex items-center gap-1 underline-offset-2 hover:underline" href={status.links.pdsls} target="_blank" rel="noreferrer">
+                    Browse the repository <ExternalLink className="h-3 w-3" aria-hidden />
+                  </a>
                 </div>
-              )}
-              <dl className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
-                <div><dt className="text-muted-foreground">Last published</dt><dd>{when(status.publishedAt)}</dd></div>
-                <div><dt className="text-muted-foreground">Venues</dt><dd>{status.counts.venues.published} / {status.counts.venues.total}</dd></div>
-                <div><dt className="text-muted-foreground">Tracks</dt><dd>{status.counts.tracks.published} / {status.counts.tracks.total}</dd></div>
-                <div><dt className="text-muted-foreground">Sessions</dt><dd>{status.counts.sessionsPublished} / {status.counts.sessionsScheduled} scheduled</dd></div>
-              </dl>
-              {status.credentialHealth?.lastError && (
-                <p className="text-xs text-destructive break-words">{status.credentialHealth.lastError}</p>
-              )}
-              {isOwner && (
-                unlinkConfirm ? (
-                  <div className="flex flex-wrap items-center gap-2 text-sm">
-                    <span>Disconnect this account? Published records stay on the network.</span>
-                    <Button size="sm" variant="destructive" onClick={unlink} disabled={unlinking}>{unlinking && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}Disconnect</Button>
-                    <Button size="sm" variant="outline" onClick={() => setUnlinkConfirm(false)} disabled={unlinking}>Cancel</Button>
+              ) : null}
+            </dl>
+          ) : canManage ? (
+            <div className="space-y-4">
+              <Button disabled={busy !== null || !status.configured} onClick={() => act('mint', () => post({ action: 'mint' }), 'Gathering identity created.')}>
+                {busy === 'mint' ? <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden /> : null}
+                Create the gathering’s identity
+              </Button>
+              {isOwner ? (
+                <details className="space-y-3">
+                  <summary className="cursor-pointer text-muted-foreground">Or act as an account the gathering already has</summary>
+                  <div className="flex flex-wrap gap-2 pt-2">
+                    <Input className="max-w-xs" placeholder="gathering.bsky.social" value={oauthHandle} onChange={(e) => setOauthHandle(e.target.value)} aria-label="Handle to connect with ATProto sign-in" />
+                    <Button variant="outline" onClick={startOAuth}>Connect with ATProto sign-in</Button>
                   </div>
-                ) : (
-                  <Button size="sm" variant="outline" onClick={() => setUnlinkConfirm(true)}><Unplug className="h-4 w-4 mr-2" />Disconnect</Button>
-                )
-              )}
+                  <form
+                    className="flex flex-wrap gap-2"
+                    onSubmit={(e) => {
+                      e.preventDefault()
+                      void act('link', async () => {
+                        await post({ action: 'link', handle, appPassword })
+                        setAppPassword('')
+                      }, 'Gathering account connected.')
+                    }}
+                  >
+                    <Input className="max-w-xs" placeholder="handle" value={handle} onChange={(e) => setHandle(e.target.value)} aria-label="Handle" />
+                    <Input className="max-w-xs" type="password" placeholder="app password" value={appPassword} onChange={(e) => setAppPassword(e.target.value)} aria-label="App password" autoComplete="off" />
+                    <Button type="submit" variant="outline" disabled={busy !== null}>Connect with an app password</Button>
+                  </form>
+                </details>
+              ) : null}
             </div>
+          ) : (
+            <p className="text-muted-foreground">No network identity yet. An owner or admin can create one.</p>
           )}
-          {!linked && status?.configured && !isOwner && (
-            <p className="text-sm text-muted-foreground">Only the event owner can connect a gathering account.</p>
-          )}
+          {status.linked && isOwner ? (
+            unlinkConfirm ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <span>Disconnect? Records already published stay on the network.</span>
+                <Button size="sm" variant="destructive" disabled={busy !== null} onClick={() => act('unlink', async () => { await apiFetch(apiBase, { method: 'DELETE' }); setUnlinkConfirm(false) }, 'Disconnected.')}>Disconnect</Button>
+                <Button size="sm" variant="ghost" onClick={() => setUnlinkConfirm(false)}>Keep</Button>
+              </div>
+            ) : (
+              <Button size="sm" variant="ghost" onClick={() => setUnlinkConfirm(true)}><Unplug className="mr-1.5 h-3.5 w-3.5" aria-hidden /> Disconnect</Button>
+            )
+          ) : null}
         </CardContent>
       </Card>
 
-      {/* Connect */}
-      {!linked && status?.configured && isOwner && (
-        <div className="grid gap-6 md:grid-cols-2">
-          <Card>
-            <CardHeader>
-              <CardTitle>Connect with sign-in</CardTitle>
-              <CardDescription>You will be sent to the account&apos;s own server to approve Schelling Point. Recommended.</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              <label className="text-sm font-medium" htmlFor="oauth-handle">Account handle</label>
-              <Input id="oauth-handle" value={oauthHandle} onChange={(e) => setOauthHandle(e.target.value)} placeholder="gathering.bsky.social" autoComplete="off" />
-              <Button onClick={startOAuth} disabled={oauthBusy || !oauthHandle.trim()} className="w-full sm:w-auto">
-                {oauthBusy && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}Connect with Bluesky
-              </Button>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader>
-              <CardTitle>Connect with an app password</CardTitle>
-              <CardDescription>Create an app password in your account settings; never your main password.</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <form className="space-y-3" onSubmit={linkWithAppPassword}>
-                <div className="space-y-1">
-                  <label className="text-sm font-medium" htmlFor="ap-handle">Account handle</label>
-                  <Input id="ap-handle" value={handle} onChange={(e) => setHandle(e.target.value)} placeholder="gathering.bsky.social" autoComplete="off" required />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-sm font-medium" htmlFor="ap-password">App password</label>
-                  <Input id="ap-password" type="password" value={appPassword} onChange={(e) => setAppPassword(e.target.value)} placeholder="xxxx-xxxx-xxxx-xxxx" autoComplete="off" required />
-                </div>
-                <p className="text-xs text-muted-foreground">Stored encrypted on the server and used only to write this gathering&apos;s records. Revoke it from the account at any time.</p>
-                <Button type="submit" disabled={linking || !handle.trim() || !appPassword} className="w-full sm:w-auto">
-                  {linking && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}Connect
-                </Button>
-              </form>
-            </CardContent>
-          </Card>
-        </div>
-      )}
-
-      {/* Publish */}
-      {linked && isAdmin && (
+      {/* ───────────── publish ───────────── */}
+      {status.linked && canManage ? (
         <Card>
           <CardHeader>
             <CardTitle>Publish</CardTitle>
-            <CardDescription>Publishing is idempotent: running it again rewrites the same records. Every write is logged below.</CardDescription>
+            <CardDescription>
+              Venues {status.counts.venues.published}/{status.counts.venues.total} · tracks {status.counts.tracks.published}/{status.counts.tracks.total} · sessions {status.counts.sessionsPublished}/{status.counts.sessionsScheduled}
+              {status.counts.sessionsCancelled ? ` · ${status.counts.sessionsCancelled} cancelled` : ''}. Re-publishing is safe: records are rewritten in place.
+            </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            <div className="grid gap-2 sm:grid-cols-3">
               {PUBLISH_BUTTONS.map((b) => (
-                <Button
-                  key={b.what}
-                  variant={b.what === 'all' ? 'default' : 'outline'}
-                  onClick={() => publish(b.what)}
-                  disabled={publishing !== null}
-                  className="h-auto min-h-11 flex-col items-start gap-0.5 py-2 text-left whitespace-normal"
-                >
-                  <span className="flex items-center gap-2 font-medium">{publishing === b.what && <Loader2 className="h-4 w-4 animate-spin" />}{b.label}</span>
+                <Button key={b.what} variant={b.what === 'all' ? 'default' : 'outline'} className="h-auto flex-col items-start py-2 text-left" disabled={busy !== null} onClick={() => publish(b.what)}>
+                  <span className="flex items-center gap-2 font-medium">{busy === `publish:${b.what}` ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : null}{b.label}</span>
                   <span className="text-xs font-normal opacity-80">{b.hint}</span>
                 </Button>
               ))}
             </div>
-            {results && (
-              <div className="space-y-2">
-                <div className="flex flex-wrap items-center gap-2 text-sm">
-                  <Badge variant="secondary">{results.published} written</Badge>
-                  {results.failed > 0 && <Badge variant="destructive">{results.failed} failed</Badge>}
-                  {results.results.length === 0 && <span className="text-muted-foreground">Nothing to publish yet.</span>}
-                </div>
-                {results.results.length > 0 && (
-                  <ul className="max-h-72 overflow-y-auto rounded-lg border divide-y text-sm">
-                    {results.results.map((r, i) => (
-                      <li key={`${r.kind}-${r.id}-${i}`} className="p-2 flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-3">
-                        <Badge variant={r.error ? 'destructive' : 'outline'} className="w-fit shrink-0">{r.kind}</Badge>
-                        <span className="font-mono text-xs text-muted-foreground break-all">{r.error ? r.error : short(r.uri, 22)}</span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
+            {results ? (
+              <div className="space-y-2 text-sm">
+                <p>{results.published} written · {results.skipped} skipped · {results.failed} failed</p>
+                <ul className="max-h-64 space-y-1 overflow-auto font-mono text-xs">
+                  {results.results.filter((r) => r.error || r.skipped).map((r, i) => (
+                    <li key={`${r.kind}-${r.id}-${i}`} className={r.error ? 'text-destructive' : 'text-muted-foreground'}>
+                      {r.kind} {short(r.id, 8)}: {r.error ?? (r.skipped === 'requires-approval' ? 'moved after publishing — request the move below' : r.skipped)}
+                    </li>
+                  ))}
+                </ul>
               </div>
-            )}
+            ) : null}
           </CardContent>
         </Card>
-      )}
+      ) : null}
 
-      {/* Audit */}
-      {linked && status && (
+      {/* ───────────── approvals ───────────── */}
+      {canManage && approvals ? (
+        <Card id="approvals">
+          <CardHeader>
+            <CardTitle>Changes awaiting approval</CardTitle>
+            <CardDescription>
+              Moving or cancelling a published session needs {approvals.threshold} organiser approval{approvals.threshold === 1 ? '' : 's'}. Each approval is a record in the approving organiser’s own repository.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3 text-sm">
+            {!pendingRequests.length ? <p className="text-muted-foreground">Nothing is waiting.</p> : null}
+            {pendingRequests.map((r) => {
+              const mine = r.approvals.some((a) => a.accountId === approvals.viewerAccountId)
+              return (
+                <div key={r.id} className="space-y-2 rounded-md border p-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge>{r.action === 'move' ? 'Move' : r.action === 'cancel' ? 'Cancel' : 'Remove listing'}</Badge>
+                    <span className="font-medium">{r.sessionTitle ?? 'Listing'}</span>
+                    {r.action === 'move' && r.target.startsAt ? <span className="text-muted-foreground">to {when(r.target.startsAt)}</span> : null}
+                    <span className="ml-auto text-muted-foreground">{r.approvals.length}/{r.threshold}</span>
+                  </div>
+                  <p className="text-muted-foreground">“{r.reason}” — {r.requestedBy?.handle ? `@${r.requestedBy.handle}` : 'an organiser'}, {when(r.createdAt)}</p>
+                  {r.approvals.length ? <p className="text-xs text-muted-foreground">Approved by {r.approvals.map((a) => (a.handle ? `@${a.handle}` : 'an organiser')).join(', ')}</p> : null}
+                  {r.error ? <p className="text-xs text-destructive">Last attempt to apply failed: {r.error}</p> : null}
+                  <div className="flex gap-2">
+                    {!mine || r.error ? (
+                      <Button size="sm" disabled={busy !== null} onClick={() => act(`approve:${r.id}`, (confirm) => apiFetch(approvalsBase, { method: 'POST', json: { action: 'approve', requestId: r.id, ...(confirm ? { confirmPublicLinkage: true } : {}) } }), 'Approval recorded.')}>
+                        {busy === `approve:${r.id}` ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" aria-hidden /> : null}
+                        {mine ? 'Retry applying' : 'Approve'}
+                      </Button>
+                    ) : null}
+                    {mine ? (
+                      <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => act(`withdraw:${r.id}`, () => apiFetch(approvalsBase, { method: 'POST', json: { action: 'withdraw', requestId: r.id } }), 'Your approval was withdrawn.')}>
+                        Withdraw my approval
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
+              )
+            })}
+            {recentRequests.length ? (
+              <details>
+                <summary className="cursor-pointer text-muted-foreground">Recent</summary>
+                <ul className="mt-2 space-y-1 text-xs">
+                  {recentRequests.map((r) => (
+                    <li key={r.id}>{r.status} · {r.action} · {r.sessionTitle ?? 'listing'} · {when(r.createdAt)}</li>
+                  ))}
+                </ul>
+              </details>
+            ) : null}
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {/* ───────────── needs review ───────────── */}
+      {status.flagged.length ? (
+        <Card id="drift">
+          <CardHeader>
+            <CardTitle>Sessions that need review</CardTitle>
+            <CardDescription>Proposers own their proposals. When one changes or disappears, the published schedule is left alone until you decide.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2 text-sm">
+            {status.flagged.map((f) => (
+              <div key={f.id} className="flex flex-wrap items-center gap-2 rounded-md border p-3">
+                <Badge variant={f.kind === 'withdrawn' ? 'destructive' : 'secondary'}>{f.kind === 'withdrawn' ? 'Withdrawn' : 'Edited'}</Badge>
+                <Link className="font-medium underline-offset-2 hover:underline" href={`/e/${event.slug}/sessions/${f.id}`}>{f.title}</Link>
+                <span className="text-muted-foreground">{when(f.since)}</span>
+                {canManage ? (
+                  <span className="ml-auto flex gap-2">
+                    {f.kind === 'cid-drift' ? (
+                      <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => act(`republish:${f.id}`, () => apiFetch(`${apiBase}/sessions/${f.id}`, { method: 'POST', json: { action: 'republish' } }), 'Re-published with the proposer’s current version.')}>
+                        Adopt and re-publish
+                      </Button>
+                    ) : null}
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={busy !== null}
+                      onClick={() => {
+                        const reason = askReason('Why is this session being cancelled? (recorded with every approval)')
+                        if (reason) void act(`cancel:${f.id}`, (confirm) => apiFetch(approvalsBase, { method: 'POST', json: { action: 'request-cancel', sessionId: f.id, reason, ...(confirm ? { confirmPublicLinkage: true } : {}) } }), 'Cancellation requested.')
+                      }}
+                    >
+                      Cancel session
+                    </Button>
+                  </span>
+                ) : null}
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {/* ───────────── peers and listings ───────────── */}
+      {canManage && status.linked ? (
         <Card>
           <CardHeader>
-            <CardTitle>Recent writes</CardTitle>
-            <CardDescription>The last 20 actions taken as the gathering, allowed or denied.</CardDescription>
+            <CardTitle>Peers and listings</CardTitle>
+            <CardDescription>
+              Routing tags: {status.tags.length ? status.tags.join(', ') : 'none (set them in event settings)'}. Peers appear publicly in the gathering record; their events are listed here only after you enable cross-listing.
+            </CardDescription>
           </CardHeader>
-          <CardContent>
-            {status.recentAudit.length === 0 ? (
-              <p className="text-sm text-muted-foreground">Nothing written yet.</p>
-            ) : (
-              <div className="overflow-x-auto -mx-2 sm:mx-0">
-                <table className="w-full text-sm min-w-[560px]">
-                  <thead>
-                    <tr className="text-left text-muted-foreground">
-                      <th className="px-2 py-1 font-medium">When</th>
-                      <th className="px-2 py-1 font-medium">Action</th>
-                      <th className="px-2 py-1 font-medium">Record</th>
-                      <th className="px-2 py-1 font-medium">Result</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y">
-                    {status.recentAudit.map((row) => (
-                      <tr key={row.id} className="align-top">
-                        <td className="px-2 py-1.5 whitespace-nowrap">{when(row.created_at)}</td>
-                        <td className="px-2 py-1.5 whitespace-nowrap">{row.action}</td>
-                        <td className="px-2 py-1.5 font-mono text-xs break-all">{row.collection ? `${row.collection.split('.').pop()}/${row.rkey ?? ''}` : ''}</td>
-                        <td className="px-2 py-1.5">
-                          <Badge variant={row.decision === 'allow' ? 'outline' : 'destructive'}>{row.decision}</Badge>
-                          <p className="text-xs text-muted-foreground mt-1 break-words max-w-[320px]">{row.reason}</p>
+          <CardContent className="space-y-4 text-sm">
+            <form
+              className="flex flex-wrap gap-2"
+              onSubmit={(e) => {
+                e.preventDefault()
+                void act('peer:add', async () => {
+                  await post({ action: 'upsert-peer', peerDid, label: peerLabel || null })
+                  setPeerDid('')
+                  setPeerLabel('')
+                }, 'Peer added.')
+              }}
+            >
+              <Input className="max-w-xs font-mono" placeholder="did:plc:…" value={peerDid} onChange={(e) => setPeerDid(e.target.value)} aria-label="Peer DID" />
+              <Input className="max-w-[12rem]" placeholder="label (optional)" value={peerLabel} onChange={(e) => setPeerLabel(e.target.value)} aria-label="Peer label" />
+              <Button type="submit" variant="outline" disabled={busy !== null || !peerDid.trim()}>Add peer</Button>
+            </form>
+            {status.peers.length ? (
+              <ul className="space-y-2">
+                {status.peers.map((p) => (
+                  <li key={p.peer_did} className="flex flex-wrap items-center gap-2">
+                    <span className="font-mono text-xs" title={p.peer_did}>{p.label ?? short(p.peer_did)}</span>
+                    <label className="flex items-center gap-1 text-xs">
+                      <input
+                        type="checkbox"
+                        checked={p.cross_listing_enabled}
+                        disabled={busy !== null}
+                        onChange={(e) => void act(`peer:${p.peer_did}`, () => post({ action: 'upsert-peer', peerDid: p.peer_did, crossListingEnabled: e.target.checked }))}
+                      />
+                      list their events here
+                    </label>
+                    <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => act(`peer:rm:${p.peer_did}`, () => post({ action: 'remove-peer', peerDid: p.peer_did }), 'Peer removed.')}>Remove</Button>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            {status.listings.length ? (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead><tr className="text-muted-foreground"><th className="py-1">Listed event</th><th>From</th><th>Tags</th><th>Status</th><th /></tr></thead>
+                  <tbody>
+                    {status.listings.map((l) => (
+                      <tr key={l.id} className="border-t">
+                        <td className="py-1 font-mono" title={l.subject_uri}>{short(l.subject_uri, 18)}</td>
+                        <td>{l.origin === 'own' ? 'this gathering' : 'peer'}</td>
+                        <td>{l.tags.join(', ')}</td>
+                        <td>{l.status}</td>
+                        <td className="text-right">
+                          {l.status === 'removed' ? (
+                            <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => act(`restore:${l.id}`, () => post({ action: 'restore-listing', listingId: l.id }), 'Listing restored.')}>Restore</Button>
+                          ) : (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              disabled={busy !== null}
+                              onClick={() => {
+                                const reason = askReason('Why remove this listing? (recorded with every approval)')
+                                if (reason) void act(`unlist:${l.id}`, (confirm) => apiFetch(approvalsBase, { method: 'POST', json: { action: 'request-listing-removal', listingId: l.id, reason, ...(confirm ? { confirmPublicLinkage: true } : {}) } }), 'Removal requested.')
+                              }}
+                            >
+                              Remove
+                            </Button>
+                          )}
                         </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
-            )}
+            ) : null}
           </CardContent>
         </Card>
-      )}
+      ) : null}
 
-      {/* Explainer */}
+      {/* ───────────── what is public, audit ───────────── */}
       <Card>
         <CardHeader>
           <CardTitle>What becomes public</CardTitle>
           <CardDescription>
-            Records are written into the gathering account&apos;s own repository, readable by anyone on the network.
-            Votes, tickets, RSVPs, members, emails and host names are never published. Proposals are only ever
-            published by the people who wrote them, into their own accounts.
+            Policy: {status.policy.destructiveActionStewards} approvals for destructive changes · counts hidden below {status.policy.feedbackK} voters · role claims {status.policy.publishRoles ? 'allowed (members opt in)' : 'off'}. Change these in <Link className="underline" href={`/e/${event.slug}/admin/settings`}>settings</Link>.
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <dl className="space-y-3 text-sm">
+          <dl className="grid gap-3 text-sm sm:grid-cols-2">
             {PUBLIC_RECORDS.map((r) => (
-              <div key={r.record} className="grid gap-0.5 sm:grid-cols-[160px_1fr] sm:gap-3">
-                <dt className="font-medium">{r.record}</dt>
-                <dd className="text-muted-foreground">{r.what}</dd>
-              </div>
+              <div key={r.record}><dt className="font-medium">{r.record}</dt><dd className="text-muted-foreground">{r.what}</dd></div>
             ))}
           </dl>
+          <p className="mt-4 text-xs text-muted-foreground">Never published: votes, ballots, tickets, RSVPs (unless an attendee shares their own), rosters, track leads, listed speaker names, moderation reasons.</p>
         </CardContent>
       </Card>
+
+      {status.recentAudit.length ? (
+        <Card>
+          <CardHeader><CardTitle>Audit trail</CardTitle><CardDescription>Every write as the gathering, allowed or denied.</CardDescription></CardHeader>
+          <CardContent>
+            <ul className="space-y-1 text-xs">
+              {status.recentAudit.map((a) => (
+                <li key={a.id} className="flex flex-wrap gap-2">
+                  <Badge variant={a.decision === 'allow' ? 'secondary' : 'destructive'}>{a.decision}</Badge>
+                  <span className="font-mono">{a.action}</span>
+                  <span className="text-muted-foreground">{a.reason}</span>
+                  <span className="ml-auto text-muted-foreground">{when(a.created_at)}</span>
+                </li>
+              ))}
+            </ul>
+          </CardContent>
+        </Card>
+      ) : null}
     </div>
   )
 }

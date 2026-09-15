@@ -1,117 +1,46 @@
-import { NextResponse } from 'next/server'
-import { createAdminClient } from '@/lib/supabase/server'
-import { getUserFromRequest } from '@/lib/api/getUser'
-import { generateTicketToken, generateTicketQRCode } from '@/lib/tickets/qr'
+/**
+ * A fresh check-in QR code for the signed-in holder's own ticket.
+ *
+ *   GET /api/v1/events/[slug]/tickets/[ticketId]/qr
+ *   → { success, qrDataUrl, ticketId, expiresAt }
+ *
+ * Holder only (404 for anyone else — the token carries the holder's DID and admits them at
+ * the door). Confirmed and checked-in tickets only. Tokens expire after TICKET_QR_TTL_SECONDS
+ * and are never stored.
+ */
+import { requireViewer } from '@/lib/auth/viewer'
+import { sql } from '@/lib/db'
+import { jsonError } from '@/lib/tickets'
+import { mintTicketToken, ticketQrDataUrl } from '@/lib/tickets/qr'
 
-interface Ticket {
-  id: string
-  event_id: string
-  user_id: string
-  tier_id: string
-  status: string
-  qr_code: string | null
-  qr_generated_at: string | null
-}
+export const runtime = 'nodejs'
+export const dynamic = 'force-dynamic'
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 export async function GET(
   request: Request,
-  { params }: { params: Promise<{ slug: string; ticketId: string }> }
-) {
-  try {
-    const { slug, ticketId } = await params
+  { params }: { params: Promise<{ slug: string; ticketId: string }> },
+): Promise<Response> {
+  const viewer = await requireViewer(request)
+  if (viewer instanceof Response) return viewer
+  const { slug, ticketId } = await params
+  if (!UUID.test(ticketId)) return jsonError(404, 'Ticket not found')
 
-    // Authenticate user
-    const user = await getUserFromRequest(request)
-    if (!user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    }
-
-    const supabase = await createAdminClient()
-
-    // Fetch event to verify slug
-    const { data: event, error: eventError } = await supabase
-      .from('events')
-      .select('id')
-      .eq('slug', slug)
-      .single()
-
-    if (eventError || !event) {
-      return NextResponse.json({ error: 'Event not found' }, { status: 404 })
-    }
-
-    // Fetch ticket
-    const { data: ticket, error: ticketError } = await supabase
-      .from('tickets')
-      .select('id, event_id, user_id, tier_id, status, qr_code, qr_generated_at')
-      .eq('id', ticketId)
-      .eq('event_id', event.id)
-      .single()
-
-    if (ticketError || !ticket) {
-      return NextResponse.json({ error: 'Ticket not found' }, { status: 404 })
-    }
-
-    const typedTicket = ticket as Ticket
-
-    // Verify ownership (user owns ticket or is admin)
-    if (typedTicket.user_id !== user.id) {
-      // Check if user is admin
-      const { data: membership } = await supabase
-        .from('event_members')
-        .select('role')
-        .eq('event_id', event.id)
-        .eq('user_id', user.id)
-        .single()
-
-      const isAdmin = membership?.role === 'owner' || membership?.role === 'admin'
-
-      if (!isAdmin) {
-        return NextResponse.json({ error: 'Access denied' }, { status: 403 })
-      }
-    }
-
-    // Only generate QR for confirmed tickets
-    if (typedTicket.status !== 'confirmed' && typedTicket.status !== 'checked_in') {
-      return NextResponse.json(
-        { error: 'QR code only available for confirmed tickets' },
-        { status: 400 }
-      )
-    }
-
-    let qrToken = typedTicket.qr_code
-
-    // Generate QR code if not already generated
-    if (!qrToken) {
-      qrToken = await generateTicketToken({
-        ticketId: typedTicket.id,
-        eventId: typedTicket.event_id,
-        userId: typedTicket.user_id,
-        tierId: typedTicket.tier_id,
-      })
-
-      // Store the QR code token
-      await supabase
-        .from('tickets')
-        .update({
-          qr_code: qrToken,
-          qr_generated_at: new Date().toISOString(),
-        })
-        .eq('id', ticketId)
-    }
-
-    // Generate QR code image
-    const qrDataUrl = await generateTicketQRCode(qrToken)
-
-    return NextResponse.json({
-      success: true,
-      qrDataUrl,
-      ticketId: typedTicket.id,
-    })
-  } catch (error) {
-    console.error('Error generating QR code:', error)
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    )
+  const [ticket] = await sql<{ id: string; event_id: string; status: string }[]>`
+    select tk.id, tk.event_id, tk.status
+    from tickets tk join events e on e.id = tk.event_id
+    where tk.id = ${ticketId} and e.slug = ${slug} and tk.user_id = ${viewer.accountId}
+  `
+  if (!ticket) return jsonError(404, 'Ticket not found')
+  if (ticket.status !== 'confirmed' && ticket.status !== 'checked_in') {
+    return jsonError(409, 'QR code only available for confirmed tickets', { code: 'NOT_CONFIRMED' })
   }
+
+  const { token, expiresAt } = await mintTicketToken({ event_id: ticket.event_id, ticket_id: ticket.id, did: viewer.did })
+  const qrDataUrl = await ticketQrDataUrl(token)
+  return Response.json(
+    { success: true, qrDataUrl, ticketId: ticket.id, expiresAt },
+    { headers: { 'Cache-Control': 'private, no-store' } },
+  )
 }

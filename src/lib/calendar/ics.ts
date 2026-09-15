@@ -9,7 +9,6 @@ export interface ICSEvent {
   startTime: Date
   endTime: Date
   url?: string
-  organizer?: string
 }
 
 export interface ICSCalendar {
@@ -25,7 +24,7 @@ function escapeICS(text: string): string {
     .replace(/\\/g, '\\\\')
     .replace(/;/g, '\\;')
     .replace(/,/g, '\\,')
-    .replace(/\n/g, '\\n')
+    .replace(/\r?\n/g, '\\n')
 }
 
 /**
@@ -94,13 +93,50 @@ function generateVEvent(event: ICSEvent): string {
     lines.push(`URL:${event.url}`)
   }
 
-  if (event.organizer) {
-    lines.push(`ORGANIZER;CN=${escapeICS(event.organizer)}:mailto:noreply@schellingpoint.io`)
-  }
-
   lines.push('END:VEVENT')
 
   return lines.map(foldLine).join('\r\n')
+}
+
+export interface SessionCalendarInput {
+  id: string
+  title: string
+  description?: string | null
+  /** A linked host's own display name; never a free-text name someone else typed (R9). */
+  hostLabel?: string | null
+  startTime: string | Date
+  endTime: string | Date
+  location?: string | null
+  eventSlug: string
+}
+
+/**
+ * One scheduled session as a calendar entry. `appUrl` is the app origin (server: the
+ * configured public URL; browser: `window.location.origin`), which also scopes the UID.
+ */
+export function sessionToICSEvent(input: SessionCalendarInput, appUrl: string): ICSEvent {
+  const origin = appUrl.replace(/\/+$/, '')
+  let host = 'localhost'
+  try {
+    host = new URL(origin).hostname || host
+  } catch {
+    // keep the fallback UID domain
+  }
+  const url = `${origin}/e/${input.eventSlug}/sessions/${input.id}`
+  const parts = [
+    input.hostLabel ? `Host: ${input.hostLabel}` : null,
+    input.description?.trim() || null,
+    `View session: ${url}`,
+  ].filter(Boolean)
+  return {
+    uid: `session-${input.id}@${host}`,
+    title: input.title,
+    description: parts.join('\n\n'),
+    location: input.location || undefined,
+    startTime: new Date(input.startTime),
+    endTime: new Date(input.endTime),
+    url,
+  }
 }
 
 /**

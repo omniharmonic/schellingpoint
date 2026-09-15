@@ -67,9 +67,9 @@ test.describe('ATProto auth start', () => {
     expect((await res.json()).error).toBe('invalid_purpose')
   })
 
-  test('link requires a signed-in member', async ({ request }) => {
+  test('link is refused: one account is one DID, and every account already has one', async ({ request }) => {
     const res = await request.get(`${base}/api/atproto/auth/start?handle=bsky.app&purpose=link`)
-    expect(res.status()).toBe(401)
+    expect(res.status()).toBe(409)
   })
 
   test('gathering requires a signed-in member', async ({ request }) => {
@@ -105,12 +105,19 @@ test.describe('Login page', () => {
   test('offers Sign in with Bluesky and the consent sentence', async ({ page }) => {
     await page.goto(`${base}/login`)
     const section = page.getByTestId('bluesky-signin')
-    await expect(section).toBeVisible()
+    // The section appears once the client has asked /api/atproto/me whether ATProto is configured.
+    await expect(section).toBeVisible({ timeout: 45_000 })
     await expect(section.getByPlaceholder('you.bsky.social')).toBeVisible()
-    await expect(section).toContainText('attached to this identity on the open network')
-    // A malformed handle is refused before any network round-trip.
+    await expect(section).toContainText('permanently attached to this identity')
+    await expect(section).toContainText('public on the open network')
+    // The hard confirmation gates the button: no consent, no redirect.
     await section.getByPlaceholder('you.bsky.social').fill('not a handle')
-    await section.getByRole('button', { name: /continue with bluesky/i }).click()
+    const submit = section.getByRole('button', { name: /continue with this account/i })
+    await expect(submit).toBeDisabled()
+    await section.getByTestId('bluesky-confirm').check()
+    await expect(submit).toBeEnabled()
+    // A malformed handle is refused before any network round-trip.
+    await submit.click()
     await expect(page.locator('#login-error')).toContainText(/handle/i)
   })
 })

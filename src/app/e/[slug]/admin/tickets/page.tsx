@@ -29,11 +29,8 @@ import { Alert, AlertDescription } from '@/components/ui/alert'
 
 import { useEvent, useEventRole } from '@/contexts/EventContext'
 import { cn } from '@/lib/utils'
-import { getAccessToken } from '@/lib/supabase/client'
-import { formatPrice } from '@/lib/payments/stripe'
-
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+import { apiFetch, ApiError } from '@/lib/api/client'
+import { formatPrice } from '@/lib/payments/format'
 
 interface TicketTier {
   id: string
@@ -74,6 +71,33 @@ function describeRequirement(key: string): string {
     .split('.')
     .pop()!
     .replace(/_/g, ' ')
+}
+
+/** ISO timestamp → value for <input type="datetime-local"> in the browser's time zone. */
+function toLocalInput(iso: string | null): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+/** <input type="datetime-local"> value (browser time zone) → ISO timestamp, or null. */
+function fromLocalInput(value: string): string | null {
+  if (!value) return null
+  const d = new Date(value)
+  return Number.isNaN(d.getTime()) ? null : d.toISOString()
+}
+
+const CONNECT_UNAVAILABLE: ConnectStatus = {
+  connected: false,
+  accountId: null,
+  chargesEnabled: false,
+  payoutsEnabled: false,
+  detailsSubmitted: false,
+  requirementsDue: [],
+  platformFallbackAllowed: false,
+  unavailable: true,
 }
 
 function formatDate(dateStr: string | null): string {
@@ -131,40 +155,23 @@ function AdminTicketsPageInner() {
   const [connectError, setConnectError] = React.useState<string | null>(null)
   const [connectBanner, setConnectBanner] = React.useState<'return' | 'refresh' | null>(null)
 
+  const apiBase = `/api/v1/events/${encodeURIComponent(eventSlug)}/admin`
+
   const fetchConnectStatus = React.useCallback(async () => {
-    const token = getAccessToken()
-    if (!token) return
     setIsLoadingConnect(true)
     try {
-      const response = await fetch(`/api/v1/events/${eventSlug}/admin/stripe-connect`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      if (response.status === 503 || (response.ok && (await response.clone().json())?.unavailable)) {
-        setConnect({
-          connected: false,
-          accountId: null,
-          chargesEnabled: false,
-          payoutsEnabled: false,
-          detailsSubmitted: false,
-          requirementsDue: [],
-          platformFallbackAllowed: false,
-          unavailable: true,
-        })
-        return
-      }
-      if (response.ok) {
-        setConnect(await response.json())
-      } else {
-        const data = await response.json().catch(() => ({}))
-        setConnectError(data.error || 'Failed to load Stripe status')
-      }
+      const data = await apiFetch<ConnectStatus>(`${apiBase}/stripe-connect`)
+      setConnect(data.unavailable ? CONNECT_UNAVAILABLE : data)
     } catch (err) {
-      console.error('Error fetching Stripe Connect status:', err)
-      setConnectError('Failed to load Stripe status')
+      if (err instanceof ApiError && err.status === 503) {
+        setConnect(CONNECT_UNAVAILABLE)
+      } else {
+        setConnectError(err instanceof Error ? err.message : 'Failed to load Stripe status')
+      }
     } finally {
       setIsLoadingConnect(false)
     }
-  }, [eventSlug])
+  }, [apiBase])
 
   React.useEffect(() => {
     fetchConnectStatus()
@@ -180,48 +187,34 @@ function AdminTicketsPageInner() {
   }, [stripeReturnParam, fetchConnectStatus, router, pathname])
 
   const handleConnect = async () => {
-    const token = getAccessToken()
-    if (!token) return
     setIsConnecting(true)
     setConnectError(null)
     try {
-      const response = await fetch(`/api/v1/events/${eventSlug}/admin/stripe-connect`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      const data = await response.json().catch(() => ({}))
-      if (response.ok && data.url) {
+      const data = await apiFetch<{ url?: string }>(`${apiBase}/stripe-connect`, { method: 'POST' })
+      if (data.url) {
         window.location.assign(data.url)
         return
       }
-      setConnectError(data.error || 'Failed to start Stripe onboarding')
-    } catch (err) {
-      console.error('Error starting Stripe onboarding:', err)
       setConnectError('Failed to start Stripe onboarding')
+    } catch (err) {
+      setConnectError(err instanceof Error ? err.message : 'Failed to start Stripe onboarding')
     } finally {
       setIsConnecting(false)
     }
   }
 
   const handleOpenDashboard = async () => {
-    const token = getAccessToken()
-    if (!token) return
     setIsOpeningDashboard(true)
     setConnectError(null)
     try {
-      const response = await fetch(
-        `/api/v1/events/${eventSlug}/admin/stripe-connect?action=dashboard`,
-        { method: 'POST', headers: { Authorization: `Bearer ${token}` } },
-      )
-      const data = await response.json().catch(() => ({}))
-      if (response.ok && data.url) {
+      const data = await apiFetch<{ url?: string }>(`${apiBase}/stripe-connect?action=dashboard`, { method: 'POST' })
+      if (data.url) {
         window.open(data.url, '_blank', 'noopener,noreferrer')
       } else {
-        setConnectError(data.error || 'Failed to open Stripe dashboard')
+        setConnectError('Failed to open Stripe dashboard')
       }
     } catch (err) {
-      console.error('Error opening Stripe dashboard:', err)
-      setConnectError('Failed to open Stripe dashboard')
+      setConnectError(err instanceof Error ? err.message : 'Failed to open Stripe dashboard')
     } finally {
       setIsOpeningDashboard(false)
     }
@@ -235,29 +228,18 @@ function AdminTicketsPageInner() {
     ) {
       return
     }
-    const token = getAccessToken()
-    if (!token) return
     setIsDisconnecting(true)
     setConnectError(null)
     try {
-      const response = await fetch(`/api/v1/events/${eventSlug}/admin/stripe-connect`, {
+      const data = await apiFetch<ConnectStatus & { ticketing_enabled: boolean }>(`${apiBase}/stripe-connect`, {
         method: 'DELETE',
-        headers: { Authorization: `Bearer ${token}` },
       })
-      const data = await response.json().catch(() => ({}))
-      if (response.ok) {
-        setConnect(data)
-        setSettings((prev) =>
-          prev
-            ? { ...prev, stripe_account_id: null, ticketing_enabled: data.ticketing_enabled }
-            : prev,
-        )
-      } else {
-        setConnectError(data.error || 'Failed to disconnect Stripe')
-      }
+      setConnect(data)
+      setSettings((prev) =>
+        prev ? { ...prev, stripe_account_id: null, ticketing_enabled: data.ticketing_enabled } : prev,
+      )
     } catch (err) {
-      console.error('Error disconnecting Stripe:', err)
-      setConnectError('Failed to disconnect Stripe')
+      setConnectError(err instanceof Error ? err.message : 'Failed to disconnect Stripe')
     } finally {
       setIsDisconnecting(false)
     }
@@ -265,24 +247,10 @@ function AdminTicketsPageInner() {
 
   // Fetch ticketing settings
   React.useEffect(() => {
-    const fetchSettings = async () => {
-      const token = getAccessToken()
-      if (!token) return
-      try {
-        const response = await fetch(
-          `/api/v1/events/${eventSlug}/admin/ticketing-settings`,
-          { headers: { Authorization: `Bearer ${token}` } },
-        )
-        if (response.ok) {
-          const data = await response.json()
-          setSettings(data)
-        }
-      } catch (err) {
-        console.error('Error fetching ticketing settings:', err)
-      }
-    }
-    fetchSettings()
-  }, [eventSlug])
+    apiFetch<NonNullable<typeof settings>>(`${apiBase}/ticketing-settings`)
+      .then(setSettings)
+      .catch(() => setTicketingError('Failed to load ticketing settings'))
+  }, [apiBase])
 
   // Paid checkout needs either a connected account that can take charges, or
   // the explicit platform-account fallback. Free-only events may enable
@@ -306,32 +274,16 @@ function AdminTicketsPageInner() {
   const handleToggleTicketing = async () => {
     if (!settings) return
     if (!settings.ticketing_enabled && !canEnableTicketing) return
-    const token = getAccessToken()
-    if (!token) return
-
     setIsTogglingTicketing(true)
     setTicketingError(null)
     try {
-      const response = await fetch(
-        `/api/v1/events/${eventSlug}/admin/ticketing-settings`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({ ticketing_enabled: !settings.ticketing_enabled }),
-        },
-      )
-      const data = await response.json().catch(() => ({}))
-      if (response.ok) {
-        setSettings((prev) => (prev ? { ...prev, ...data } : data))
-      } else {
-        setTicketingError(data.error || 'Failed to update ticket sales')
-      }
+      const data = await apiFetch<NonNullable<typeof settings>>(`${apiBase}/ticketing-settings`, {
+        method: 'POST',
+        json: { ticketing_enabled: !settings.ticketing_enabled },
+      })
+      setSettings((prev) => (prev ? { ...prev, ...data } : data))
     } catch (err) {
-      console.error('Error toggling ticketing:', err)
-      setTicketingError('Failed to update ticket sales')
+      setTicketingError(err instanceof Error ? err.message : 'Failed to update ticket sales')
     } finally {
       setIsTogglingTicketing(false)
     }
@@ -346,37 +298,15 @@ function AdminTicketsPageInner() {
   const [formSaleEnds, setFormSaleEnds] = React.useState('')
   const [formAllowsProposals, setFormAllowsProposals] = React.useState(true)
   const [formAllowsVoting, setFormAllowsVoting] = React.useState(true)
+  const [tierError, setTierError] = React.useState<string | null>(null)
 
   // Fetch tiers on mount
   React.useEffect(() => {
-    const fetchTiers = async () => {
-      const token = getAccessToken()
-      if (!token) return
-
-      try {
-        const response = await fetch(
-          `${SUPABASE_URL}/rest/v1/ticket_tiers?event_id=eq.${event.id}&order=display_order`,
-          {
-            headers: {
-              'apikey': SUPABASE_KEY,
-              'Authorization': `Bearer ${token}`,
-            },
-          }
-        )
-
-        if (response.ok) {
-          const data = await response.json()
-          setTiers(data)
-        }
-      } catch (err) {
-        console.error('Error fetching tiers:', err)
-      } finally {
-        setIsLoading(false)
-      }
-    }
-
-    fetchTiers()
-  }, [event.id])
+    apiFetch<{ tiers: TicketTier[] }>(`${apiBase}/ticketing-settings/tiers`)
+      .then((data) => setTiers(data.tiers))
+      .catch((err) => setTierError(err instanceof Error ? err.message : 'Failed to load ticket tiers'))
+      .finally(() => setIsLoading(false))
+  }, [apiBase])
 
   const resetForm = () => {
     setFormName('')
@@ -400,8 +330,8 @@ function AdminTicketsPageInner() {
     setFormDescription(tier.description || '')
     setFormPrice((tier.price_cents / 100).toString())
     setFormQuantity(tier.quantity_total?.toString() || '')
-    setFormSaleStarts(tier.sale_starts_at ? tier.sale_starts_at.slice(0, 16) : '')
-    setFormSaleEnds(tier.sale_ends_at ? tier.sale_ends_at.slice(0, 16) : '')
+    setFormSaleStarts(toLocalInput(tier.sale_starts_at))
+    setFormSaleEnds(toLocalInput(tier.sale_ends_at))
     setFormAllowsProposals(tier.allows_proposals)
     setFormAllowsVoting(tier.allows_voting)
     setEditingTier(tier)
@@ -409,72 +339,42 @@ function AdminTicketsPageInner() {
   }
 
   const handleSave = async () => {
-    const token = getAccessToken()
-    if (!token || !formName.trim()) return
+    if (!formName.trim()) return
 
     setIsSaving(true)
+    setTierError(null)
 
     try {
       const tierData = {
-        event_id: event.id,
         name: formName.trim(),
         description: formDescription.trim() || null,
         price_cents: Math.round(parseFloat(formPrice || '0') * 100),
-        quantity_total: formQuantity ? parseInt(formQuantity) : null,
-        sale_starts_at: formSaleStarts || null,
-        sale_ends_at: formSaleEnds || null,
+        quantity_total: formQuantity ? parseInt(formQuantity, 10) : null,
+        sale_starts_at: fromLocalInput(formSaleStarts),
+        sale_ends_at: fromLocalInput(formSaleEnds),
         allows_proposals: formAllowsProposals,
         allows_voting: formAllowsVoting,
-        display_order: editingTier ? editingTier.display_order : tiers.length,
       }
 
       if (editingTier) {
-        // Update existing
-        const response = await fetch(
-          `${SUPABASE_URL}/rest/v1/ticket_tiers?id=eq.${editingTier.id}`,
-          {
-            method: 'PATCH',
-            headers: {
-              'apikey': SUPABASE_KEY,
-              'Authorization': `Bearer ${token}`,
-              'Content-Type': 'application/json',
-              'Prefer': 'return=representation',
-            },
-            body: JSON.stringify(tierData),
-          }
+        const { tier: updated } = await apiFetch<{ tier: TicketTier }>(
+          `${apiBase}/ticketing-settings/tiers/${editingTier.id}`,
+          { method: 'PATCH', json: tierData },
         )
-
-        if (response.ok) {
-          const [updated] = await response.json()
-          setTiers(prev => prev.map(t => t.id === updated.id ? updated : t))
-        }
+        setTiers(prev => prev.map(t => t.id === updated.id ? updated : t))
       } else {
-        // Create new
-        const response = await fetch(
-          `${SUPABASE_URL}/rest/v1/ticket_tiers`,
-          {
-            method: 'POST',
-            headers: {
-              'apikey': SUPABASE_KEY,
-              'Authorization': `Bearer ${token}`,
-              'Content-Type': 'application/json',
-              'Prefer': 'return=representation',
-            },
-            body: JSON.stringify(tierData),
-          }
-        )
-
-        if (response.ok) {
-          const [created] = await response.json()
-          setTiers(prev => [...prev, created])
-        }
+        const { tier: created } = await apiFetch<{ tier: TicketTier }>(`${apiBase}/ticketing-settings/tiers`, {
+          method: 'POST',
+          json: { ...tierData, display_order: tiers.length },
+        })
+        setTiers(prev => [...prev, created])
       }
 
       setIsCreating(false)
       resetForm()
       setEditingTier(null)
     } catch (err) {
-      console.error('Error saving tier:', err)
+      setTierError(err instanceof Error ? err.message : 'Failed to save tier')
     } finally {
       setIsSaving(false)
     }
@@ -482,55 +382,25 @@ function AdminTicketsPageInner() {
 
   const handleDelete = async (tierId: string) => {
     if (!confirm('Are you sure you want to delete this ticket tier?')) return
-
-    const token = getAccessToken()
-    if (!token) return
-
+    setTierError(null)
     try {
-      const response = await fetch(
-        `${SUPABASE_URL}/rest/v1/ticket_tiers?id=eq.${tierId}`,
-        {
-          method: 'DELETE',
-          headers: {
-            'apikey': SUPABASE_KEY,
-            'Authorization': `Bearer ${token}`,
-          },
-        }
-      )
-
-      if (response.ok) {
-        setTiers(prev => prev.filter(t => t.id !== tierId))
-      }
+      await apiFetch(`${apiBase}/ticketing-settings/tiers/${tierId}`, { method: 'DELETE' })
+      setTiers(prev => prev.filter(t => t.id !== tierId))
     } catch (err) {
-      console.error('Error deleting tier:', err)
+      setTierError(err instanceof Error ? err.message : 'Failed to delete tier')
     }
   }
 
   const toggleActive = async (tier: TicketTier) => {
-    const token = getAccessToken()
-    if (!token) return
-
+    setTierError(null)
     try {
-      const response = await fetch(
-        `${SUPABASE_URL}/rest/v1/ticket_tiers?id=eq.${tier.id}`,
-        {
-          method: 'PATCH',
-          headers: {
-            'apikey': SUPABASE_KEY,
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json',
-            'Prefer': 'return=representation',
-          },
-          body: JSON.stringify({ is_active: !tier.is_active }),
-        }
+      const { tier: updated } = await apiFetch<{ tier: TicketTier }>(
+        `${apiBase}/ticketing-settings/tiers/${tier.id}`,
+        { method: 'PATCH', json: { is_active: !tier.is_active } },
       )
-
-      if (response.ok) {
-        const [updated] = await response.json()
-        setTiers(prev => prev.map(t => t.id === updated.id ? updated : t))
-      }
+      setTiers(prev => prev.map(t => t.id === updated.id ? updated : t))
     } catch (err) {
-      console.error('Error toggling tier:', err)
+      setTierError(err instanceof Error ? err.message : 'Failed to update tier')
     }
   }
 
@@ -841,7 +711,7 @@ function AdminTicketsPageInner() {
                     <p className="text-2xl font-bold">
                       {formatPrice(
                         tiers.reduce((sum, t) => sum + (t.quantity_sold * t.price_cents), 0),
-                        'usd'
+                        tiers[0]?.currency || 'usd'
                       )}
                     </p>
                     <p className="text-sm text-muted-foreground">Total Revenue</p>
@@ -863,6 +733,13 @@ function AdminTicketsPageInner() {
               </CardContent>
             </Card>
           </div>
+
+          {tierError && (
+            <Alert variant="destructive">
+              <AlertTriangle className="h-4 w-4" />
+              <AlertDescription>{tierError}</AlertDescription>
+            </Alert>
+          )}
 
           {/* Create/Edit Form */}
           {isCreating && (

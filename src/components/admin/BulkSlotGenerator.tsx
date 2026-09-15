@@ -32,6 +32,8 @@ const DURATION_OPTIONS = [
   { value: 120, label: '2 hours' },
 ]
 
+const ALL = '__all__'
+
 const BREAK_DURATION_OPTIONS = [
   { value: 10, label: '10 min' },
   { value: 15, label: '15 min' },
@@ -67,58 +69,41 @@ export function BulkSlotGenerator({
   const [includeBreaks, setIncludeBreaks] = React.useState(false)
   const [breakDuration, setBreakDuration] = React.useState(15)
 
-  // Generate preview
-  const preview = React.useMemo(() => {
-    const slots: GeneratedSlot[] = []
+  // One day's pattern of slots, as wall-clock times in the event timezone.
+  const pattern = React.useMemo(() => {
+    const slots: Array<Pick<GeneratedSlot, 'startTime' | 'endTime' | 'label' | 'isBreak'>> = []
     let currentMinutes = startHour * 60
     const endMinutes = endHour * 60
-
     while (currentMinutes + duration <= endMinutes) {
-      const startTime = minutesToTime(currentMinutes)
       const slotEndMinutes = currentMinutes + duration
-      const endTime = minutesToTime(slotEndMinutes)
-
-      slots.push({
-        venueId,
-        dayDate,
-        startTime,
-        endTime,
-        label: '',
-        isBreak: false,
-      })
-
+      slots.push({ startTime: minutesToTime(currentMinutes), endTime: minutesToTime(slotEndMinutes), label: '', isBreak: false })
       currentMinutes = slotEndMinutes
-
-      // Add break if enabled
-      if (includeBreaks && currentMinutes + duration <= endMinutes) {
-        const breakStart = minutesToTime(currentMinutes)
+      if (includeBreaks && currentMinutes + breakDuration + duration <= endMinutes) {
         const breakEndMinutes = currentMinutes + breakDuration
-        const breakEnd = minutesToTime(breakEndMinutes)
-
-        slots.push({
-          venueId,
-          dayDate,
-          startTime: breakStart,
-          endTime: breakEnd,
-          label: 'Break',
-          isBreak: true,
-        })
-
+        slots.push({ startTime: minutesToTime(currentMinutes), endTime: minutesToTime(breakEndMinutes), label: 'Break', isBreak: true })
         currentMinutes = breakEndMinutes
       }
     }
-
     return slots
-  }, [venueId, dayDate, startHour, endHour, duration, includeBreaks, breakDuration])
+  }, [startHour, endHour, duration, includeBreaks, breakDuration])
+
+  // Every (room, day) the pattern is applied to; saved in one transaction.
+  const preview = React.useMemo(() => {
+    const rooms = venueId === ALL ? venues.map((v) => v.id) : [venueId]
+    const days = dayDate === ALL ? eventDays.map((d) => d.date) : [dayDate]
+    return rooms.flatMap((room) => days.flatMap((day) => pattern.map((slot) => ({ ...slot, venueId: room, dayDate: day }))))
+  }, [pattern, venueId, dayDate, venues, eventDays])
 
   const selectedVenue = venues.find(v => v.id === venueId)
+  const id = React.useId()
 
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div className="space-y-2">
-          <Label>Venue</Label>
+          <Label htmlFor={`${id}-venue`}>Room</Label>
           <select
+            id={`${id}-venue`}
             value={venueId}
             onChange={(e) => setVenueId(e.target.value)}
             className="w-full h-10 rounded-md border bg-background px-3 text-sm"
@@ -128,12 +113,14 @@ export function BulkSlotGenerator({
                 {venue.name} {venue.capacity ? `(${venue.capacity} cap)` : ''}
               </option>
             ))}
+            {venues.length > 1 && <option value={ALL}>Every room</option>}
           </select>
         </div>
 
         <div className="space-y-2">
-          <Label>Date</Label>
+          <Label htmlFor={`${id}-day`}>Day</Label>
           <select
+            id={`${id}-day`}
             value={dayDate}
             onChange={(e) => setDayDate(e.target.value)}
             className="w-full h-10 rounded-md border bg-background px-3 text-sm"
@@ -143,12 +130,14 @@ export function BulkSlotGenerator({
                 {day.label}
               </option>
             ))}
+            {eventDays.length > 1 && <option value={ALL}>Every day</option>}
           </select>
         </div>
 
         <div className="space-y-2">
-          <Label>Start Hour</Label>
+          <Label htmlFor={`${id}-start`}>Start hour</Label>
           <select
+            id={`${id}-start`}
             value={startHour}
             onChange={(e) => setStartHour(Number(e.target.value))}
             className="w-full h-10 rounded-md border bg-background px-3 text-sm"
@@ -162,8 +151,9 @@ export function BulkSlotGenerator({
         </div>
 
         <div className="space-y-2">
-          <Label>End Hour</Label>
+          <Label htmlFor={`${id}-end`}>End hour</Label>
           <select
+            id={`${id}-end`}
             value={endHour}
             onChange={(e) => setEndHour(Number(e.target.value))}
             className="w-full h-10 rounded-md border bg-background px-3 text-sm"
@@ -177,8 +167,9 @@ export function BulkSlotGenerator({
         </div>
 
         <div className="space-y-2">
-          <Label>Slot Duration</Label>
+          <Label htmlFor={`${id}-duration`}>Slot length</Label>
           <select
+            id={`${id}-duration`}
             value={duration}
             onChange={(e) => setDuration(Number(e.target.value))}
             className="w-full h-10 rounded-md border bg-background px-3 text-sm"
@@ -192,12 +183,13 @@ export function BulkSlotGenerator({
         </div>
 
         <div className="space-y-2">
-          <Label>Breaks Between Slots</Label>
+          <Label id={`${id}-breaks`}>Breaks between slots</Label>
           <div className="flex items-center gap-3 h-10">
             <button
               type="button"
               role="switch"
               aria-checked={includeBreaks}
+              aria-labelledby={`${id}-breaks`}
               onClick={() => setIncludeBreaks(!includeBreaks)}
               className={cn(
                 'relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors',
@@ -213,6 +205,7 @@ export function BulkSlotGenerator({
             </button>
             {includeBreaks && (
               <select
+                aria-label="Break length"
                 value={breakDuration}
                 onChange={(e) => setBreakDuration(Number(e.target.value))}
                 className="h-10 rounded-md border bg-background px-3 text-sm"
@@ -229,12 +222,12 @@ export function BulkSlotGenerator({
       </div>
 
       {/* Preview */}
-      {preview.length > 0 && (
+      {pattern.length > 0 && (
         <div className="space-y-2">
-          <Label>Preview ({preview.filter(s => !s.isBreak).length} sessions, {preview.filter(s => s.isBreak).length} breaks)</Label>
+          <Label>Each day: {pattern.filter(s => !s.isBreak).length} sessions, {pattern.filter(s => s.isBreak).length} breaks</Label>
           <div className="rounded-lg border bg-muted/30 p-3 max-h-48 overflow-y-auto">
             <div className="space-y-1.5">
-              {preview.map((slot, index) => (
+              {pattern.map((slot, index) => (
                 <div
                   key={index}
                   className={cn(
@@ -256,7 +249,7 @@ export function BulkSlotGenerator({
             </div>
           </div>
           <p className="text-xs text-muted-foreground">
-            Slots for {selectedVenue?.name} on {eventDays.find(d => d.date === dayDate)?.label}
+            {venueId === ALL ? 'Every room' : selectedVenue?.name} · {dayDate === ALL ? 'every day' : eventDays.find(d => d.date === dayDate)?.label} · {preview.length} slots in total, saved together or not at all
           </p>
         </div>
       )}
@@ -271,7 +264,7 @@ export function BulkSlotGenerator({
           disabled={isSaving || preview.length === 0}
         >
           <Zap className="h-4 w-4 mr-2" />
-          Generate {preview.filter(s => !s.isBreak).length} Slots
+          Generate {preview.length} slots
         </Button>
         <Button variant="outline" onClick={onCancel}>
           Cancel

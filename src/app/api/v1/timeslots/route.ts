@@ -1,58 +1,23 @@
-import { createAdminClient } from '@/lib/supabase/server'
-import { validateApiKey, resolvePartnerEvent } from '@/lib/api/auth'
-import {
-  apiSuccess,
-  unauthorized,
-  badRequest,
-  methodNotAllowed,
-  parseIncludes,
-} from '@/lib/api/response'
+import { resolvePublicEvent } from '@/lib/api/auth'
+import { badRequest, methodNotAllowed, parseIncludes } from '@/lib/api/response'
+import { DAY_REGEX, publicJson, publishedTimeSlots } from '../schedule/public-read'
 
-const TIMESLOT_FIELDS = 'id,start_time,end_time,label,is_break,day_date,slot_type,venue_id,created_at'
-const VALID_INCLUDES = ['venue']
-
-const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/
+/**
+ * GET /api/v1/timeslots?event=<slug>[&day=YYYY-MM-DD][&include=venue] — time slots of the
+ * gathering's published slot grids (`schellingpoint.draft.slotGrid`). Public; no key.
+ */
+export const dynamic = 'force-dynamic'
 
 export async function GET(request: Request) {
-  if (!validateApiKey(request)) return unauthorized()
+  const includes = parseIncludes(request, ['venue'])
+  if ('error' in includes) return includes.error
+  const day = new URL(request.url).searchParams.get('day')
+  if (day && !DAY_REGEX.test(day)) return badRequest('Invalid day format. Expected YYYY-MM-DD.')
 
-  const result = parseIncludes(request, VALID_INCLUDES)
-  if ('error' in result) return result.error
-
-  const url = new URL(request.url)
-  const dayParam = url.searchParams.get('day')
-
-  if (dayParam && !DATE_REGEX.test(dayParam)) {
-    return badRequest('Invalid day format. Expected YYYY-MM-DD.')
-  }
-
-  const supabase = await createAdminClient()
-
-  const resolved = await resolvePartnerEvent(request, supabase)
+  const resolved = await resolvePublicEvent(request)
   if ('error' in resolved) return resolved.error
-
-  let selectQuery = TIMESLOT_FIELDS
-  if (result.includes.includes('venue')) {
-    selectQuery += ',venue:venues(id,name,slug)'
-  }
-
-  let query = supabase
-    .from('time_slots')
-    .select(selectQuery)
-    .eq('event_id', resolved.event.id)
-    .order('start_time')
-
-  if (dayParam) {
-    query = query.eq('day_date', dayParam)
-  }
-
-  const { data, error } = await query
-
-  if (error) {
-    return badRequest(error.message)
-  }
-
-  return apiSuccess(data, data?.length ?? 0)
+  const slots = await publishedTimeSlots(resolved.event.id, { day, includeVenue: includes.includes.includes('venue') })
+  return publicJson(slots, slots.length)
 }
 
 export async function POST() { return methodNotAllowed() }

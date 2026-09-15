@@ -16,7 +16,7 @@ import { cn } from '@/lib/utils'
 interface Track {
   id: string
   name: string
-  color: string
+  color: string | null
 }
 
 interface BatchActionsProps {
@@ -139,7 +139,7 @@ export function BatchActions({
                       >
                         <span
                           className="w-3 h-3 rounded-full"
-                          style={{ backgroundColor: track.color }}
+                          style={{ backgroundColor: track.color ?? undefined }}
                         />
                         {track.name}
                       </button>
@@ -182,6 +182,7 @@ export function BatchActions({
             onClick={onClearSelection}
             disabled={isLoading}
             className="text-muted-foreground"
+            aria-label="Clear selection"
           >
             <X className="h-4 w-4" />
           </Button>
@@ -247,7 +248,7 @@ export function BatchActions({
           >
             <h3 className="font-semibold mb-2">Delete {selectedCount} Session{selectedCount > 1 ? 's' : ''}?</h3>
             <p className="text-sm text-muted-foreground mb-4">
-              This action cannot be undone. All associated votes will also be deleted.
+              This cannot be undone. Sessions already published on the network are skipped — cancel those from the schedule builder.
             </p>
             <div className="flex gap-2">
               <Button

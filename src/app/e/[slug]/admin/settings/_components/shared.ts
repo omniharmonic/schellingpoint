@@ -2,41 +2,51 @@
 
 import * as React from 'react'
 import { useRouter } from 'next/navigation'
+import { apiFetch, ApiError } from '@/lib/api/client'
 import type { EventRow } from '@/types/event'
 
 // ============================================================================
-// Auth + API helpers (localStorage bearer token, same as the rest of the app)
+// API helpers (same-origin, session cookie — plan §3.3)
 // ============================================================================
 
-export function getAccessToken(): string | null {
-  if (typeof window === 'undefined') return null
-  try {
-    const key = `sb-${new URL(process.env.NEXT_PUBLIC_SUPABASE_URL!).hostname.split('.')[0]}-auth-token`
-    return JSON.parse(localStorage.getItem(key) || '{}').access_token || null
-  } catch { return null }
-}
-
 export class SettingsError extends Error {
-  constructor(message: string, public field: string | null = null, public status = 0) { super(message) }
+  constructor(message: string, public field: string | null = null, public status = 0, public code?: string) { super(message) }
 }
 
-async function request(path: string, init: RequestInit) {
-  const token = getAccessToken()
-  if (!token) throw new SettingsError('Sign in again to save your changes.')
-  const response = await fetch(path, { ...init, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...(init.headers || {}) } })
-  const data = await response.json().catch(() => ({}))
-  if (!response.ok) throw new SettingsError(data.error || 'Could not save event settings.', data.field ?? null, response.status)
-  return data
+async function request<T>(path: string, init: RequestInit & { json?: unknown }): Promise<T> {
+  try {
+    return await apiFetch<T>(path, init)
+  } catch (err) {
+    if (err instanceof ApiError) {
+      const message = err.status === 401 ? 'Sign in again to save your changes.' : err.message || 'Could not save event settings.'
+      throw new SettingsError(message, err.field ?? null, err.status, err.code)
+    }
+    throw new SettingsError('Could not reach the server. Check your connection and try again.')
+  }
 }
 
-export interface SaveResult { event: EventRow; notified: number }
+/** One best-effort write to the network after a save (see `src/lib/events/network.ts`). */
+export interface NetworkWrite { action: 'publish-gathering' | 'publish-policy'; ok: boolean; written: string[]; errors: string[] }
+
+export interface SaveResult { event: EventRow & { actor_did?: string | null; atproto_published_at?: string | null }; notified: number; network?: NetworkWrite[] }
 
 export function patchEventSettings(eventId: string, patch: Record<string, unknown>): Promise<SaveResult> {
-  return request(`/api/events/${eventId}/settings`, { method: 'PATCH', body: JSON.stringify(patch) })
+  return request(`/api/events/${eventId}/settings`, { method: 'PATCH', json: patch })
 }
 
 export function deleteEvent(eventId: string): Promise<{ success: boolean }> {
   return request(`/api/events/${eventId}/settings`, { method: 'DELETE' })
+}
+
+export function createIdentity(eventId: string): Promise<{ did: string; handle: string; minted: boolean }> {
+  return request(`/api/events/${eventId}/identity`, { method: 'POST', json: {} })
+}
+
+/** A sentence for the save banner when the network side of a save did not fully land. */
+export function networkNote(result: SaveResult): string {
+  const failed = (result.network ?? []).filter(w => !w.ok)
+  if (!failed.length) return ''
+  return ' Saved, but its public records were not all updated; retry from the Network page.'
 }
 
 // ============================================================================
@@ -57,7 +67,8 @@ export function useSectionSave(eventId: string) {
     setState({ status: 'saving' })
     try {
       const result = await patchEventSettings(eventId, patch)
-      setState({ status: 'saved', message: typeof successMessage === 'function' ? successMessage(result) : successMessage })
+      const message = typeof successMessage === 'function' ? successMessage(result) : successMessage
+      setState({ status: 'saved', message: `${message}${networkNote(result)}` })
       router.refresh()
       return result
     } catch (err) {

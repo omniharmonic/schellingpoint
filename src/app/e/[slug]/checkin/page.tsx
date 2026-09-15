@@ -7,8 +7,8 @@ import { CheckCircle, XCircle, AlertTriangle, Users, UserCheck, Loader2, Refresh
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { useAuth } from '@/hooks/useAuth'
-import { useEvent } from '@/contexts/EventContext'
-import { useEventRole } from '@/contexts/EventContext'
+import { useEvent, useEventRole } from '@/contexts/EventContext'
+import { apiFetch } from '@/lib/api/client'
 import { cn } from '@/lib/utils'
 
 // Dynamic import to avoid SSR issues with camera
@@ -30,12 +30,11 @@ interface CheckInResult {
   code?: string
   attendee?: {
     name: string
-    email?: string
-    avatarUrl?: string
-    tierName?: string
+    avatarUrl?: string | null
+    tierName?: string | null
     ticketId?: string
   }
-  checkedInAt?: string
+  checkedInAt?: string | null
 }
 
 interface CheckInStats {
@@ -44,26 +43,11 @@ interface CheckInStats {
   pending: number
 }
 
-function getAccessToken(): string | null {
-  const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!
-  const storageKey = `sb-${new URL(SUPABASE_URL).hostname.split('.')[0]}-auth-token`
-  const stored = localStorage.getItem(storageKey)
-  if (stored) {
-    try {
-      const session = JSON.parse(stored)
-      return session?.access_token || null
-    } catch {
-      return null
-    }
-  }
-  return null
-}
-
 export default function CheckInPage() {
   const router = useRouter()
   const { user } = useAuth()
   const event = useEvent()
-  const { role, isAdmin } = useEventRole()
+  const { can, isLoading: roleLoading } = useEventRole()
 
   const [scanning, setScanning] = React.useState(true)
   const [lastResult, setLastResult] = React.useState<CheckInResult | null>(null)
@@ -72,26 +56,15 @@ export default function CheckInPage() {
   const [lastScannedCode, setLastScannedCode] = React.useState<string | null>(null)
 
   // Check permissions
-  const canCheckIn = isAdmin || role === 'volunteer'
+  const canCheckIn = can('checkInAttendees')
 
   // Fetch stats
   const fetchStats = React.useCallback(async () => {
-    const token = getAccessToken()
-    if (!token) return
-
     try {
-      const response = await fetch(`/api/v1/events/${event.slug}/checkin`, {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      })
-
-      if (response.ok) {
-        const data = await response.json()
-        setStats(data.stats)
-      }
-    } catch (err) {
-      console.error('Error fetching stats:', err)
+      const data = await apiFetch<{ stats: CheckInStats }>(`/api/v1/events/${encodeURIComponent(event.slug)}/checkin`)
+      setStats(data.stats)
+    } catch {
+      // Stats are informational; the scanner keeps working without them.
     }
   }, [event.slug])
 
@@ -110,45 +83,33 @@ export default function CheckInPage() {
     setScanning(false) // Pause scanner while processing
 
     try {
-      const token = getAccessToken()
-      if (!token) {
+      // Same-origin fetch rather than apiFetch: a refused check-in (409) carries the attendee
+      // and the earlier check-in time in its body, which the door needs to resolve it.
+      const response = await fetch(`/api/v1/events/${encodeURIComponent(event.slug)}/checkin`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ qrToken }),
+      })
+      if (response.status === 401) {
         router.push(`/login?redirect=${encodeURIComponent(`/e/${event.slug}/checkin`)}`)
         return
       }
-
-      const response = await fetch(`/api/v1/events/${event.slug}/checkin`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
-        },
-        body: JSON.stringify({ qrToken }),
-      })
-
-      const data = await response.json()
-
+      const data = (await response.json().catch(() => ({}))) as Partial<CheckInResult>
       if (response.ok) {
-        setLastResult({
-          success: true,
-          attendee: data.attendee,
-        })
-        // Refresh stats
+        setLastResult({ success: true, attendee: data.attendee })
         fetchStats()
       } else {
         setLastResult({
           success: false,
-          error: data.error,
+          error: data.error || 'Failed to process check-in',
           code: data.code,
           attendee: data.attendee,
-          checkedInAt: data.checkedInAt,
+          checkedInAt: data.checkedInAt ?? undefined,
         })
       }
-    } catch (err) {
-      console.error('Check-in error:', err)
-      setLastResult({
-        success: false,
-        error: 'Failed to process check-in',
-      })
+    } catch {
+      setLastResult({ success: false, error: 'Failed to process check-in' })
     } finally {
       setProcessing(false)
     }
@@ -173,6 +134,14 @@ export default function CheckInPage() {
             <Button onClick={() => router.push(`/login?redirect=${encodeURIComponent(`/e/${event.slug}/checkin`)}`)}>Log In</Button>
           </CardContent>
         </Card>
+      </div>
+    )
+  }
+
+  if (roleLoading) {
+    return (
+      <div className="container mx-auto px-4 py-8 flex justify-center">
+        <Loader2 className="h-8 w-8 animate-spin" />
       </div>
     )
   }
@@ -282,9 +251,6 @@ export default function CheckInPage() {
                   )}
                   <div>
                     <p className="font-semibold">{lastResult.attendee.name}</p>
-                    {lastResult.attendee.email && (
-                      <p className="text-sm text-muted-foreground">{lastResult.attendee.email}</p>
-                    )}
                     {lastResult.attendee.tierName && (
                       <p className="text-sm text-muted-foreground">{lastResult.attendee.tierName}</p>
                     )}

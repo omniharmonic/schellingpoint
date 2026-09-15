@@ -1,97 +1,84 @@
-import { createAdminClient } from '@/lib/supabase/server'
-import { validateApiKey, resolvePartnerEvent } from '@/lib/api/auth'
-import { apiSuccess, unauthorized, badRequest, methodNotAllowed } from '@/lib/api/response'
+import { resolvePublicEvent } from '@/lib/api/auth'
+import { badRequest, methodNotAllowed } from '@/lib/api/response'
+import { DAY_REGEX, publicJson, publishedSessions, publishedTimeSlots, type PublicSession, type PublicTimeSlot } from './public-read'
 
-const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/
+/**
+ * GET /api/v1/schedule?event=<slug>[&day=YYYY-MM-DD] — the gathering's published schedule,
+ * grouped by day. Public; no key; `Cache-Control: public, max-age=60`.
+ *
+ *   { data: { gathering: { slug, name, did, uri },
+ *             days: [{ day, slots: [{ ...slot, sessions: PublicSession[] }] }],
+ *             unslotted: PublicSession[] } }
+ *
+ * Only records the gathering actor has written: slots of published slot grids and sessions with
+ * a calendar event. A published session whose slot's grid is not published still appears in its
+ * slot (its calendar event carries the time anyway); self-hosted sessions without a slot are
+ * listed under `unslotted`. See ./public-read.ts for what is never served.
+ */
+export const dynamic = 'force-dynamic'
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-type SlotRow = Record<string, any>
-type SessionRow = Record<string, any>
+type ScheduleSlot = Omit<PublicTimeSlot, 'grid_uri'> & { grid_uri: string | null; sessions: PublicSession[] }
 
 export async function GET(request: Request) {
-  if (!validateApiKey(request)) return unauthorized()
+  const day = new URL(request.url).searchParams.get('day')
+  if (day && !DAY_REGEX.test(day)) return badRequest('Invalid day format. Expected YYYY-MM-DD.')
 
-  const url = new URL(request.url)
-  const dayParam = url.searchParams.get('day')
-
-  if (dayParam && !DATE_REGEX.test(dayParam)) {
-    return badRequest('Invalid day format. Expected YYYY-MM-DD.')
-  }
-
-  const supabase = await createAdminClient()
-
-  const resolved = await resolvePartnerEvent(request, supabase)
+  const resolved = await resolvePublicEvent(request)
   if ('error' in resolved) return resolved.error
-  const eventId = resolved.event.id
+  const { event } = resolved
 
-  // Fetch time slots with venue
-  let slotsQuery = supabase
-    .from('time_slots')
-    .select('id,start_time,end_time,label,is_break,day_date,slot_type,venue:venues(id,name,slug)')
-    .eq('event_id', eventId)
-    .order('start_time')
-
-  if (dayParam) {
-    slotsQuery = slotsQuery.eq('day_date', dayParam)
-  }
-
-  // Fetch scheduled sessions with track
-  const sessionsQuery = supabase
-    .from('sessions')
-    .select('id,title,description,format,duration,host_name,status,session_type,total_votes,time_slot_id,track:tracks(id,name,color)')
-    .eq('event_id', eventId)
-    .eq('status', 'scheduled')
-    .not('time_slot_id', 'is', null)
-
-  const [slotsResult, sessionsResult] = await Promise.all([
-    slotsQuery,
-    sessionsQuery,
+  const [slots, sessions] = await Promise.all([
+    publishedTimeSlots(event.id, { day, includeVenue: true }),
+    publishedSessions(event.id, { actorDid: event.actor_did, day }),
   ])
 
-  if (slotsResult.error) return badRequest(slotsResult.error.message)
-  if (sessionsResult.error) return badRequest(sessionsResult.error.message)
+  const bySlot = new Map<string, ScheduleSlot>()
+  for (const slot of slots) bySlot.set(slot.id, { ...slot, sessions: [] })
 
-  const slots: SlotRow[] = slotsResult.data ?? []
-  const sessions: SessionRow[] = sessionsResult.data ?? []
-
-  // Index sessions by time_slot_id
-  const sessionsBySlot = new Map<string, SessionRow[]>()
+  const unslotted: PublicSession[] = []
   for (const session of sessions) {
-    if (!session.time_slot_id) continue
-    const existing = sessionsBySlot.get(session.time_slot_id) ?? []
-    existing.push(session)
-    sessionsBySlot.set(session.time_slot_id, existing)
-  }
-
-  // Group slots by day
-  const dayMap = new Map<string, SlotRow[]>()
-
-  for (const slot of slots) {
-    const day = slot.day_date ?? slot.start_time.split('T')[0]
-    const slotSessions = sessionsBySlot.get(slot.id) ?? []
-
-    const entry = {
-      id: slot.id,
-      start_time: slot.start_time,
-      end_time: slot.end_time,
-      label: slot.label,
-      is_break: slot.is_break,
-      slot_type: slot.slot_type,
-      venue: slot.venue,
-      sessions: slotSessions,
+    const slotId = session.time_slot_id
+    if (!slotId) {
+      unslotted.push(session)
+      continue
     }
-
-    const existing = dayMap.get(day) ?? []
-    existing.push(entry)
-    dayMap.set(day, existing)
+    let slot = bySlot.get(slotId)
+    if (!slot) {
+      // The session's calendar event is public even if its grid is not: show the slot's time only.
+      slot = {
+        id: slotId,
+        start_time: session.start_time ?? '',
+        end_time: session.end_time ?? '',
+        label: null,
+        is_break: false,
+        day_date: session.start_time ? session.start_time.slice(0, 10) : null,
+        slot_type: 'session',
+        venue_id: session.venue?.id ?? null,
+        grid_uri: null,
+        venue: session.venue,
+        sessions: [],
+      }
+      bySlot.set(slotId, slot)
+    }
+    slot.sessions.push(session)
   }
 
-  // Convert to sorted array
-  const data = Array.from(dayMap.entries())
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([day, daySlots]) => ({ day, slots: daySlots }))
+  const days = new Map<string, ScheduleSlot[]>()
+  for (const slot of bySlot.values()) {
+    const key = slot.day_date ?? slot.start_time.slice(0, 10)
+    const list = days.get(key) ?? []
+    list.push(slot)
+    days.set(key, list)
+  }
 
-  return apiSuccess(data)
+  const data = {
+    gathering: { slug: event.slug, name: event.name, did: event.actor_did, uri: event.gathering_uri },
+    days: [...days.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([d, list]) => ({ day: d, slots: list.sort((x, y) => x.start_time.localeCompare(y.start_time)) })),
+    unslotted,
+  }
+  return publicJson(data)
 }
 
 export async function POST() { return methodNotAllowed() }

@@ -6,11 +6,16 @@ import { Loader2, UserCheck, UserPlus, Clock, Users } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useAuth } from '@/hooks/useAuth'
 import { useEvent } from '@/contexts/EventContext'
+import { apiFetch } from '@/lib/api/client'
 import { cn } from '@/lib/utils'
-import { getAccessToken } from '@/lib/supabase/client'
 
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+type RsvpStatus = 'confirmed' | 'waitlist'
+
+interface RsvpResponse {
+  my_rsvp: { status: RsvpStatus; waitlist_position: number | null; public: boolean } | null
+  rsvp_count: number
+  waitlist_count: number
+}
 
 interface RSVPButtonProps {
   sessionId: string
@@ -21,7 +26,7 @@ interface RSVPButtonProps {
   /** Venue capacity (null = unlimited) */
   capacity: number | null
   /** Initial user RSVP status */
-  initialStatus?: 'confirmed' | 'waitlist' | null
+  initialStatus?: RsvpStatus | null
   /** Initial waitlist position (if on waitlist) */
   initialWaitlistPosition?: number | null
   /** Button variant */
@@ -31,9 +36,14 @@ interface RSVPButtonProps {
   /** Show capacity info */
   showCapacity?: boolean
   /** Callback when RSVP changes */
-  onRSVPChange?: (status: 'confirmed' | 'waitlist' | null) => void
+  onRSVPChange?: (status: RsvpStatus | null) => void
 }
 
+/**
+ * RSVP for a scheduled session. The RSVP stays inside the gathering (spec §10); the server
+ * decides confirmed vs waitlist from venue capacity. Cancelling also retracts a public RSVP
+ * record if the attendee had chosen to publish one.
+ */
 export function RSVPButton({
   sessionId,
   rsvpCount,
@@ -50,13 +60,13 @@ export function RSVPButton({
   const { user } = useAuth()
   const event = useEvent()
 
-  const [status, setStatus] = React.useState<'confirmed' | 'waitlist' | null>(initialStatus)
+  const [status, setStatus] = React.useState<RsvpStatus | null>(initialStatus)
   const [waitlistPosition, setWaitlistPosition] = React.useState<number | null>(initialWaitlistPosition)
   const [isLoading, setIsLoading] = React.useState(false)
+  const [error, setError] = React.useState<string | null>(null)
   const [localRsvpCount, setLocalRsvpCount] = React.useState(rsvpCount)
   const [localWaitlistCount, setLocalWaitlistCount] = React.useState(waitlistCount)
 
-  // Sync with props when they change (e.g., after async fetch)
   React.useEffect(() => {
     setStatus(initialStatus)
     setWaitlistPosition(initialWaitlistPosition)
@@ -67,93 +77,28 @@ export function RSVPButton({
     setLocalWaitlistCount(waitlistCount)
   }, [rsvpCount, waitlistCount])
 
-  // Determine if there's room
   const hasRoom = capacity === null || localRsvpCount < capacity
-  const spotsLeft = capacity !== null ? capacity - localRsvpCount : null
+  const spotsLeft = capacity !== null ? Math.max(0, capacity - localRsvpCount) : null
 
   const handleRSVP = async () => {
     if (!user) {
-      router.push('/login')
+      router.push(`/login?returnTo=${encodeURIComponent(`/e/${event.slug}/sessions/${sessionId}`)}`)
       return
     }
-
-    const token = getAccessToken()
-    if (!token) {
-      router.push('/login')
-      return
-    }
-
     setIsLoading(true)
-
+    setError(null)
     try {
-      if (status) {
-        // Cancel RSVP
-        const response = await fetch(
-          `${SUPABASE_URL}/rest/v1/session_rsvps?user_id=eq.${user.id}&session_id=eq.${sessionId}`,
-          {
-            method: 'DELETE',
-            headers: {
-              'apikey': SUPABASE_KEY,
-              'Authorization': `Bearer ${token}`,
-            },
-          }
-        )
-
-        if (response.ok) {
-          // Optimistic update
-          if (status === 'confirmed') {
-            setLocalRsvpCount(prev => Math.max(0, prev - 1))
-          } else {
-            setLocalWaitlistCount(prev => Math.max(0, prev - 1))
-          }
-          setStatus(null)
-          setWaitlistPosition(null)
-          onRSVPChange?.(null)
-        } else {
-          throw new Error('Failed to cancel RSVP')
-        }
-      } else {
-        // Create RSVP
-        const newStatus = hasRoom ? 'confirmed' : 'waitlist'
-        const newWaitlistPosition = hasRoom ? null : localWaitlistCount + 1
-
-        const response = await fetch(
-          `${SUPABASE_URL}/rest/v1/session_rsvps`,
-          {
-            method: 'POST',
-            headers: {
-              'apikey': SUPABASE_KEY,
-              'Authorization': `Bearer ${token}`,
-              'Content-Type': 'application/json',
-              'Prefer': 'return=representation',
-            },
-            body: JSON.stringify({
-              event_id: event.id,
-              session_id: sessionId,
-              user_id: user.id,
-              status: newStatus,
-              waitlist_position: newWaitlistPosition,
-            }),
-          }
-        )
-
-        if (response.ok) {
-          // Optimistic update
-          if (newStatus === 'confirmed') {
-            setLocalRsvpCount(prev => prev + 1)
-          } else {
-            setLocalWaitlistCount(prev => prev + 1)
-          }
-          setStatus(newStatus)
-          setWaitlistPosition(newWaitlistPosition)
-          onRSVPChange?.(newStatus)
-        } else {
-          throw new Error('Failed to RSVP')
-        }
-      }
+      const result = await apiFetch<RsvpResponse>(
+        `/api/v1/events/${encodeURIComponent(event.slug)}/rsvps/${sessionId}`,
+        { method: status ? 'DELETE' : 'PUT', ...(status ? {} : { json: {} }) },
+      )
+      setStatus(result.my_rsvp?.status ?? null)
+      setWaitlistPosition(result.my_rsvp?.waitlist_position ?? null)
+      setLocalRsvpCount(result.rsvp_count)
+      setLocalWaitlistCount(result.waitlist_count)
+      onRSVPChange?.(result.my_rsvp?.status ?? null)
     } catch (err) {
-      console.error('Error with RSVP:', err)
-      // Could add toast notification here
+      setError(err instanceof Error ? err.message : 'Your RSVP could not be saved. Please try again.')
     } finally {
       setIsLoading(false)
     }
@@ -221,6 +166,8 @@ export function RSVPButton({
       >
         {renderButtonContent()}
       </Button>
+
+      {error && <p role="alert" className="text-xs text-destructive text-center">{error}</p>}
 
       {showCapacity && (
         <div className="flex items-center justify-center gap-1.5 text-xs text-muted-foreground">

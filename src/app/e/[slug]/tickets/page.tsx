@@ -8,10 +8,8 @@ import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle }
 import { Badge } from '@/components/ui/badge'
 import { useAuth } from '@/hooks/useAuth'
 import { useEvent } from '@/contexts/EventContext'
-import { formatPrice } from '@/lib/payments/stripe'
-
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+import { formatPrice } from '@/lib/payments/format'
+import { apiFetch, ApiError } from '@/lib/api/client'
 
 interface TicketTier {
   id: string
@@ -21,6 +19,8 @@ interface TicketTier {
   currency: string
   quantity_total: number | null
   quantity_sold: number
+  /** Confirmed tickets plus unexpired checkout holds. */
+  quantity_reserved: number
   sale_starts_at: string | null
   sale_ends_at: string | null
   is_active: boolean
@@ -35,23 +35,9 @@ interface UserTicket {
   status: string
 }
 
-function getAccessToken(): string | null {
-  const storageKey = `sb-${new URL(SUPABASE_URL).hostname.split('.')[0]}-auth-token`
-  const stored = localStorage.getItem(storageKey)
-  if (stored) {
-    try {
-      const session = JSON.parse(stored)
-      return session?.access_token || null
-    } catch {
-      return null
-    }
-  }
-  return null
-}
-
 export default function TicketsPage() {
   const router = useRouter()
-  const { user } = useAuth()
+  const { user, isLoading: authLoading } = useAuth()
   const event = useEvent()
 
   const [tiers, setTiers] = React.useState<TicketTier[]>([])
@@ -60,51 +46,30 @@ export default function TicketsPage() {
   const [purchasing, setPurchasing] = React.useState<string | null>(null)
   const [error, setError] = React.useState<string | null>(null)
 
-  // Fetch tiers and user tickets
+  // Tiers on sale and the viewer's own tickets
   React.useEffect(() => {
+    let cancelled = false
+    if (authLoading) return
     async function fetchData() {
       try {
-        // Fetch active tiers
-        const tiersRes = await fetch(
-          `${SUPABASE_URL}/rest/v1/ticket_tiers?event_id=eq.${event.id}&is_active=eq.true&order=display_order.asc`,
-          {
-            headers: {
-              'apikey': SUPABASE_KEY,
-            },
-          }
+        const data = await apiFetch<{ tiers: TicketTier[]; tickets: UserTicket[] }>(
+          `/api/v1/events/${encodeURIComponent(event.slug)}/tickets`,
         )
-        if (!tiersRes.ok) throw new Error('Ticket information unavailable')
-        const tiersData = await tiersRes.json()
-        setTiers(tiersData || [])
-
-        // Fetch user's tickets if logged in
-        if (user) {
-          const token = getAccessToken()
-          if (token) {
-            const ticketsRes = await fetch(
-              `${SUPABASE_URL}/rest/v1/tickets?event_id=eq.${event.id}&user_id=eq.${user.id}&status=neq.cancelled`,
-              {
-                headers: {
-                  'apikey': SUPABASE_KEY,
-                  'Authorization': `Bearer ${token}`,
-                },
-              }
-            )
-            if (!ticketsRes.ok) throw new Error('Your tickets could not be loaded')
-            const ticketsData = await ticketsRes.json()
-            setUserTickets(ticketsData || [])
-          }
-        }
-      } catch (err) {
-        console.error('Error fetching ticket data:', err)
-        setError('Failed to load ticket information')
+        if (cancelled) return
+        setTiers(data.tiers)
+        setUserTickets(data.tickets)
+        setError(null)
+      } catch {
+        if (!cancelled) setError('Failed to load ticket information')
       } finally {
-        setLoading(false)
+        if (!cancelled) setLoading(false)
       }
     }
-
     fetchData()
-  }, [event.id, user])
+    return () => {
+      cancelled = true
+    }
+  }, [event.slug, user?.id, authLoading])
 
   const handlePurchase = async (tier: TicketTier) => {
     if (!user) {
@@ -116,39 +81,22 @@ export default function TicketsPage() {
     setError(null)
 
     try {
-      const token = getAccessToken()
-      if (!token) {
-        router.push(`/login?redirect=${encodeURIComponent(`/e/${event.slug}/tickets`)}`)
-        return
-      }
-
-      // Create checkout session
-      const response = await fetch(`/api/v1/events/${event.slug}/checkout`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          tierId: tier.id,
-        }),
-      })
-
-      const data = await response.json()
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to create checkout session')
-      }
-
-      // Redirect to Stripe checkout
+      const data = await apiFetch<{ url?: string; ticketId?: string; status?: string }>(
+        `/api/v1/events/${encodeURIComponent(event.slug)}/checkout`,
+        { method: 'POST', json: { tierId: tier.id } },
+      )
       if (data.url) {
+        // Stripe Checkout (paid tiers)
         window.location.href = data.url
       } else if (data.ticketId) {
-        // Free ticket - redirect to success page
+        // Free ticket, confirmed server-side
         router.push(`/e/${event.slug}/tickets/success?ticket=${data.ticketId}`)
       }
     } catch (err) {
-      console.error('Error creating checkout:', err)
+      if (err instanceof ApiError && err.status === 401) {
+        router.push(`/login?redirect=${encodeURIComponent(`/e/${event.slug}/tickets`)}`)
+        return
+      }
       setError(err instanceof Error ? err.message : 'Failed to start checkout')
     } finally {
       setPurchasing(null)
@@ -166,7 +114,7 @@ export default function TicketsPage() {
       return { status: 'ended', label: 'Sales Ended' }
     }
 
-    if (tier.quantity_total !== null && tier.quantity_sold >= tier.quantity_total) {
+    if (tier.quantity_total !== null && tier.quantity_reserved >= tier.quantity_total) {
       return { status: 'soldout', label: 'Sold Out' }
     }
 
@@ -174,7 +122,7 @@ export default function TicketsPage() {
   }
 
   const userHasTicket = (tierId: string) => {
-    return userTickets.some(t => t.tier_id === tierId && t.status !== 'cancelled')
+    return userTickets.some(t => t.tier_id === tierId && (t.status === 'confirmed' || t.status === 'checked_in'))
   }
 
   if (loading) {
@@ -236,7 +184,7 @@ export default function TicketsPage() {
               const { status, label } = getTierStatus(tier)
               const hasTicket = userHasTicket(tier.id)
               const spotsLeft = tier.quantity_total !== null
-                ? tier.quantity_total - tier.quantity_sold
+                ? Math.max(0, tier.quantity_total - tier.quantity_reserved)
                 : null
 
               return (

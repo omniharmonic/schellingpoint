@@ -25,6 +25,9 @@ export const NSID = {
   // freeschool.draft — reused verbatim
   policy: 'freeschool.draft.policy',
   approval: 'freeschool.draft.approval',
+  series: 'freeschool.draft.series',
+  occurrence: 'freeschool.draft.occurrence',
+  skill: 'freeschool.draft.skill',
 
   // schellingpoint.draft — ours
   gathering: 'schellingpoint.draft.gathering',
@@ -69,8 +72,54 @@ export const INDEXED_COLLECTIONS: readonly Nsid[] = [
   NSID.membership,
   NSID.policy,
   NSID.approval,
+  NSID.series,
+  NSID.occurrence,
   ...SCHELLINGPOINT_COLLECTIONS,
 ]
+
+/**
+ * What a GATHERING repo holds (reconciliation scope for `events.actor_did`). Everything the
+ * gathering actor writes, nothing a person writes.
+ */
+export const GATHERING_COLLECTIONS: readonly Nsid[] = [
+  NSID.gathering,
+  NSID.policy,
+  NSID.event,
+  NSID.eventConfig,
+  NSID.eventListing,
+  NSID.membership,
+  NSID.venue,
+  NSID.track,
+  NSID.slotGrid,
+  NSID.slot,
+  NSID.tally,
+  NSID.proposal,
+  NSID.series,
+  NSID.occurrence,
+]
+
+/** What a PERSON's repo holds that matters to us (reconciliation scope for `accounts.did`). */
+export const PARTICIPANT_COLLECTIONS: readonly Nsid[] = [
+  NSID.proposal,
+  NSID.cohost,
+  NSID.endorsement,
+  NSID.timePreference,
+  NSID.rsvp,
+  NSID.approval,
+]
+
+/**
+ * Jetstream `wantedCollections`: our own NSIDs plus every borrowed record we read. The skill
+ * taxonomy is included so an authority edit reaches the cache before the 24 h refresh.
+ */
+export const JETSTREAM_COLLECTIONS: readonly Nsid[] = [...INDEXED_COLLECTIONS, NSID.skill]
+
+/** Collections we borrow and must never extend (sidecar rule). */
+export const BORROWED_PREFIXES: readonly string[] = ['community.lexicon.', 'coop.lexicon.', 'freeschool.draft.']
+
+export function isBorrowedNsid(nsid: string): boolean {
+  return BORROWED_PREFIXES.some((p) => nsid.startsWith(p))
+}
 
 /** `mode` / `status` fragment tokens on community.lexicon.calendar.event. */
 export const EVENT_MODE = {

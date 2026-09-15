@@ -1,6 +1,7 @@
 import { parseTimeInTimezone } from './timezone';
 import type { WizardState } from '@/app/create/useWizardState';
 import { isValidSlugFormat } from '@/lib/utils/slug';
+import { validatePolicyThresholds } from './policy';
 
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 const text = (value: unknown): value is string => typeof value === 'string';
@@ -16,6 +17,8 @@ export function validateWizardState(input: unknown): { valid: boolean; error?: s
   if (!text(state.basics.slug)) return fail('Event URL is required');
   const slug = isValidSlugFormat(state.basics.slug);
   if (!slug.valid) return fail(slug.error || 'Choose a valid event URL');
+  // The slug is also the gathering's subdomain label (src/lib/auth/handles.ts GATHERING_LABEL_RE).
+  if (!/^[a-z0-9](?:[a-z0-9-]{1,30}[a-z0-9])?$/.test(state.basics.slug)) return fail('Use 3–32 lowercase letters, numbers and hyphens for the event URL');
   if (!['public', 'private', 'unlisted'].includes(state.basics.visibility)) return fail('Choose an event visibility');
   if (!date(state.dates.startDate) || !date(state.dates.endDate)) return fail('Choose valid start and end dates', 1);
   if (state.dates.endDate < state.dates.startDate) return fail('End date must be on or after the start date', 1);
@@ -44,6 +47,10 @@ export function validateWizardState(input: unknown): { valid: boolean; error?: s
   if (!Number.isInteger(voting.maxProposalsPerUser) || voting.maxProposalsPerUser < 0) return fail('Proposal limit must be a whole number; use 0 for unlimited', 5);
   if (!['quadratic', 'linear', 'approval'].includes(voting.mechanism)) return fail('Choose a voting method', 5);
   if (!strings(voting.allowedFormats) || !voting.allowedFormats.length || voting.allowedFormats.some(f => !['talk','workshop','panel','discussion','demo','fireside','ceremony'].includes(f))) return fail('Choose at least one supported session format', 5);
+  if (voting.policyThresholds !== undefined) {
+    const thresholds = validatePolicyThresholds(voting.policyThresholds);
+    if (!thresholds.ok) return fail(thresholds.error, 5);
+  }
   if (!Array.isArray(voting.allowedDurations) || !voting.allowedDurations.length || voting.allowedDurations.some(d => !Number.isInteger(d) || d <= 0)) return fail('Choose positive whole-number session durations', 5);
   for (const [opens, closes] of [[voting.votingOpensAt, voting.votingClosesAt], [voting.proposalsOpenAt, voting.proposalsCloseAt]]) {
     if ([opens, closes].some(t => t !== null && t !== '' && (!text(t) || !Number.isFinite(Date.parse(t))))) return fail('Choose valid proposal and voting deadlines', 5);
@@ -51,6 +58,13 @@ export function validateWizardState(input: unknown): { valid: boolean; error?: s
       for (const value of [opens, closes]) if (value && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value)) parseTimeInTimezone(value.slice(11), value.slice(0,10), state.dates.timezone);
     } catch { return fail('A deadline falls in a clock change. Choose another time.', 5); }
     if (opens && closes && Date.parse(closes) <= Date.parse(opens)) return fail('Each closing deadline must follow its opening time', 5);
+  }
+  for (const image of [state.branding.logoUrl, state.branding.bannerUrl]) {
+    if (image === null || image === undefined || image === '') continue;
+    const uploaded = text(image) && /^\/uploads\/[a-z0-9/_.-]+$/i.test(image) && !image.includes('..');
+    let absolute = false;
+    try { absolute = text(image) && image.length <= 2048 && ['http:', 'https:'].includes(new URL(image).protocol); } catch { absolute = false; }
+    if (!uploaded && !absolute) return fail('Upload the logo and banner again', 6);
   }
   const theme = state.branding.theme;
   if (![theme.primary,theme.secondary,theme.accent].every(c => text(c) && /^#(?:[\da-f]{3}|[\da-f]{6})$/i.test(c)) || !['light','dark','system'].includes(theme.mode)) return fail('Choose valid theme colors and appearance', 6);

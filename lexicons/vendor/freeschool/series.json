@@ -1,0 +1,76 @@
+{
+  "lexicon": 1,
+  "id": "freeschool.draft.series",
+  "description": "Recurrence sidecar to a community.lexicon.calendar.event. The community calendar lexicon has NO recurrence field and will not gain one; a series is therefore a separate record that points at its first occurrence and states the rule by which further occurrences are generated. Occurrences are materialized as ORDINARY community.lexicon.calendar.event records, each carrying a freeschool.draft.occurrence sidecar pointing back here — so every occurrence is independently viewable, RSVP-able, cancellable and borrowable by any consumer that has never heard of this lexicon. Placement: PUBLIC alongside the first event when the series is public; in the event's invite space when the series is permissioned (a recurrence rule otherwise discloses the cadence of a private gathering).",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["firstEvent", "rrule", "freq", "timezone", "createdAt"],
+        "properties": {
+          "firstEvent": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef",
+            "description": "Strong reference to the first occurrence, which doubles as the series template: its name, description, locations, mode and duration are copied to each materialized occurrence. Anchoring on a real first event rather than on a dedicated template record means no phantom, dateless pseudo-event reaches the firehose, and a consumer that ignores this lexicon still sees a correct single event."
+          },
+          "rrule": {
+            "type": "string",
+            "maxLength": 1024,
+            "description": "The NORMATIVE recurrence rule as an RFC 5545 RRULE value, without the 'RRULE:' prefix — e.g. 'FREQ=WEEKLY;INTERVAL=1;BYDAY=TU;COUNT=8'. This is the field of record: where the structured fields below disagree with it, rrule wins. Kept as a string so the series round-trips through iCalendar and through every existing RRULE library unchanged."
+          },
+          "freq": {
+            "type": "string",
+            "knownValues": ["daily", "weekly", "monthly", "yearly"],
+            "description": "Denormalized FREQ, required so that any calendar UI can render 'weekly' without shipping an RRULE parser. Must agree with rrule."
+          },
+          "interval": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 1,
+            "description": "Denormalized INTERVAL: every Nth freq period. Must agree with rrule."
+          },
+          "byDay": {
+            "type": "array",
+            "maxLength": 7,
+            "description": "Denormalized BYDAY, as RFC 5545 two-letter weekday codes. Must agree with rrule.",
+            "items": {
+              "type": "string",
+              "knownValues": ["MO", "TU", "WE", "TH", "FR", "SA", "SU"]
+            }
+          },
+          "until": {
+            "type": "string",
+            "format": "datetime",
+            "description": "Denormalized UNTIL: the series generates no occurrence starting after this instant. Mutually exclusive with `count` — RFC 5545 forbids both in one rule, an invariant the lexicon cannot express and the write path must enforce."
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Denormalized COUNT: total number of occurrences the series ever generates. Mutually exclusive with `until`."
+          },
+          "exdates": {
+            "type": "array",
+            "maxLength": 200,
+            "description": "EXDATE list: start instants the rule would produce but which must NEVER be materialized (holiday skips). Distinct from cancelling an occurrence — a cancelled occurrence already exists as an event and uses the base lexicon's own community.lexicon.calendar.event#cancelled status, which is why this sidecar needs no cancellation field.",
+            "items": { "type": "string", "format": "datetime" }
+          },
+          "timezone": {
+            "type": "string",
+            "maxLength": 128,
+            "description": "IANA timezone name, e.g. America/Denver. Required, and load-bearing rather than cosmetic: 'every Tuesday at 6pm' must survive a DST transition, which is only expressible by expanding the rule in a named zone. Matches the timezone field on coop.lexicon.event.config."
+          },
+          "materializeAhead": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 730,
+            "default": 90,
+            "description": "How many days ahead of now the materializer should keep occurrence events created. Bounded rather than infinite so an open-ended weekly series does not write unbounded records; the materializer re-runs and extends the window."
+          },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

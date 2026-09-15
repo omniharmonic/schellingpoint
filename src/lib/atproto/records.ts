@@ -18,8 +18,18 @@
  * reaches the PDS is exactly what a validating peer expects.
  */
 import { EVENT_MODE, EVENT_STATUS, NSID, RSVP_STATUS } from './nsids'
+import { deterministicRkey } from './rkey'
 import type {
   AddressLocation,
+  ApprovalRecord,
+  EventListingRecord,
+  MembershipRecord,
+  OccurrenceRecord,
+  SeriesFreq,
+  SeriesRecord,
+  TimePreferenceRecord,
+  TimeWindow,
+  WeekdayCode,
   CalendarEventRecord,
   CohostRecord,
   CohostRole,
@@ -117,7 +127,7 @@ export function buildGatheringRecord(input: GatheringInput): GatheringRecord {
     handleDomain: text(input.handleDomain),
     website: text(input.website),
     peers: list(input.peers),
-    tags: list(input.tags?.map((t) => t.trim().toLowerCase()).filter(Boolean)),
+    tags: list(normalizeTags(input.tags).map((t) => t.slice(0, 40))),
     createdAt: toIso(input.createdAt),
   })
 }
@@ -153,12 +163,15 @@ export function buildGatheringCalendarEvent(input: GatheringCalendarEventInput):
   })
 }
 
-/** Defaults from spec §3/§8: k=3, one steward can act alone, roles not published. */
+/**
+ * Defaults from spec §3/§8 and plan §7.2: k=3, moving or cancelling a published session needs
+ * TWO organisers, roles are not published. Mirrors `src/lib/events/policy.ts` (package A).
+ */
 export const DEFAULT_POLICY_THRESHOLDS: Required<
   Pick<PolicyThresholds, 'feedbackK' | 'destructiveActionStewards' | 'publishRoles'>
 > = {
   feedbackK: 3,
-  destructiveActionStewards: 1,
+  destructiveActionStewards: 2,
   publishRoles: false,
 }
 
@@ -286,6 +299,42 @@ export function addressLocation(input: {
   })
 }
 
+export interface VenueAddressInput {
+  name?: string | null
+  /** Free-text street address (`venues.address`). */
+  street?: string | null
+  locality?: string | null
+  region?: string | null
+  postalCode?: string | null
+  country?: string | null
+  /** `venues.is_private_residence`: the record carries the locality and nothing finer. */
+  privateResidence?: boolean | null
+}
+
+/**
+ * The public location of a venue (spec §4.2 venue caveat, §10 "exact venue address"): a
+ * `community.lexicon.location.address` with street and postal code for a public venue; for a
+ * private residence ONLY the locality (plus region/country, which are coarser still) and no
+ * venue name, since a named home is an address by another route. Returns null when there is
+ * nothing publishable (no street, no locality).
+ */
+export function venueLocation(input: VenueAddressInput): AddressLocation | null {
+  if (input.privateResidence) {
+    const locality = text(input.locality)
+    if (!locality) return null
+    return addressLocation({ locality, region: input.region, country: input.country })
+  }
+  if (!text(input.street) && !text(input.locality)) return null
+  return addressLocation({
+    name: input.name,
+    street: input.street,
+    locality: input.locality,
+    region: input.region,
+    postalCode: input.postalCode,
+    country: input.country,
+  })
+}
+
 export interface TrackInput {
   name: string
   slug?: string | null
@@ -354,9 +403,15 @@ export interface SessionCalendarEventInput {
   startsAt: string | Date
   endsAt: string | Date
   cancelled?: boolean | null
-  /** `sessions.custom_location`; a URL here means the session is virtual. */
-  customLocation?: string | null
-  /** The venue's address, when the session is in a venue. */
+  /**
+   * The session happens online. The meeting link itself is attendee-only detail and is never an
+   * input here (callers derive the flag from `sessions.custom_location` and pass only the boolean).
+   */
+  virtual?: boolean | null
+  /**
+   * The venue's PUBLIC location, already coarsened by `venueLocation` (a private residence
+   * yields locality only). A self-hosted session's exact address never reaches this record.
+   */
   venueAddress?: AddressLocation | null
   /** The public session page on Schelling Point. */
   sessionUrl: string
@@ -369,7 +424,7 @@ export interface SessionCalendarEventInput {
  * heard of `schellingpoint.draft.*` renders the schedule from these alone.
  */
 export function buildSessionCalendarEvent(input: SessionCalendarEventInput): CalendarEventRecord {
-  const virtual = looksLikeUrl(input.customLocation)
+  const virtual = input.virtual === true
   const locations: EventLocation[] = []
   if (!virtual && input.venueAddress) locations.push(input.venueAddress)
   return compact({
@@ -382,7 +437,7 @@ export function buildSessionCalendarEvent(input: SessionCalendarEventInput): Cal
     mode: virtual ? EVENT_MODE.virtual : EVENT_MODE.inperson,
     status: input.cancelled ? EVENT_STATUS.cancelled : EVENT_STATUS.scheduled,
     locations: list(locations),
-    uris: [{ uri: input.sessionUrl, name: 'Schelling Point' }],
+    uris: [{ uri: input.sessionUrl, name: 'Session page' }],
   })
 }
 
@@ -408,7 +463,209 @@ export function buildEventConfig(input: EventConfigInput): EventConfigRecord {
     visibility: 'listed' as const,
     rsvpRequired: input.rsvpRequired ?? undefined,
     school: input.gatheringDid,
-    tags: list(input.tags?.map((t) => t.trim().toLowerCase()).filter(Boolean)) ?? [],
+    tags: normalizeTags(input.tags),
+    createdAt: toIso(input.createdAt),
+  })
+}
+
+/** Lowercase, trimmed, de-duplicated routing tags (max 20, each ≤ 64 chars). */
+export function normalizeTags(tags?: readonly (string | null | undefined)[] | null): string[] {
+  const out: string[] = []
+  for (const t of tags ?? []) {
+    const v = typeof t === 'string' ? t.trim().toLowerCase().replace(/\s+/g, '-').slice(0, 64) : ''
+    if (v && !out.includes(v)) out.push(v)
+    if (out.length === 20) break
+  }
+  return out
+}
+
+/** True when the event's config tags and the gathering's routing tags share at least one tag. */
+export function routesOnTags(eventTags: readonly string[], gatheringTags: readonly string[]): boolean {
+  const routing = new Set(normalizeTags(gatheringTags))
+  return normalizeTags(eventTags).some((t) => routing.has(t))
+}
+
+export type ListingEditAction = 'create' | 'update' | 'remove' | 'none'
+
+/**
+ * Pure listing-routing decision (Free School `decideListingEdit`). `everListed` asks "have we
+ * EVER written a listing for this event" (any status) — NOT "is it listed now" — so a removal is
+ * sticky: only an explicit steward restore brings it back. `cidChanged` re-pins an active listing
+ * to the event's current version.
+ */
+export function decideListingEdit(state: {
+  everListed: boolean
+  isActivelyListed: boolean
+  routesNow: boolean
+  cidChanged?: boolean
+}): ListingEditAction {
+  if (state.routesNow && !state.everListed) return 'create'
+  if (!state.routesNow && state.isActivelyListed) return 'remove'
+  if (state.routesNow && state.isActivelyListed && state.cidChanged) return 'update'
+  return 'none'
+}
+
+export interface ListingInput {
+  /** strongRef — BOTH uri and cid — to the community.lexicon.calendar.event being curated. */
+  event: StrongRef
+  /** The curating gathering's DID; always the listing's own author. */
+  gatheringDid: string
+  status?: 'listed' | 'removed'
+  tags?: string[] | null
+  createdAt: string | Date
+}
+
+/** `coop.lexicon.event.listing` written by the curating gathering (spec §6 step 3, interop gap 3). */
+export function buildListingRecord(input: ListingInput): EventListingRecord {
+  if (!input.event?.uri || !input.event?.cid) throw new Error('a listing strongRef needs both uri and cid')
+  return compact({
+    $type: NSID.eventListing,
+    event: { uri: input.event.uri, cid: input.event.cid },
+    school: input.gatheringDid,
+    status: input.status ?? 'listed',
+    tags: list(normalizeTags(input.tags)),
+    createdAt: toIso(input.createdAt),
+  })
+}
+
+/** Role ladder the membership claim publishes: 10 member / 20 host / 30 facilitator / 40 steward. */
+export const ROLE = { member: 10, host: 20, facilitator: 30, steward: 40 } as const
+
+/**
+ * Deterministic rkey of a role claim: `base32(sha256(gatheringDid \0 subjectDid))[0..13]`, so two
+ * derivations write one record and a retraction deletes exactly that slot.
+ */
+export function membershipClaimRkey(gatheringDid: string, subjectDid: string): string {
+  return deterministicRkey(gatheringDid, subjectDid)
+}
+
+export interface MembershipInput {
+  subjectDid: string
+  role: number
+  gatheringDid: string
+  createdAt: string | Date
+}
+
+export function buildMembershipRecord(input: MembershipInput): MembershipRecord {
+  return {
+    $type: NSID.membership,
+    subject: input.subjectDid,
+    role: Math.trunc(input.role),
+    school: input.gatheringDid,
+    addedBy: input.gatheringDid,
+    createdAt: toIso(input.createdAt),
+  }
+}
+
+export interface ApprovalInput {
+  /** AT-URI of the record the proposed action will write (the new slot, the removed listing). */
+  proposal: string
+  action: ApprovalRecord['action']
+  /** AT-URI of the record acted upon (the current slot, the curated event). */
+  subjectRecord?: string | null
+  reason?: string | null
+  createdAt: string | Date
+}
+
+/**
+ * `freeschool.draft.approval`, written by an organiser in their OWN repo. Never carries
+ * `subjectDid`: the approver names records, not people (R9).
+ */
+export function buildApprovalRecord(input: ApprovalInput): ApprovalRecord {
+  return compact({
+    $type: NSID.approval,
+    proposal: input.proposal,
+    action: input.action,
+    subjectRecord: text(input.subjectRecord),
+    reason: text(input.reason)?.slice(0, 2000),
+    createdAt: toIso(input.createdAt),
+  })
+}
+
+export interface TimePreferenceInput {
+  proposal: StrongRef
+  windows?: TimeWindow[] | null
+  blackouts?: TimeWindow[] | null
+  createdAt: string | Date
+}
+
+function cleanWindows(windows?: TimeWindow[] | null): TimeWindow[] | undefined {
+  if (!windows?.length) return undefined
+  return windows.slice(0, 40).map((w) =>
+    compact({
+      startsAt: toIso(w.startsAt),
+      endsAt: toIso(w.endsAt),
+      preference: w.preference,
+    }),
+  )
+}
+
+export function buildTimePreferenceRecord(input: TimePreferenceInput): TimePreferenceRecord {
+  return compact({
+    $type: NSID.timePreference,
+    proposal: input.proposal,
+    windows: cleanWindows(input.windows),
+    blackouts: cleanWindows(input.blackouts),
+    createdAt: toIso(input.createdAt),
+  })
+}
+
+export interface SeriesInput {
+  firstEvent: StrongRef
+  freq: SeriesFreq
+  interval?: number | null
+  byDay?: WeekdayCode[] | null
+  count?: number | null
+  until?: string | Date | null
+  exdates?: Array<string | Date> | null
+  timezone: string
+  materializeAhead?: number | null
+  createdAt: string | Date
+}
+
+/** The RFC 5545 RRULE (without `RRULE:`) the structured fields describe. */
+export function rruleFor(input: Pick<SeriesInput, 'freq' | 'interval' | 'byDay' | 'count' | 'until'>): string {
+  if (input.count && input.until) throw new Error('a series may set count or until, not both (RFC 5545)')
+  const parts = [`FREQ=${input.freq.toUpperCase()}`]
+  if (input.interval && input.interval > 1) parts.push(`INTERVAL=${Math.trunc(input.interval)}`)
+  if (input.byDay?.length) parts.push(`BYDAY=${input.byDay.join(',')}`)
+  if (input.count) parts.push(`COUNT=${Math.trunc(input.count)}`)
+  if (input.until) parts.push(`UNTIL=${toIso(input.until).replace(/[-:]/g, '').replace(/\.\d{3}/, '')}`)
+  return parts.join(';')
+}
+
+export function buildSeriesRecord(input: SeriesInput): SeriesRecord {
+  return compact({
+    $type: NSID.series,
+    firstEvent: input.firstEvent,
+    rrule: rruleFor(input),
+    freq: input.freq,
+    interval: int(input.interval) && int(input.interval)! > 1 ? int(input.interval) : undefined,
+    byDay: list(input.byDay),
+    until: input.until ? toIso(input.until) : undefined,
+    count: int(input.count),
+    exdates: list(input.exdates?.map(toIso)),
+    timezone: input.timezone,
+    materializeAhead: int(input.materializeAhead),
+    createdAt: toIso(input.createdAt),
+  })
+}
+
+export interface OccurrenceInput {
+  event: StrongRef
+  series: StrongRef
+  originalStartsAt: string | Date
+  sequence?: number | null
+  createdAt: string | Date
+}
+
+export function buildOccurrenceRecord(input: OccurrenceInput): OccurrenceRecord {
+  return compact({
+    $type: NSID.occurrence,
+    event: input.event,
+    series: input.series,
+    originalStartsAt: toIso(input.originalStartsAt),
+    sequence: int(input.sequence),
     createdAt: toIso(input.createdAt),
   })
 }
@@ -461,7 +718,12 @@ export interface ProposalSessionInput {
   is_self_hosted?: boolean | null
   self_hosted_start_time?: string | Date | null
   self_hosted_end_time?: string | Date | null
-  custom_location?: string | null
+  /**
+   * `sessions.public_place`: a COARSE label the proposer chose knowingly for the public record
+   * ("Near Pearl St, Boulder"). `sessions.custom_location` — the exact address or meeting link,
+   * attendee-only detail (spec §10) — is deliberately not an input: it can never reach a record.
+   */
+  public_place?: string | null
   created_at: string | Date
   /** Set only on a migration stub written by the gathering actor (§11 phase 3). */
   imported_from?: string | null
@@ -496,7 +758,7 @@ export function buildProposalRecord(input: ProposalInput): ProposalRecord {
     selfHosted: selfHosted || undefined,
     startsAt: selfHosted && s.self_hosted_start_time ? toIso(s.self_hosted_start_time) : undefined,
     endsAt: selfHosted && s.self_hosted_end_time ? toIso(s.self_hosted_end_time) : undefined,
-    place: selfHosted ? text(s.custom_location) : undefined,
+    place: selfHosted ? text(s.public_place)?.slice(0, 200) : undefined,
     imported: imported ? true : undefined,
     importedFrom: imported,
     createdAt: toIso(s.created_at),
@@ -652,6 +914,12 @@ export class ForeignDidError extends Error {
 export interface AssertNoForeignDidOptions {
   /** When given, `school`/`addedBy`/`gathering` may only carry THIS DID. */
   gatheringDid?: string
+  /**
+   * The one exemption R9 admits (interop audit gap 11): a `coop.lexicon.membership` claim's
+   * top-level `subject`, for a subject who opted in, a policy that allows it and a role ≥ Host.
+   * Only `role-claims.ts` passes this, after checking all three gates.
+   */
+  consentedSubjectDid?: string
 }
 
 /**
@@ -666,6 +934,7 @@ export function assertNoForeignDid(record: unknown, authorDid: string, opts: Ass
       const allowance = field ? FOREIGN_DID_ALLOWED_FIELDS[field] : undefined
       if (BARE_DID_RE.test(node)) {
         if (node === authorDid) return
+        if (path === 'subject' && opts.consentedSubjectDid && node === opts.consentedSubjectDid) return
         if (allowance === 'any') return
         if (allowance === 'gathering' && (!opts.gatheringDid || node === opts.gatheringDid)) return
         throw new ForeignDidError(path, node, authorDid)

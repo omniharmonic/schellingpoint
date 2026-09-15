@@ -1,45 +1,51 @@
 /**
- * POST /api/v1/events/[slug]/admin/atproto/sessions/[id]   body { action }
+ * POST /api/v1/events/[slug]/admin/atproto/sessions/[id]   body { action, reason?, target?, confirmPublicLinkage? }
  *
- * `action`: 'cancel' | 'move' | 'republish' for one session's network records
- * (spec §6). cancel/move are destructive: the actor port requires owner/admin;
- * this route asks the same so a moderator sees 403 before any audit row.
+ *   republish                      rewrite this session's calendar event, config and slot in place
+ *                                  (adopts a drifted proposal; refuses a changed slot)
+ *   move { target?, reason }       destructive when published → approvals (see /approvals)
+ *   cancel { reason }              destructive when published → approvals
+ *
+ * Owner/admin. Move and cancel return `{ status: 'applied' | 'awaiting_approval', approvalsNeeded }`.
  */
-import { NextResponse } from 'next/server'
-import { getUserFromRequest } from '@/lib/api/getUser'
-import { createAdminClient } from '@/lib/supabase/server'
-import { cancelSession, moveSession, republishSession } from '@/lib/atproto/publish'
+import { sql } from '@/lib/db'
+import { assertSameOrigin, requireEventRole } from '@/lib/auth/viewer'
+import { requestSessionCancel, requestSessionMove } from '@/lib/atproto/approvals'
+import { atprotoErrorResponse } from '@/lib/atproto/http'
+import { republishSession } from '@/lib/atproto/publish'
 
-const ACTIONS = { cancel: cancelSession, move: moveSession, republish: republishSession } as const
-type Action = keyof typeof ACTIONS
+export const runtime = 'nodejs'
+export const dynamic = 'force-dynamic'
 
 export async function POST(request: Request, { params }: { params: Promise<{ slug: string; id: string }> }) {
+  const denied = assertSameOrigin(request)
+  if (denied) return denied
   const { slug, id } = await params
-  const user = await getUserFromRequest(request)
-  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-
-  const db = await createAdminClient()
-  const { data: event } = await db.from('events').select('id, actor_did').eq('slug', slug).maybeSingle()
-  if (!event) return NextResponse.json({ error: 'Event not found' }, { status: 404 })
-  const { data: member } = await db.from('event_members').select('role').eq('event_id', event.id).eq('user_id', user.id).maybeSingle()
-  if (!member || !['owner', 'admin'].includes(member.role)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
-  if (!event.actor_did) return NextResponse.json({ error: 'Connect a gathering account before publishing.' }, { status: 409 })
-
-  const body = (await request.json().catch(() => null)) as { action?: unknown } | null
+  const auth = await requireEventRole(request, slug, ['owner', 'admin'])
+  if (auth instanceof Response) return auth
+  const body = (await request.json().catch(() => null)) as Record<string, unknown> | null
   const action = body?.action
-  if (typeof action !== 'string' || !(action in ACTIONS)) {
-    return NextResponse.json({ error: `action must be one of ${Object.keys(ACTIONS).join(', ')}` }, { status: 400 })
-  }
-  const { data: session } = await db.from('sessions').select('id').eq('id', id).eq('event_id', event.id).maybeSingle()
-  if (!session) return NextResponse.json({ error: 'Session not found' }, { status: 404 })
-
+  const [session] = await sql`select id from sessions where id = ${/^[0-9a-f-]{36}$/i.test(id) ? id : '00000000-0000-0000-0000-000000000000'} and event_id = ${auth.event.id}`
+  if (!session) return Response.json({ error: 'Session not found' }, { status: 404 })
+  const base = { eventId: auth.event.id, sessionId: id, callerUserId: auth.viewer.accountId }
+  const reason = typeof body?.reason === 'string' ? body.reason : ''
+  const confirmPublicLinkage = body?.confirmPublicLinkage === true
   try {
-    const { results } = await ACTIONS[action as Action]({ eventId: event.id as string, callerUserId: user.id, sessionId: id })
-    const published = results.filter((r) => !r.error).length
-    return NextResponse.json({ action, published, failed: results.length - published, results })
-  } catch (err) {
-    console.error(`[atproto] session ${action} failed:`, err)
-    const status = (err as { status?: number }).status === 403 ? 403 : 500
-    return NextResponse.json({ error: err instanceof Error ? err.message : 'Network write failed' }, { status })
+    if (action === 'republish') {
+      if (!auth.event.actor_did) return Response.json({ error: 'Create the gathering’s network identity first.', code: 'GatheringNotLinked' }, { status: 409 })
+      const { results } = await republishSession(base)
+      return Response.json({ action, results })
+    }
+    if (action === 'move') {
+      const t = body?.target as { timeSlotId?: unknown; venueId?: unknown } | undefined
+      const target = t && typeof t.timeSlotId === 'string' ? { timeSlotId: t.timeSlotId, venueId: typeof t.venueId === 'string' ? t.venueId : null } : undefined
+      return Response.json({ action, ...(await requestSessionMove({ ...base, reason, target, confirmPublicLinkage })) })
+    }
+    if (action === 'cancel') {
+      return Response.json({ action, ...(await requestSessionCancel({ ...base, reason, confirmPublicLinkage })) })
+    }
+    return Response.json({ error: 'action must be one of republish, move, cancel', field: 'action' }, { status: 400 })
+  } catch (e) {
+    return atprotoErrorResponse(e, 'admin/atproto/sessions')
   }
 }

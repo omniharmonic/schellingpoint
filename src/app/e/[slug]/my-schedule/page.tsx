@@ -1,6 +1,5 @@
 'use client'
 
-import { requireSavedRows } from '@/lib/api/saved-rows'
 import * as React from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
@@ -11,15 +10,20 @@ import { Badge } from '@/components/ui/badge'
 import { DashboardLayout } from '@/components/DashboardLayout'
 import { useAuth } from '@/hooks/useAuth'
 import { useEvent } from '@/contexts/EventContext'
+import { useTracks } from '@/hooks/useTracks'
+import { setFavorite } from '@/components/SessionCard'
+import { apiFetch } from '@/lib/api/client'
+import { hostByline } from '@/app/api/v1/sessions/_lib/byline'
+import type { SessionView } from '@/app/api/v1/sessions/_lib/read'
 import { cn } from '@/lib/utils'
 
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+/** A saved session with the time it happens (a slot, or the host's own time when self-hosted). */
+type Saved = SessionView & { when: { start_time: string; end_time: string | null } | null }
 
-interface Track {
-  id: string
-  name: string
-  color: string | null
+function withWhen(session: SessionView): Saved {
+  const start = session.time_slot?.start_time ?? (session.is_self_hosted ? session.self_hosted_start_time : null)
+  const end = session.time_slot?.end_time ?? (session.is_self_hosted ? session.self_hosted_end_time : null)
+  return { ...session, when: start ? { start_time: start, end_time: end } : null }
 }
 
 // Get date key using local timezone (prevents duplicate days from UTC conversion)
@@ -44,27 +48,13 @@ function formatDayLabel(dateKey: string): string {
   })
 }
 
-function getAccessToken(): string | null {
-  const storageKey = `sb-${new URL(SUPABASE_URL).hostname.split('.')[0]}-auth-token`
-  const stored = localStorage.getItem(storageKey)
-  if (stored) {
-    try {
-      const session = JSON.parse(stored)
-      return session?.access_token || null
-    } catch {
-      return null
-    }
-  }
-  return null
-}
-
 export default function MySchedulePage() {
   const router = useRouter()
   const { user, isLoading: authLoading } = useAuth()
   const event = useEvent()
 
-  const [tracks, setTracks] = React.useState<Track[]>([])
-  const [favorites, setFavorites] = React.useState<any[]>([])
+  const { tracks } = useTracks(event.slug)
+  const [favorites, setFavorites] = React.useState<Saved[]>([])
   const [saveError, setSaveError] = React.useState<string | null>(null)
   const [removing, setRemoving] = React.useState<string | null>(null)
   const [isLoading, setIsLoading] = React.useState(true)
@@ -72,116 +62,56 @@ export default function MySchedulePage() {
   const [trackFilter, setTrackFilter] = React.useState<string>('all')
   const [sortBy, setSortBy] = React.useState<'time' | 'venue'>('time')
 
-  // Redirect if not logged in
   React.useEffect(() => {
     if (!authLoading && !user) {
-      router.push('/login')
+      router.push(`/login?returnTo=${encodeURIComponent(`/e/${event.slug}/my-schedule`)}`)
     }
-  }, [user, authLoading, router])
+  }, [user, authLoading, router, event.slug])
 
-  // Fetch tracks for this event
-  React.useEffect(() => {
-    const fetchTracks = async () => {
-      try {
-        const response = await fetch(
-          `${SUPABASE_URL}/rest/v1/tracks?event_id=eq.${event.id}&is_active=eq.true&select=id,name,color&order=name`,
-          {
-            headers: {
-              'apikey': SUPABASE_KEY,
-              'Authorization': `Bearer ${SUPABASE_KEY}`,
-            },
-          }
-        )
-
-        if (!response.ok) throw new Error('Could not load your saved sessions. Refresh the page to try again.')
-        {
-          const data = await response.json()
-          setTracks(data)
-        }
-      } catch (err) {
-        console.error('Error fetching tracks:', err)
-      }
-    }
-
-    fetchTracks()
-  }, [event.id])
-
-  // Fetch favorites
   React.useEffect(() => {
     if (!user) return
-
-    const fetchFavorites = async () => {
-      const token = getAccessToken()
-      if (!token) { setSaveError('Sign in again to load your saved sessions.'); setIsLoading(false); return }
-
-      try {
-        const response = await fetch(
-          `${SUPABASE_URL}/rest/v1/favorites?user_id=eq.${user.id}&event_id=eq.${event.id}&select=session_id,session:sessions(id,title,description,format,duration,host_name,status,venue:venues(name),time_slot:time_slots(label,start_time,end_time),track:tracks(id,name,color))`,
-          {
-            headers: {
-              'apikey': SUPABASE_KEY,
-              'Authorization': `Bearer ${token}`,
-            },
-          }
-        )
-
-        if (response.ok) {
-          const data = await response.json()
-          // Filter out any null sessions and sort by time slot
-          const validFavorites = data
-            .filter((f: any) => f.session)
-            .map((f: any) => f.session)
-            .sort((a: any, b: any) => {
-              if (!a.time_slot && !b.time_slot) return 0
-              if (!a.time_slot) return 1
-              if (!b.time_slot) return -1
-              return new Date(a.time_slot.start_time).getTime() - new Date(b.time_slot.start_time).getTime()
-            })
-          setFavorites(validFavorites)
-        }
-      } catch (err) {
-        setSaveError(err instanceof Error ? err.message : 'Could not load your saved sessions.')
-      } finally {
-        setIsLoading(false)
-      }
+    let mounted = true
+    apiFetch<{ sessions: SessionView[] }>(`/api/v1/events/${encodeURIComponent(event.slug)}/sessions?favorites=1&sort=time`)
+      .then((data) => {
+        if (mounted) setFavorites(data.sessions.map(withWhen))
+      })
+      .catch((err) => {
+        if (mounted) setSaveError(err instanceof Error ? err.message : 'Could not load your saved sessions.')
+      })
+      .finally(() => {
+        if (mounted) setIsLoading(false)
+      })
+    return () => {
+      mounted = false
     }
-
-    fetchFavorites()
-  }, [user, event.id])
+  }, [user, event.slug])
 
   const handleRemoveFavorite = async (sessionId: string) => {
-    if (!user) return
-
-    const token = getAccessToken()
-    if (!token) return
-
-    if (removing) return
+    if (!user || removing) return
     setRemoving(sessionId)
     setSaveError(null)
     try {
-      const response = await fetch(
-        `${SUPABASE_URL}/rest/v1/favorites?user_id=eq.${user.id}&event_id=eq.${event.id}&session_id=eq.${sessionId}`,
-        { method: 'DELETE', headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${token}`, Prefer: 'return=representation' } }
-      )
-      await requireSavedRows(response)
-      setFavorites(prev => prev.filter(session => session.id !== sessionId))
+      await setFavorite(event.slug, sessionId, false)
+      setFavorites((prev) => prev.filter((session) => session.id !== sessionId))
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : 'Could not remove this saved session.')
-    } finally { setRemoving(null) }
+    } finally {
+      setRemoving(null)
+    }
   }
 
   // Group by time slot (must be before any conditional returns to maintain hook order)
-  const scheduledSessions = favorites.filter((s) => s.time_slot)
-  const unscheduledSessions = favorites.filter((s) => !s.time_slot)
+  const scheduledSessions = favorites.filter((s) => s.when)
+  const unscheduledSessions = favorites.filter((s) => !s.when)
 
   // Get unique days from scheduled sessions
   const days = React.useMemo(() => {
     const daySet = new Map<string, Date>()
     scheduledSessions.forEach((session) => {
-      if (session.time_slot?.start_time) {
-        const dateKey = getDateKey(session.time_slot.start_time, event.timezone)
+      if (session.when?.start_time) {
+        const dateKey = getDateKey(session.when!.start_time, event.timezone)
         if (!daySet.has(dateKey)) {
-          daySet.set(dateKey, new Date(session.time_slot.start_time))
+          daySet.set(dateKey, new Date(session.when!.start_time))
         }
       }
     })
@@ -203,8 +133,8 @@ export default function MySchedulePage() {
   // Filter sessions by selected day and track
   const filteredScheduledSessions = React.useMemo(() => {
     return scheduledSessions.filter((session) => {
-      if (!session.time_slot?.start_time) return false
-      if (selectedDay && getDateKey(session.time_slot.start_time, event.timezone) !== selectedDay) return false
+      if (!session.when?.start_time) return false
+      if (selectedDay && getDateKey(session.when!.start_time, event.timezone) !== selectedDay) return false
       if (trackFilter !== 'all' && session.track?.id !== trackFilter) return false
       return true
     })
@@ -217,10 +147,10 @@ export default function MySchedulePage() {
   }, [unscheduledSessions, trackFilter])
 
   // Group filtered sessions by time
-  const groupedByTime: Record<string, any[]> = React.useMemo(() => {
-    const groups: Record<string, any[]> = {}
+  const groupedByTime: Record<string, Saved[]> = React.useMemo(() => {
+    const groups: Record<string, Saved[]> = {}
     filteredScheduledSessions.forEach((session) => {
-      const startTime = formatTime(session.time_slot.start_time, event.timezone)
+      const startTime = formatTime(session.when!.start_time, event.timezone)
       if (!groups[startTime]) {
         groups[startTime] = []
       }
@@ -232,9 +162,9 @@ export default function MySchedulePage() {
   // Group filtered sessions by venue
   const groupedByVenue = React.useMemo(() => {
     if (sortBy !== 'venue') return null
-    const groups: Record<string, any[]> = {}
+    const groups: Record<string, Saved[]> = {}
     filteredScheduledSessions.forEach((session) => {
-      const venueName = session.venue?.name || 'Unassigned'
+      const venueName = session.is_self_hosted ? 'Self-hosted' : (session.venue?.name || 'Unassigned')
       if (!groups[venueName]) {
         groups[venueName] = []
       }
@@ -242,9 +172,9 @@ export default function MySchedulePage() {
     })
     // Sort sessions within each venue by start time
     Object.values(groups).forEach((arr) => {
-      arr.sort((a: any, b: any) => {
-        const aTime = a.time_slot?.start_time || ''
-        const bTime = b.time_slot?.start_time || ''
+      arr.sort((a, b) => {
+        const aTime = a.when?.start_time || ''
+        const bTime = b.when?.start_time || ''
         return aTime.localeCompare(bTime)
       })
     })
@@ -256,7 +186,7 @@ export default function MySchedulePage() {
     return Object.keys(groupedByTime).sort((a, b) => {
       const sessionA = groupedByTime[a][0]
       const sessionB = groupedByTime[b][0]
-      return new Date(sessionA.time_slot.start_time).getTime() - new Date(sessionB.time_slot.start_time).getTime()
+      return new Date(sessionA.when!.start_time).getTime() - new Date(sessionB.when!.start_time).getTime()
     })
   }, [groupedByTime])
 
@@ -397,8 +327,8 @@ export default function MySchedulePage() {
                   {sortedTimeSlots.map((timeLabel) => {
                     const sessions = groupedByTime[timeLabel]
                     const firstSession = sessions[0]
-                    const endTime = firstSession.time_slot.end_time
-                      ? formatTime(firstSession.time_slot.end_time, event.timezone)
+                    const endTime = firstSession.when!.end_time
+                      ? formatTime(firstSession.when!.end_time, event.timezone)
                       : null
 
                     return (
@@ -415,7 +345,7 @@ export default function MySchedulePage() {
                           </h2>
                         </div>
                         <div className="grid gap-4 md:grid-cols-2">
-                          {sessions.map((session: any) => (
+                          {sessions.map((session) => (
                             <Card key={session.id} className="hover:border-primary/50 hover:shadow-md transition-all">
                               <CardContent className="p-4">
                                 <div className="flex items-start justify-between gap-4">
@@ -440,11 +370,7 @@ export default function MySchedulePage() {
                                       )}
                                     </div>
                                     <h3 className="font-medium">{session.title}</h3>
-                                    {session.host_name && (
-                                      <p className="text-sm text-muted-foreground">
-                                        by {session.host_name}
-                                      </p>
-                                    )}
+                                    <p className="text-sm text-muted-foreground">{hostByline(session)}</p>
                                     {session.venue && (
                                       <p className="text-sm text-primary mt-2 flex items-center gap-1">
                                         <MapPin className="h-3.5 w-3.5" />
@@ -496,7 +422,7 @@ export default function MySchedulePage() {
                           </h2>
                         </div>
                         <div className="grid gap-4 md:grid-cols-2">
-                          {sessions.map((session: any) => (
+                          {sessions.map((session) => (
                             <Card key={session.id} className="hover:border-primary/50 hover:shadow-md transition-all">
                               <CardContent className="p-4">
                                 <div className="flex items-start justify-between gap-4">
@@ -505,10 +431,10 @@ export default function MySchedulePage() {
                                       <Badge variant="secondary" className="text-xs capitalize">
                                         {session.format}
                                       </Badge>
-                                      {session.time_slot && (
+                                      {session.when && (
                                         <span className="text-xs text-muted-foreground flex items-center gap-1">
                                           <Clock className="h-3 w-3" />
-                                          {formatTime(session.time_slot.start_time, event.timezone)}
+                                          {formatTime(session.when!.start_time, event.timezone)}
                                         </span>
                                       )}
                                       {session.track && (
@@ -524,11 +450,7 @@ export default function MySchedulePage() {
                                       )}
                                     </div>
                                     <h3 className="font-medium">{session.title}</h3>
-                                    {session.host_name && (
-                                      <p className="text-sm text-muted-foreground">
-                                        by {session.host_name}
-                                      </p>
-                                    )}
+                                    <p className="text-sm text-muted-foreground">{hostByline(session)}</p>
                                   </Link>
                                   <button
                                     onClick={() => handleRemoveFavorite(session.id)}
@@ -589,11 +511,7 @@ export default function MySchedulePage() {
                               )}
                             </div>
                             <h3 className="font-medium">{session.title}</h3>
-                            {session.host_name && (
-                              <p className="text-sm text-muted-foreground">
-                                by {session.host_name}
-                              </p>
-                            )}
+                            <p className="text-sm text-muted-foreground">{hostByline(session)}</p>
                           </Link>
                           <button
                             onClick={() => handleRemoveFavorite(session.id)}

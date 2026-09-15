@@ -1,51 +1,30 @@
+import 'server-only'
 import crypto from 'crypto'
 import type { NextResponse } from 'next/server'
-import type { SupabaseClient } from '@supabase/supabase-js'
+import { sql } from '@/lib/db'
 import { badRequest, notFound } from '@/lib/api/response'
 
-export function validateApiKey(request: Request): boolean {
-  const apiKey = request.headers.get('x-api-key')
-  if (!apiKey) return false
+/**
+ * Event scoping for the public AppView reads under `/api/v1/{tracks,venues,timeslots,schedule}`.
+ *
+ * The shared-key partner API is gone (spec §2: "that endpoint does not survive"). What replaced
+ * it serves, without a key, only what a gathering has already published to the network, and only
+ * for gatherings anyone may read: visibility `public` or `unlisted` (reachable by slug, exactly
+ * like the gathering page) and not `draft` — the same boundary as `public.can_read_event` for a
+ * signed-out reader.
+ */
 
-  const expected = process.env.API_KEY_BONFIRESAI
-  if (!expected) return false
+export const PUBLIC_READ_VISIBILITIES = ['public', 'unlisted'] as const
 
-  try {
-    const keyBuffer = Buffer.from(apiKey, 'utf8')
-    const expectedBuffer = Buffer.from(expected, 'utf8')
-    if (keyBuffer.length !== expectedBuffer.length) return false
-    return crypto.timingSafeEqual(keyBuffer, expectedBuffer)
-  } catch {
-    return false
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Partner API event scoping
-//
-// The partner read API (/api/v1/*) runs with the admin client, so every route
-// must scope its queries to a single event and must never expose events that
-// are private or still in draft.
-// ---------------------------------------------------------------------------
-
-export const PARTNER_VISIBLE_VISIBILITIES = ['public', 'unlisted'] as const
-
-export interface PartnerEvent {
+export interface PublicEvent {
   id: string
   slug: string
+  name: string
   visibility: string
   status: string
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type AnySupabaseClient = SupabaseClient<any, any, any>
-
-function partnerVisibleEvents(supabase: AnySupabaseClient) {
-  return supabase
-    .from('events')
-    .select('id,slug,visibility,status')
-    .in('visibility', [...PARTNER_VISIBLE_VISIBILITIES])
-    .neq('status', 'draft')
+  timezone: string
+  actor_did: string | null
+  gathering_uri: string | null
 }
 
 function eventSlugParam(request: Request): string | null {
@@ -53,52 +32,52 @@ function eventSlugParam(request: Request): string | null {
   return slug ? slug : null
 }
 
+async function publicEventWhere(by: { slug: string } | { id: string }): Promise<PublicEvent | null> {
+  const rows = await sql<PublicEvent[]>`
+    select id, slug, name, visibility, status, timezone, actor_did, gathering_uri
+    from events
+    where ${'slug' in by ? sql`slug = ${by.slug}` : sql`id = ${by.id}`}
+      and visibility in ${sql([...PUBLIC_READ_VISIBILITIES])}
+      and coalesce(status, 'draft') <> 'draft'
+  `
+  return rows[0] ?? null
+}
+
 /**
- * Resolve the required `?event=<slug>` query parameter for list routes.
- * Returns a 400 when the parameter is missing and a 404 when the slug does not
- * belong to a partner-visible (public/unlisted, non-draft) event.
+ * Resolve the required `?event=<slug>`: 400 when missing, 404 when the slug is unknown or names a
+ * private or draft gathering (existence is not disclosed).
  */
-export async function resolvePartnerEvent(
-  request: Request,
-  supabase: AnySupabaseClient
-): Promise<{ event: PartnerEvent } | { error: NextResponse }> {
+export async function resolvePublicEvent(request: Request): Promise<{ event: PublicEvent } | { error: NextResponse }> {
   const slug = eventSlugParam(request)
-  if (!slug) {
-    return { error: badRequest('event query parameter (event slug) is required') }
-  }
-
-  const { data, error } = await partnerVisibleEvents(supabase).eq('slug', slug).maybeSingle()
-  if (error || !data) {
-    return { error: notFound('Event') }
-  }
-
-  return { event: data as PartnerEvent }
+  if (!slug) return { error: badRequest('event query parameter (event slug) is required') }
+  const event = await publicEventWhere({ slug })
+  return event ? { event } : { error: notFound('Event') }
 }
 
 /**
- * Check whether a row (identified by its `event_id`) may be returned to the
- * partner API. The owning event must be partner-visible, and when the caller
- * supplied `?event=<slug>` it must match the row's event. Returns the event on
- * success or null when the row should be treated as not found.
+ * The publicly readable event owning a row, or null (treat as not found). When the caller passed
+ * `?event=<slug>` it must match.
  */
-export async function partnerEventForRow(
-  request: Request,
-  supabase: AnySupabaseClient,
-  eventId: string | null | undefined
-): Promise<PartnerEvent | null> {
+export async function publicEventForRow(request: Request, eventId: string | null | undefined): Promise<PublicEvent | null> {
   if (!eventId) return null
-
-  const { data, error } = await partnerVisibleEvents(supabase).eq('id', eventId).maybeSingle()
-  if (error || !data) return null
-
-  const requestedSlug = eventSlugParam(request)
-  if (requestedSlug && requestedSlug !== data.slug) return null
-
-  return data as PartnerEvent
+  const event = await publicEventWhere({ id: eventId })
+  if (!event) return null
+  const requested = eventSlugParam(request)
+  if (requested && requested !== event.slug) return null
+  return event
 }
 
-/** IDs of every partner-visible event, for filtering cross-event lookups. */
-export async function partnerVisibleEventIds(supabase: AnySupabaseClient): Promise<string[]> {
-  const { data } = await partnerVisibleEvents(supabase)
-  return (data ?? []).map((e: { id: string }) => e.id)
+// ---------------------------------------------------------------------------
+// Transitional: package B's GET /api/v1/sessions still gates on the shared key. The key API does
+// not survive (spec §2); remove this with that caller.
+// ---------------------------------------------------------------------------
+
+/** @deprecated The shared-key API does not survive (spec §2). Kept only until /api/v1/sessions stops importing it. */
+export function validateApiKey(request: Request): boolean {
+  const apiKey = request.headers.get('x-api-key')
+  const expected = process.env.API_KEY_BONFIRESAI
+  if (!apiKey || !expected) return false
+  const a = Buffer.from(apiKey, 'utf8')
+  const b = Buffer.from(expected, 'utf8')
+  return a.length === b.length && crypto.timingSafeEqual(a, b)
 }

@@ -3,7 +3,7 @@
 import * as React from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { Bell, Check, CheckCheck, ExternalLink, Settings } from 'lucide-react'
+import { Bell, CheckCheck, ExternalLink, Settings } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
   Popover,
@@ -13,7 +13,7 @@ import {
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
-import { useNotifications, type Notification } from '@/hooks/useNotifications'
+import { safeActionPath, useNotifications, type Notification } from '@/hooks/useNotifications'
 import { useEvent } from '@/contexts/EventContext'
 import { formatDistanceToNow } from 'date-fns'
 
@@ -23,11 +23,15 @@ const notificationStyles: Record<string, { color: string; icon?: string }> = {
   session_rejected: { color: 'bg-red-500' },
   session_scheduled: { color: 'bg-blue-500' },
   session_rescheduled: { color: 'bg-yellow-500' },
-  vote_milestone: { color: 'bg-purple-500' },
+  session_cancelled: { color: 'bg-red-500' },
   cohost_invited: { color: 'bg-indigo-500' },
   cohost_accepted: { color: 'bg-green-500' },
   cohost_declined: { color: 'bg-orange-500' },
   new_proposal: { color: 'bg-cyan-500' },
+  proposal_changed: { color: 'bg-yellow-500' },
+  approval_requested: { color: 'bg-orange-500' },
+  event_invitation: { color: 'bg-indigo-500' },
+  ticket_confirmed: { color: 'bg-green-500' },
   admin_announcement: { color: 'bg-primary' },
   default: { color: 'bg-muted-foreground' },
 }
@@ -49,8 +53,9 @@ function NotificationItem({
     if (isUnread) {
       onMarkAsRead(notification.id)
     }
-    if (notification.action_url) {
-      router.push(notification.action_url)
+    const target = safeActionPath(notification.action_url)
+    if (target) {
+      router.push(target)
     }
     onClick?.()
   }
@@ -121,7 +126,7 @@ export function NotificationBell() {
     markAsRead,
     markAllAsRead,
     refresh,
-  } = useNotifications({ eventId: event.id, limit: 10 })
+  } = useNotifications({ eventSlug: event.slug, limit: 10 })
 
   // Refresh when popover opens
   React.useEffect(() => {

@@ -7,8 +7,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Footer } from '@/components/Footer';
 import { SiteHeader } from '@/components/SiteHeader';
-import { createClient } from '@/lib/supabase/server';
-import type { EventRow } from '@/types/event';
+import { getDirectoryEvents, type DirectoryEvent } from '@/lib/events';
 import { MyEventsSection } from './MyEventsSection';
 
 // Status badge configuration
@@ -41,7 +40,7 @@ function formatDateRange(startDate: string, endDate: string): string {
 }
 
 // Event identity and calendar date lead each poster.
-function EventCard({ event, featured = false }: { event: EventRow & { attendee_count?: number }; featured?: boolean }) {
+function EventCard({ event, featured = false }: { event: DirectoryEvent; featured?: boolean }) {
   const badge = statusBadgeConfig[event.status] || statusBadgeConfig.draft;
   const date = new Date(event.start_date);
   return <Link href={`/e/${event.slug}`} aria-label={`${event.name}, ${formatDateRange(event.start_date, event.end_date)}`} className={`block group ${featured ? 'min-w-[300px] sm:min-w-[400px]' : ''}`}>
@@ -66,7 +65,7 @@ function EventCard({ event, featured = false }: { event: EventRow & { attendee_c
 }
 
 // Featured gatherings Carousel
-function FeaturedEventsCarousel({ events }: { events: (EventRow & { attendee_count?: number })[] }) {
+function FeaturedEventsCarousel({ events }: { events: (DirectoryEvent)[] }) {
   if (events.length === 0) return null;
 
   return (
@@ -87,7 +86,7 @@ function FeaturedEventsCarousel({ events }: { events: (EventRow & { attendee_cou
 }
 
 // Upcoming Events Grid
-function UpcomingEventsGrid({ events, showViewAll }: { events: (EventRow & { attendee_count?: number })[]; showViewAll: boolean }) {
+function UpcomingEventsGrid({ events, showViewAll }: { events: (DirectoryEvent)[]; showViewAll: boolean }) {
   return (
     <section id="upcoming" className="py-12 sm:py-16">
       <div className="container mx-auto px-4">
@@ -133,49 +132,21 @@ function CreateEventCTA() {
   </section>
 }
 
-// Server component to fetch events
+// Public, non-draft, non-archived gatherings with member counts (server-side, plan §3.1).
 async function fetchEvents() {
-  const supabase = await createClient();
-
-  // Fetch public events that are not drafts or archived
-  const { data: events, error } = await supabase
-    .from('events')
-    .select('*')
-    .eq('visibility', 'public')
-    .not('status', 'in', '("draft","archived")')
-    .order('start_date', { ascending: true });
-
-  if (error || !events) {
+  let events: DirectoryEvent[];
+  try {
+    events = await getDirectoryEvents();
+  } catch (error) {
     console.error('Error fetching events:', error);
     return { featuredEvents: [], upcomingEvents: [], allEvents: [], loadFailed: true };
   }
 
-  // Get attendee counts for each event
-  const eventIds = events.map(e => e.id);
-  const { data: memberCounts } = await supabase
-    .from('event_members')
-    .select('event_id')
-    .in('event_id', eventIds);
-
-  // Count attendees per event
-  const attendeeCounts: Record<string, number> = {};
-  if (memberCounts) {
-    memberCounts.forEach(m => {
-      attendeeCounts[m.event_id] = (attendeeCounts[m.event_id] || 0) + 1;
-    });
-  }
-
-  // Add attendee counts to events
-  const eventsWithCounts = events.map(e => ({
-    ...e,
-    attendee_count: attendeeCounts[e.id] || 0,
-  }));
-
   const now = new Date();
-  const featuredEvents = eventsWithCounts.filter(e => e.is_featured);
-  const upcomingEvents = eventsWithCounts.filter(e => new Date(`${e.end_date.slice(0, 10)}T23:59:59`) >= now && e.status !== 'completed');
+  const featuredEvents = events.filter(e => e.is_featured);
+  const upcomingEvents = events.filter(e => new Date(`${e.end_date.slice(0, 10)}T23:59:59`) >= now && e.status !== 'completed');
 
-  return { featuredEvents, upcomingEvents, allEvents: eventsWithCounts, loadFailed: false };
+  return { featuredEvents, upcomingEvents, allEvents: events, loadFailed: false };
 }
 
 /**
@@ -190,6 +161,9 @@ async function fetchEvents() {
  */
 // Upcoming gatherings shown on the homepage; the full list lives at /events.
 const HOMEPAGE_UPCOMING_LIMIT = 6;
+
+// Reads the session cookie (My Events) and live listings on every request.
+export const dynamic = 'force-dynamic';
 
 export default async function HomePage() {
   const { featuredEvents, upcomingEvents, allEvents, loadFailed } = await fetchEvents();

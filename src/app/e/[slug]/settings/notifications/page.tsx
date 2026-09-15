@@ -2,107 +2,91 @@
 
 import * as React from 'react'
 import Link from 'next/link'
-import { ArrowLeft, Mail, Bell, Smartphone, Loader2, Check } from 'lucide-react'
+import { ArrowLeft, Mail, Bell, Smartphone, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { DashboardLayout } from '@/components/DashboardLayout'
 import { useEvent, useEventRole } from '@/contexts/EventContext'
 import {
-  useNotificationPreferences,
+  NOTIFICATION_CATEGORIES,
   categoryInfo,
+  useNotificationPreferences,
   type NotificationCategory,
+  type NotificationChannel,
+  type NotificationPreference,
 } from '@/hooks/useNotificationPreferences'
 import { cn } from '@/lib/utils'
 
-// Toggle switch component
 function Toggle({
   enabled,
   onChange,
   disabled,
   saving,
+  label,
 }: {
   enabled: boolean
   onChange: () => void
   disabled?: boolean
   saving?: boolean
+  label: string
 }) {
   return (
     <button
+      type="button"
+      role="switch"
+      aria-checked={enabled}
+      aria-label={label}
       onClick={onChange}
       disabled={disabled || saving}
       className={cn(
         'relative inline-flex h-6 w-11 items-center rounded-full transition-colors',
         enabled ? 'bg-primary' : 'bg-muted',
-        (disabled || saving) && 'opacity-50 cursor-not-allowed'
+        (disabled || saving) && 'opacity-50 cursor-not-allowed',
       )}
     >
       <span
         className={cn(
           'inline-block h-4 w-4 transform rounded-full bg-white transition-transform',
-          enabled ? 'translate-x-6' : 'translate-x-1'
+          enabled ? 'translate-x-6' : 'translate-x-1',
         )}
       />
-      {saving && (
-        <Loader2 className="absolute right-1 h-3 w-3 animate-spin text-white" />
-      )}
+      {saving && <Loader2 className="absolute right-1 h-3 w-3 animate-spin text-white" />}
     </button>
   )
 }
 
-// Row for a single notification category
 function PreferenceRow({
   category,
-  isAdmin,
+  pref,
+  saving,
+  onToggle,
 }: {
   category: NotificationCategory
-  isAdmin: boolean
+  pref: NotificationPreference
+  saving: boolean
+  onToggle: (category: NotificationCategory, channel: NotificationChannel) => void
 }) {
-  const event = useEvent()
-  const { getPreference, toggleChannel, isSaving } = useNotificationPreferences({ eventId: event.id })
-
-  const pref = getPreference(category)
   const info = categoryInfo[category]
-
-  // Hide admin_alerts for non-admins
-  if (category === 'admin_alerts' && !isAdmin) {
-    return null
-  }
-
   return (
     <div className="flex items-center justify-between py-4 border-b border-border last:border-b-0">
       <div className="flex-1 mr-4">
         <h4 className="font-medium text-sm">{info.label}</h4>
         <p className="text-xs text-muted-foreground mt-0.5">{info.description}</p>
       </div>
-
       <div className="flex items-center gap-6">
-        {/* Email */}
-        <div className="flex flex-col items-center gap-1">
-          <Toggle
-            enabled={pref.email_enabled}
-            onChange={() => toggleChannel(category, 'email_enabled')}
-            saving={isSaving}
-          />
-        </div>
-
-        {/* In-app */}
-        <div className="flex flex-col items-center gap-1">
-          <Toggle
-            enabled={pref.in_app_enabled}
-            onChange={() => toggleChannel(category, 'in_app_enabled')}
-            saving={isSaving}
-          />
-        </div>
-
-        {/* Push (disabled for now) */}
-        <div className="flex flex-col items-center gap-1">
-          <Toggle
-            enabled={pref.push_enabled}
-            onChange={() => toggleChannel(category, 'push_enabled')}
-            disabled={true}
-            saving={isSaving}
-          />
-        </div>
+        <Toggle
+          label={`${info.label}: email`}
+          enabled={pref.email_enabled}
+          onChange={() => onToggle(category, 'email_enabled')}
+          saving={saving}
+        />
+        <Toggle
+          label={`${info.label}: in-app`}
+          enabled={pref.in_app_enabled}
+          onChange={() => onToggle(category, 'in_app_enabled')}
+          saving={saving}
+        />
+        <Toggle label={`${info.label}: push (coming soon)`} enabled={pref.push_enabled} onChange={() => {}} disabled />
       </div>
     </div>
   )
@@ -110,21 +94,18 @@ function PreferenceRow({
 
 export default function NotificationSettingsPage() {
   const event = useEvent()
-  const { isAdmin } = useEventRole()
-  const { isLoading } = useNotificationPreferences({ eventId: event.id })
+  const { isAdmin, can } = useEventRole()
+  // One hook instance for the whole page, so every row sees the same state.
+  const { isLoading, error, getPreference, toggleChannel, savingCategory } = useNotificationPreferences({
+    eventSlug: event.slug,
+  })
 
-  const categories: NotificationCategory[] = [
-    'session_updates',
-    'voting_updates',
-    'collaboration',
-    'event_announcements',
-    'admin_alerts',
-  ]
+  const showAdminAlerts = isAdmin || can('approveProposals')
+  const categories = NOTIFICATION_CATEGORIES.filter((c) => c !== 'admin_alerts' || showAdminAlerts)
 
   return (
     <DashboardLayout>
       <div className="space-y-6 max-w-2xl">
-        {/* Header */}
         <div className="flex items-center gap-4">
           <Button variant="ghost" size="sm" asChild>
             <Link href={`/e/${event.slug}/dashboard`}>
@@ -134,19 +115,14 @@ export default function NotificationSettingsPage() {
           </Button>
           <div>
             <h1 className="text-2xl font-bold">Notification Settings</h1>
-            <p className="text-sm text-muted-foreground">
-              Control how you receive notifications for {event.name}
-            </p>
+            <p className="text-sm text-muted-foreground">Control how you receive notifications for {event.name}</p>
           </div>
         </div>
 
-        {/* Preferences Card */}
         <Card>
           <CardHeader>
             <CardTitle>Notification Preferences</CardTitle>
-            <CardDescription>
-              Choose which notifications you want to receive and how
-            </CardDescription>
+            <CardDescription>Choose which notifications you want to receive and how</CardDescription>
           </CardHeader>
           <CardContent>
             {isLoading ? (
@@ -155,7 +131,7 @@ export default function NotificationSettingsPage() {
               </div>
             ) : (
               <>
-                {/* Column headers */}
+                {error && <p className="text-sm text-destructive mb-4">{error}</p>}
                 <div className="flex items-center justify-between pb-4 mb-2 border-b border-border">
                   <div className="flex-1" />
                   <div className="flex items-center gap-6">
@@ -174,18 +150,19 @@ export default function NotificationSettingsPage() {
                   </div>
                 </div>
 
-                {/* Preference rows */}
                 {categories.map((category) => (
                   <PreferenceRow
                     key={category}
                     category={category}
-                    isAdmin={isAdmin}
+                    pref={getPreference(category)}
+                    saving={savingCategory === category}
+                    onToggle={toggleChannel}
                   />
                 ))}
 
-                {/* Push notification note */}
                 <p className="text-xs text-muted-foreground mt-4 pt-4 border-t border-border">
-                  Push notifications are coming soon. Enable them now to be ready when they launch.
+                  Ticket confirmations are always emailed, since they are your receipt. Push notifications are not
+                  available yet.
                 </p>
               </>
             )}

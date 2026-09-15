@@ -1,10 +1,17 @@
 'use client'
 
 import * as React from 'react'
-import { Loader2, Download, QrCode as QrCodeIcon } from 'lucide-react'
+import { Loader2, QrCode as QrCodeIcon, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { apiFetch } from '@/lib/api/client'
 import { cn } from '@/lib/utils'
+
+/**
+ * The holder's check-in QR code. The code is a short-lived token bound to the holder's
+ * account, so it is fetched fresh and refreshed automatically before it expires; a
+ * screenshot or download would stop working, so none is offered.
+ */
 
 interface TicketQRProps {
   /** Ticket ID to fetch QR for */
@@ -17,8 +24,6 @@ interface TicketQRProps {
   eventName?: string
   /** Custom class name */
   className?: string
-  /** Show download button */
-  showDownload?: boolean
   /** Size of QR code */
   size?: 'sm' | 'md' | 'lg'
 }
@@ -29,55 +34,50 @@ const SIZES = {
   lg: 350,
 }
 
-export function TicketQR({
-  ticketId,
-  eventSlug,
-  tierName,
-  eventName,
-  className,
-  showDownload = true,
-  size = 'md',
-}: TicketQRProps) {
+/** Refresh this long before expiry (and at least every minute when the tab returns). */
+const REFRESH_MARGIN_MS = 2 * 60 * 1000
+
+export function TicketQR({ ticketId, eventSlug, tierName, eventName, className, size = 'md' }: TicketQRProps) {
   const [qrDataUrl, setQrDataUrl] = React.useState<string | null>(null)
+  const [expiresAt, setExpiresAt] = React.useState<number | null>(null)
   const [loading, setLoading] = React.useState(true)
   const [error, setError] = React.useState<string | null>(null)
 
   const qrSize = SIZES[size]
 
-  // Fetch QR code from API
-  React.useEffect(() => {
-    async function fetchQR() {
-      try {
-        const response = await fetch(`/api/v1/events/${eventSlug}/tickets/${ticketId}/qr`)
-
-        if (!response.ok) {
-          throw new Error('Failed to load QR code')
-        }
-
-        const data = await response.json()
-        setQrDataUrl(data.qrDataUrl)
-      } catch (err) {
-        console.error('Error fetching QR code:', err)
-        setError('Failed to load QR code')
-      } finally {
-        setLoading(false)
-      }
+  const fetchQR = React.useCallback(async () => {
+    try {
+      const data = await apiFetch<{ qrDataUrl: string; expiresAt: string }>(
+        `/api/v1/events/${encodeURIComponent(eventSlug)}/tickets/${encodeURIComponent(ticketId)}/qr`,
+      )
+      setQrDataUrl(data.qrDataUrl)
+      setExpiresAt(new Date(data.expiresAt).getTime())
+      setError(null)
+    } catch {
+      setError('Failed to load QR code')
+    } finally {
+      setLoading(false)
     }
-
-    fetchQR()
   }, [ticketId, eventSlug])
 
-  const handleDownload = () => {
-    if (!qrDataUrl) return
+  React.useEffect(() => {
+    fetchQR()
+  }, [fetchQR])
 
-    // Create download link
-    const link = document.createElement('a')
-    link.href = qrDataUrl
-    link.download = `ticket-${ticketId.slice(0, 8)}.png`
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
-  }
+  // Refresh ahead of expiry, and when the page becomes visible with a stale code.
+  React.useEffect(() => {
+    if (!expiresAt) return
+    const delay = Math.max(expiresAt - Date.now() - REFRESH_MARGIN_MS, 5_000)
+    const timer = window.setTimeout(fetchQR, delay)
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && Date.now() > expiresAt - REFRESH_MARGIN_MS) fetchQR()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      window.clearTimeout(timer)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [expiresAt, fetchQR])
 
   return (
     <Card className={cn('overflow-hidden', className)}>
@@ -86,80 +86,35 @@ export function TicketQR({
           <QrCodeIcon className="h-5 w-5" />
           {tierName || 'Event Ticket'}
         </CardTitle>
-        {eventName && (
-          <CardDescription>{eventName}</CardDescription>
-        )}
+        {eventName && <CardDescription>{eventName}</CardDescription>}
       </CardHeader>
 
       <CardContent className="flex flex-col items-center gap-4">
         {loading ? (
-          <div
-            className="flex items-center justify-center bg-muted rounded-lg"
-            style={{ width: qrSize, height: qrSize }}
-          >
+          <div className="flex items-center justify-center bg-muted rounded-lg" style={{ width: qrSize, height: qrSize }}>
             <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
           </div>
-        ) : error ? (
+        ) : error && !qrDataUrl ? (
           <div
-            className="flex items-center justify-center bg-destructive/10 text-destructive rounded-lg p-4"
+            className="flex flex-col items-center justify-center gap-3 bg-destructive/10 text-destructive rounded-lg p-4"
             style={{ width: qrSize, height: qrSize }}
           >
             <p className="text-sm text-center">{error}</p>
+            <Button variant="outline" size="sm" onClick={() => fetchQR()}>
+              <RefreshCw className="h-4 w-4 mr-2" />
+              Retry
+            </Button>
           </div>
         ) : qrDataUrl ? (
           <>
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src={qrDataUrl}
-              alt="Ticket QR Code"
-              width={qrSize}
-              height={qrSize}
-              className="rounded-lg"
-            />
+            <img src={qrDataUrl} alt="Ticket QR Code" width={qrSize} height={qrSize} className="rounded-lg" />
             <p className="text-xs text-muted-foreground text-center">
-              Show this QR code at check-in
+              Show this QR code at check-in. It refreshes automatically while this page is open.
             </p>
           </>
-        ) : (
-          <div
-            className="flex items-center justify-center bg-muted rounded-lg"
-            style={{ width: qrSize, height: qrSize }}
-          >
-            <p className="text-sm text-muted-foreground">QR code not available</p>
-          </div>
-        )}
-
-        {showDownload && qrDataUrl && (
-          <Button variant="outline" size="sm" onClick={handleDownload}>
-            <Download className="h-4 w-4 mr-2" />
-            Download QR
-          </Button>
-        )}
+        ) : null}
       </CardContent>
     </Card>
-  )
-}
-
-/**
- * Inline QR code display (without card wrapper)
- */
-export function TicketQRInline({
-  qrDataUrl,
-  size = 200,
-  className,
-}: {
-  qrDataUrl: string
-  size?: number
-  className?: string
-}) {
-  return (
-    // eslint-disable-next-line @next/next/no-img-element
-    <img
-      src={qrDataUrl}
-      alt="Ticket QR Code"
-      width={size}
-      height={size}
-      className={cn('rounded-lg', className)}
-    />
   )
 }

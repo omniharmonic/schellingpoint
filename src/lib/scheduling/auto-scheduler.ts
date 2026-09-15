@@ -1,44 +1,55 @@
 /**
- * Auto-Scheduling Algorithm
+ * Auto-scheduling (greedy).
  *
- * A greedy algorithm that places sessions in optimal time slots.
- * Sessions are processed by vote count (highest first), and each
- * session is assigned to its highest-scoring available slot.
+ * Places approved, unscheduled sessions into free time slots. Sessions are processed most
+ * votes first, and each takes its highest-scoring free slot.
  *
- * Scoring criteria:
- * - Time preference match: +10
- * - Duration match: +8
- * - Venue features match: +6 (all required features present)
- * - Capacity fit: +5 (uses expected_attendance or falls back to total_votes)
- * - Track spread: +3 (avoid same track in same time)
- * - Primary venue bonus: +2 (popular sessions in main venue)
+ * Scoring (the original scorer, which spec §6 keeps, plus the hosts' availability windows):
+ *   duration match      +8 (±15 min: +4, else +1)
+ *   time preference     availability windows: inside a window +10 / +7 / +4 by preference, partly +2;
+ *                       a host blackout overlapping the slot −20. Legacy half-day tags: +10 (same
+ *                       day, other half: +3)
+ *   venue features      +6 all present (one missing: +2; none required: +3)
+ *   capacity fit        +5 comfortable, +3 tight, 0 over (unknown capacity: +2)
+ *   track spread        +3 when no same-track session runs at that time (no track: +1)
+ *   voter overlap       −4 (≥50%), −2 (≥30%), +2 (<10% or no data)
+ *   primary venue       +2 for sessions with more than 20 votes
+ *
+ * Voter overlap (spec §5.4) is Jaccard similarity over BALLOT TOKENS, not people: after a
+ * round closes each vote row carries hmac(ballot_key, did) computed once and the key is
+ * destroyed, so tokens link one participant's votes to each other and to nobody. The inputs
+ * come from package C's `schedulingInputs`, which refuses while the round is open. The
+ * overlap matrix never leaves the server; only the resulting assignments do.
+ *
+ * Pure: no I/O, safe to unit test.
  */
 
-export interface Session {
+export interface SchedulerSession {
   id: string
   title: string
-  duration: number
-  total_votes: number
+  duration: number | null
   expected_attendance: number | null
   status: 'pending' | 'approved' | 'rejected' | 'scheduled'
   time_slot_id: string | null
-  venue_id: string | null
   track_id: string | null
+  /** Legacy half-day preferences such as `friday_am`. */
   time_preferences: string[] | null
   required_features: string[] | null
+  /** The host's availability (`time_preferences` table, spec §4.2): instants, preference 1 best. */
+  windows?: ReadonlyArray<{ startsAt: string; endsAt: string; preference?: 1 | 2 | 3 }>
+  blackouts?: ReadonlyArray<{ startsAt: string; endsAt: string }>
 }
 
-export interface TimeSlot {
+export interface SchedulerTimeSlot {
   id: string
   start_time: string
   end_time: string
   is_break: boolean
   venue_id: string | null
   day_date: string | null
-  slot_type: string | null
 }
 
-export interface Venue {
+export interface SchedulerVenue {
   id: string
   name: string
   capacity: number | null
@@ -46,11 +57,8 @@ export interface Venue {
   features: string[] | null
 }
 
-export interface Vote {
-  session_id: string
-  user_id: string
-  vote_count: number
-}
+/** Per session: total votes and the ballot tokens that named it (from `schedulingInputs`). */
+export type BallotInputs = ReadonlyMap<string, { votes: number; tokens: ReadonlySet<string> }>
 
 export interface ScheduleAssignment {
   sessionId: string
@@ -69,342 +77,235 @@ export interface AutoScheduleResult {
     assigned: number
     unassigned: number
     averageScore: number
+    /** Whether closed-round ballots informed ordering, capacity and overlap. */
+    usedBallots: boolean
   }
 }
 
-// Calculate slot duration in minutes
-function getSlotDuration(slot: TimeSlot): number {
-  const start = new Date(slot.start_time)
-  const end = new Date(slot.end_time)
-  return Math.round((end.getTime() - start.getTime()) / (1000 * 60))
+const DAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']
+
+function minutesBetween(start: string, end: string): number {
+  return Math.round((Date.parse(end) - Date.parse(start)) / 60_000)
 }
 
-// Get time preferences that match a day (e.g., "2024-02-20" -> ["tuesday_am", "tuesday_pm"])
-function getDayPreferences(dayDate: string): string[] {
-  const date = new Date(dayDate + 'T12:00:00')
-  const dayOfWeek = date.getDay()
-  const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']
-  const dayName = dayNames[dayOfWeek]
-  return [`${dayName}_am`, `${dayName}_pm`]
+function dayName(dayDate: string): string {
+  return DAY_NAMES[new Date(`${dayDate}T12:00:00Z`).getUTCDay()]
 }
 
-// Determine if a time is AM or PM
-function isAM(dateStr: string): boolean {
-  const date = new Date(dateStr)
-  return date.getUTCHours() < 12
+/** Morning or afternoon of an instant, in the event's own timezone. */
+function halfOfDay(iso: string, timezone: string): '_am' | '_pm' {
+  const hour = Number(
+    new Intl.DateTimeFormat('en-US', { timeZone: timezone, hour: '2-digit', hourCycle: 'h23' }).format(new Date(iso)),
+  )
+  return hour < 12 ? '_am' : '_pm'
 }
 
-// Build a map of session_id -> set of user_ids who voted for it
-function buildVoterSets(votes: Vote[]): Map<string, Set<string>> {
-  const voterSets = new Map<string, Set<string>>()
-  for (const vote of votes) {
-    if (!voterSets.has(vote.session_id)) {
-      voterSets.set(vote.session_id, new Set())
-    }
-    voterSets.get(vote.session_id)!.add(vote.user_id)
-  }
-  return voterSets
-}
-
-// Calculate Jaccard similarity between two voter sets (0 to 1)
-// Higher value means more overlap between voters
-function calculateVoterOverlap(setA: Set<string>, setB: Set<string>): number {
-  if (setA.size === 0 || setB.size === 0) return 0
-
+/** Jaccard similarity of two token sets (0..1). */
+export function tokenOverlap(a: ReadonlySet<string>, b: ReadonlySet<string>): number {
+  if (a.size === 0 || b.size === 0) return 0
+  const [small, large] = a.size <= b.size ? [a, b] : [b, a]
   let intersection = 0
-  // Convert to array to avoid downlevelIteration requirement
-  Array.from(setA).forEach((voter) => {
-    if (setB.has(voter)) intersection++
-  })
-
-  // Jaccard index: intersection / union
-  const union = setA.size + setB.size - intersection
+  for (const token of small) if (large.has(token)) intersection++
+  const union = a.size + b.size - intersection
   return union > 0 ? intersection / union : 0
 }
 
-// Score a slot for a given session
+interface Placement {
+  occupied: Set<string>
+  tracksAtTime: Map<string, Set<string>>
+  sessionsAtTime: Map<string, string[]>
+}
+
 function scoreSlot(
-  session: Session,
-  slot: TimeSlot,
-  venue: Venue,
-  occupiedSlots: Set<string>,
-  trackAssignmentsInTimeRange: Map<string, Set<string>>, // timeRange -> trackIds
-  sessionsInTimeRange: Map<string, string[]>, // timeRange -> sessionIds scheduled at that time
-  voterSets: Map<string, Set<string>> // sessionId -> set of voter userIds
+  session: SchedulerSession,
+  slot: SchedulerTimeSlot,
+  venue: SchedulerVenue,
+  placement: Placement,
+  ballots: BallotInputs,
+  timezone: string,
 ): { score: number; warnings: string[] } {
-  // Skip if slot is already occupied
-  if (occupiedSlots.has(slot.id)) {
-    return { score: -1, warnings: [] }
-  }
-
-  // Skip if slot is a break
-  if (slot.is_break) {
-    return { score: -1, warnings: [] }
-  }
-
-  let score = 0
   const warnings: string[] = []
+  let score = 0
+  const votes = ballots.get(session.id)?.votes ?? 0
 
-  // 1. Duration match (+8)
-  const slotDuration = getSlotDuration(slot)
-  if (session.duration === slotDuration) {
-    score += 8
-  } else if (Math.abs(session.duration - slotDuration) <= 15) {
-    score += 4 // Partial credit for close match
-    warnings.push(`Duration mismatch: session is ${session.duration}min, slot is ${slotDuration}min`)
-  } else {
-    score += 1 // Minimal credit
-    warnings.push(`Duration mismatch: session is ${session.duration}min, slot is ${slotDuration}min`)
+  // 1. Duration
+  const slotMinutes = minutesBetween(slot.start_time, slot.end_time)
+  const duration = session.duration ?? slotMinutes
+  if (duration === slotMinutes) score += 8
+  else {
+    score += Math.abs(duration - slotMinutes) <= 15 ? 4 : 1
+    warnings.push(`Duration mismatch: session is ${duration} min, slot is ${slotMinutes} min`)
   }
 
-  // 2. Time preference match (+10)
-  if (session.time_preferences && session.time_preferences.length > 0 && slot.day_date) {
-    const dayPrefs = getDayPreferences(slot.day_date)
-    const timeOfDay = isAM(slot.start_time) ? '_am' : '_pm'
-
-    const matchingPrefs = session.time_preferences.filter((pref) => {
-      // Check if day matches
-      const prefDay = pref.replace('_am', '').replace('_pm', '')
-      const slotDayName = dayPrefs[0].replace('_am', '').replace('_pm', '')
-
-      if (prefDay !== slotDayName) return false
-
-      // Check if time of day matches
-      return pref.endsWith(timeOfDay)
-    })
-
-    if (matchingPrefs.length > 0) {
-      score += 10
-    } else {
-      // Partial credit if day matches but time doesn't
-      const dayMatches = session.time_preferences.some((pref) =>
-        dayPrefs.some((dp) => pref.replace('_am', '').replace('_pm', '') === dp.replace('_am', '').replace('_pm', ''))
-      )
-      if (dayMatches) {
-        score += 3
-      }
+  // 2. Time preference
+  const slotStart = Date.parse(slot.start_time)
+  const slotEnd = Date.parse(slot.end_time)
+  const overlapsRange = (w: { startsAt: string; endsAt: string }) => Date.parse(w.startsAt) < slotEnd && slotStart < Date.parse(w.endsAt)
+  const blackout = (session.blackouts ?? []).some(overlapsRange)
+  if (blackout) {
+    score -= 20
+    warnings.push('The host marked this time as unavailable')
+  }
+  const prefs = session.time_preferences ?? []
+  const windows = session.windows ?? []
+  if (windows.length > 0) {
+    const inside = windows
+      .filter((w) => Date.parse(w.startsAt) <= slotStart && slotEnd <= Date.parse(w.endsAt))
+      .map((w) => w.preference ?? 1)
+    if (inside.length > 0) {
+      const best = Math.min(...inside)
+      score += best === 1 ? 10 : best === 2 ? 7 : 4
+    } else if (windows.some(overlapsRange)) {
+      score += 2
+      warnings.push('Only partly inside the host’s preferred times')
     }
+  } else if (prefs.length > 0 && slot.day_date) {
+    const day = dayName(slot.day_date)
+    const half = halfOfDay(slot.start_time, timezone)
+    if (prefs.includes(`${day}${half}`)) score += 10
+    else if (prefs.some((p) => p.replace(/_(am|pm)$/, '') === day)) score += 3
   }
 
-  // 3. Venue features match (+6)
-  // Check if venue has all required features for this session
-  if (session.required_features && session.required_features.length > 0) {
-    const venueFeatures = new Set(venue.features || [])
-    const missingFeatures = session.required_features.filter((f) => !venueFeatures.has(f))
-
-    if (missingFeatures.length === 0) {
-      score += 6 // All required features present
-    } else if (missingFeatures.length <= 1) {
-      score += 2 // Most features present
-      warnings.push(`Missing feature: ${missingFeatures.join(', ')}`)
-    } else {
-      score += 0 // Many features missing
-      warnings.push(`Missing features: ${missingFeatures.join(', ')}`)
+  // 3. Venue features
+  const required = session.required_features ?? []
+  if (required.length > 0) {
+    const have = new Set(venue.features ?? [])
+    const missing = required.filter((f) => !have.has(f))
+    if (missing.length === 0) score += 6
+    else {
+      if (missing.length === 1) score += 2
+      warnings.push(`Missing ${missing.length === 1 ? 'feature' : 'features'}: ${missing.join(', ')}`)
     }
   } else {
-    score += 3 // No specific features required, neutral
+    score += 3
   }
 
-  // 4. Capacity fit (+5)
-  // Use expected_attendance if provided, otherwise fall back to total_votes as a proxy
-  const estimatedAttendance = session.expected_attendance || session.total_votes || 0
-
+  // 4. Capacity (expected attendance, or closed-round votes as a proxy)
+  const estimate = session.expected_attendance ?? votes
   if (venue.capacity) {
-    if (estimatedAttendance <= venue.capacity * 0.7) {
-      score += 5 // Comfortable fit
-    } else if (estimatedAttendance <= venue.capacity) {
-      score += 3 // Tight fit
-      warnings.push(`Venue may be tight: ~${estimatedAttendance} expected, ${venue.capacity} capacity`)
+    if (estimate <= venue.capacity * 0.7) score += 5
+    else if (estimate <= venue.capacity) {
+      score += 3
+      warnings.push(`Room may be tight: ~${estimate} expected, capacity ${venue.capacity}`)
     } else {
-      score += 0 // Over capacity - still allow but warn heavily
-      warnings.push(`OVER CAPACITY: ~${estimatedAttendance} expected, ${venue.capacity} capacity`)
+      warnings.push(`Over capacity: ~${estimate} expected, capacity ${venue.capacity}`)
     }
   } else {
-    score += 2 // Unknown capacity, neutral score
+    score += 2
   }
 
-  // 5. Track spread (+3)
-  // Avoid scheduling same track in overlapping time slots
-  const timeRangeKey = `${slot.start_time}-${slot.end_time}`
+  // 5. Track spread
+  const timeKey = `${slot.start_time}|${slot.end_time}`
   if (session.track_id) {
-    const tracksInRange = trackAssignmentsInTimeRange.get(timeRangeKey)
-
-    if (!tracksInRange || !tracksInRange.has(session.track_id)) {
-      score += 3 // Good - different track
+    if (placement.tracksAtTime.get(timeKey)?.has(session.track_id)) {
+      warnings.push('Track conflict: same track at the same time')
     } else {
-      warnings.push('Track conflict: same track scheduled at same time')
+      score += 3
     }
   } else {
-    score += 1 // No track, neutral
+    score += 1
   }
 
-  // 6. Voter overlap penalty (-4 to +4)
-  // Avoid scheduling sessions with high voter overlap at the same time
-  const sessionsAtSameTime = sessionsInTimeRange.get(timeRangeKey) || []
-  const thisSessionVoters = voterSets.get(session.id)
-
-  if (thisSessionVoters && thisSessionVoters.size > 0 && sessionsAtSameTime.length > 0) {
-    let maxOverlap = 0
-    let overlapSessionTitle = ''
-
-    for (const otherSessionId of sessionsAtSameTime) {
-      const otherVoters = voterSets.get(otherSessionId)
-      if (otherVoters) {
-        const overlap = calculateVoterOverlap(thisSessionVoters, otherVoters)
-        if (overlap > maxOverlap) {
-          maxOverlap = overlap
-        }
-      }
+  // 6. Ballot-token overlap with sessions already placed at the same time
+  const mine = ballots.get(session.id)?.tokens
+  const concurrent = placement.sessionsAtTime.get(timeKey) ?? []
+  if (mine && mine.size > 0 && concurrent.length > 0) {
+    let max = 0
+    for (const other of concurrent) {
+      const theirs = ballots.get(other)?.tokens
+      if (theirs) max = Math.max(max, tokenOverlap(mine, theirs))
     }
-
-    if (maxOverlap >= 0.5) {
-      // High overlap (50%+) - significant penalty
+    if (max >= 0.5) {
       score -= 4
-      warnings.push(`High voter overlap (${Math.round(maxOverlap * 100)}%) with another session at same time`)
-    } else if (maxOverlap >= 0.3) {
-      // Moderate overlap (30-50%) - small penalty
+      warnings.push(`High voter overlap (${Math.round(max * 100)}%) with a session at the same time`)
+    } else if (max >= 0.3) {
       score -= 2
-      warnings.push(`Moderate voter overlap (${Math.round(maxOverlap * 100)}%) with another session at same time`)
-    } else if (maxOverlap < 0.1) {
-      // Low overlap - bonus for diverse scheduling
+      warnings.push(`Moderate voter overlap (${Math.round(max * 100)}%) with a session at the same time`)
+    } else if (max < 0.1) {
       score += 2
     }
   } else {
-    score += 2 // No voter data or first session, neutral bonus
+    score += 2
   }
 
-  // 7. Primary venue bonus (+2)
-  if (venue.is_primary && session.total_votes > 20) {
-    score += 2 // Popular sessions in main venue
-  }
+  // 7. Primary venue for sessions many people voted for
+  if (venue.is_primary && votes > 20) score += 2
 
   return { score, warnings }
 }
 
-/**
- * Auto-schedule approved sessions into available time slots.
- *
- * @param sessions - All sessions for the event
- * @param timeSlots - All time slots for the event
- * @param venues - All venues for the event
- * @param votes - Optional: voting data for cluster analysis (avoids scheduling overlapping voter bases at same time)
- */
 export function autoSchedule(
-  sessions: Session[],
-  timeSlots: TimeSlot[],
-  venues: Venue[],
-  votes: Vote[] = []
+  sessions: readonly SchedulerSession[],
+  timeSlots: readonly SchedulerTimeSlot[],
+  venues: readonly SchedulerVenue[],
+  options: { ballots?: BallotInputs; timezone: string },
 ): AutoScheduleResult {
-  // Filter to only approved/unscheduled sessions
-  const sessionsToSchedule = sessions
+  const ballots: BallotInputs = options.ballots ?? new Map()
+  const votesOf = (id: string) => ballots.get(id)?.votes ?? 0
+  const queue = sessions
     .filter((s) => s.status === 'approved' && !s.time_slot_id)
-    .sort((a, b) => b.total_votes - a.total_votes) // Highest votes first
+    .map((s, index) => ({ s, index }))
+    .sort((a, b) => votesOf(b.s.id) - votesOf(a.s.id) || a.index - b.index)
+    .map(({ s }) => s)
 
-  // Build venue lookup
-  const venueMap = new Map<string, Venue>()
-  venues.forEach((v) => venueMap.set(v.id, v))
-
-  // Build session title lookup for voter overlap warnings
-  const sessionTitleMap = new Map<string, string>()
-  sessions.forEach((s) => sessionTitleMap.set(s.id, s.title))
-
-  // Build voter sets for cluster analysis
-  const voterSets = buildVoterSets(votes)
-
-  // Available slots (non-break, with valid venue)
-  const availableSlots = timeSlots.filter(
-    (s) => !s.is_break && s.venue_id && venueMap.has(s.venue_id)
-  )
-
-  // Track assignments
-  const occupiedSlots = new Set<string>()
-  const trackAssignmentsInTimeRange = new Map<string, Set<string>>()
-  const sessionsInTimeRange = new Map<string, string[]>() // timeRange -> sessionIds
-  const assignments: ScheduleAssignment[] = []
-  const unassigned: { sessionId: string; sessionTitle: string; reason: string }[] = []
-
-  // Process each session
-  for (const session of sessionsToSchedule) {
-    let bestSlot: TimeSlot | null = null
-    let bestVenue: Venue | null = null
-    let bestScore = -1
-    let bestWarnings: string[] = []
-
-    // Score all available slots
-    for (const slot of availableSlots) {
-      if (occupiedSlots.has(slot.id)) continue
-
-      const venue = venueMap.get(slot.venue_id!)
-      if (!venue) continue
-
-      const { score, warnings } = scoreSlot(
-        session,
-        slot,
-        venue,
-        occupiedSlots,
-        trackAssignmentsInTimeRange,
-        sessionsInTimeRange,
-        voterSets
-      )
-
-      if (score > bestScore) {
-        bestScore = score
-        bestSlot = slot
-        bestVenue = venue
-        bestWarnings = warnings
-      }
-    }
-
-    // Assign to best slot or mark as unassigned
-    if (bestSlot && bestVenue && bestScore >= 0) {
-      occupiedSlots.add(bestSlot.id)
-
-      // Track assignment for track spread calculation
-      const timeRangeKey = `${bestSlot.start_time}-${bestSlot.end_time}`
-      if (session.track_id) {
-        if (!trackAssignmentsInTimeRange.has(timeRangeKey)) {
-          trackAssignmentsInTimeRange.set(timeRangeKey, new Set())
-        }
-        trackAssignmentsInTimeRange.get(timeRangeKey)!.add(session.track_id)
-      }
-
-      // Track session for voter overlap calculation
-      if (!sessionsInTimeRange.has(timeRangeKey)) {
-        sessionsInTimeRange.set(timeRangeKey, [])
-      }
-      sessionsInTimeRange.get(timeRangeKey)!.push(session.id)
-
-      assignments.push({
-        sessionId: session.id,
-        sessionTitle: session.title,
-        slotId: bestSlot.id,
-        venueId: bestVenue.id,
-        score: bestScore,
-        warnings: bestWarnings,
-      })
-    } else {
-      unassigned.push({
-        sessionId: session.id,
-        sessionTitle: session.title,
-        reason: 'No available slots match session requirements',
-      })
-    }
+  const venueById = new Map(venues.map((v) => [v.id, v]))
+  const placement: Placement = {
+    // Slots already holding a session (scheduled by hand) are not free.
+    occupied: new Set(sessions.filter((s) => s.time_slot_id).map((s) => s.time_slot_id!)),
+    tracksAtTime: new Map(),
+    sessionsAtTime: new Map(),
+  }
+  const slotById = new Map(timeSlots.map((t) => [t.id, t]))
+  for (const s of sessions) {
+    const slot = s.time_slot_id ? slotById.get(s.time_slot_id) : undefined
+    if (!slot) continue
+    const key = `${slot.start_time}|${slot.end_time}`
+    placement.sessionsAtTime.set(key, [...(placement.sessionsAtTime.get(key) ?? []), s.id])
+    if (s.track_id) placement.tracksAtTime.set(key, new Set([...(placement.tracksAtTime.get(key) ?? []), s.track_id]))
   }
 
-  // Calculate stats
-  const averageScore =
-    assignments.length > 0
-      ? assignments.reduce((sum, a) => sum + a.score, 0) / assignments.length
-      : 0
+  const candidates = timeSlots.filter((t) => !t.is_break && t.venue_id && venueById.has(t.venue_id))
+  const assignments: ScheduleAssignment[] = []
+  const unassigned: AutoScheduleResult['unassigned'] = []
 
+  for (const session of queue) {
+    let best: { slot: SchedulerTimeSlot; venue: SchedulerVenue; score: number; warnings: string[] } | null = null
+    for (const slot of candidates) {
+      if (placement.occupied.has(slot.id)) continue
+      const venue = venueById.get(slot.venue_id!)!
+      const { score, warnings } = scoreSlot(session, slot, venue, placement, ballots, options.timezone)
+      if (!best || score > best.score) best = { slot, venue, score, warnings }
+    }
+    if (!best || best.score < 0) {
+      unassigned.push({ sessionId: session.id, sessionTitle: session.title, reason: 'No free slot fits this session' })
+      continue
+    }
+    placement.occupied.add(best.slot.id)
+    const key = `${best.slot.start_time}|${best.slot.end_time}`
+    placement.sessionsAtTime.set(key, [...(placement.sessionsAtTime.get(key) ?? []), session.id])
+    if (session.track_id) {
+      placement.tracksAtTime.set(key, new Set([...(placement.tracksAtTime.get(key) ?? []), session.track_id]))
+    }
+    assignments.push({
+      sessionId: session.id,
+      sessionTitle: session.title,
+      slotId: best.slot.id,
+      venueId: best.venue.id,
+      score: best.score,
+      warnings: best.warnings,
+    })
+  }
+
+  const average = assignments.length ? assignments.reduce((sum, a) => sum + a.score, 0) / assignments.length : 0
   return {
     assignments,
     unassigned,
     stats: {
-      totalSessions: sessionsToSchedule.length,
+      totalSessions: queue.length,
       assigned: assignments.length,
       unassigned: unassigned.length,
-      averageScore: Math.round(averageScore * 100) / 100,
+      averageScore: Math.round(average * 100) / 100,
+      usedBallots: ballots.size > 0,
     },
   }
 }

@@ -1,779 +1,340 @@
 'use client'
 
 import * as React from 'react'
-import { useRouter, useParams } from 'next/navigation'
-import { Loader2, CheckCircle, UserPlus, Search, X, FileText, Upload } from 'lucide-react'
+import Link from 'next/link'
+import { CheckCircle, FileText, Info, Loader2, Upload } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
-
-import { useAuth } from '@/hooks/useAuth'
 import { useEvent, useEventRole } from '@/contexts/EventContext'
 import { CSVSessionImport } from '@/components/admin/CSVSessionImport'
+import { apiFetch, ApiError } from '@/lib/api/client'
+import { formatInEventTimezone } from '@/lib/events/timezone'
 import { cn } from '@/lib/utils'
+import type { AdminTimeSlot, AdminTrack, AdminVenue } from '@/components/admin/types'
 
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+const FORMAT_DESCRIPTIONS: Record<string, string> = {
+  talk: 'A presentation or lecture',
+  workshop: 'Hands-on interactive session',
+  discussion: 'Open group conversation',
+  panel: 'Multiple speakers discussing',
+  demo: 'Live demonstration',
+  fireside: 'An interview-style conversation',
+  ceremony: 'Opening, closing or ritual',
+}
 
-const formats = [
-  { value: 'talk', label: 'Talk', description: 'A presentation or lecture' },
-  { value: 'workshop', label: 'Workshop', description: 'Hands-on interactive session' },
-  { value: 'discussion', label: 'Discussion', description: 'Open group conversation' },
-  { value: 'panel', label: 'Panel', description: 'Multiple speakers discussing' },
-  { value: 'demo', label: 'Demo', description: 'Live demonstration' },
-]
-
-const durations = [
-  { value: 15, label: '15 min' },
-  { value: 30, label: '30 min' },
-  { value: 60, label: '60 min' },
-  { value: 90, label: '90 min' },
-]
-
-const statuses = [
-  { value: 'approved', label: 'Approved', description: 'Ready for voting/scheduling' },
-  { value: 'scheduled', label: 'Scheduled', description: 'Already assigned to a slot' },
+const STATUSES = [
+  { value: 'approved', label: 'Approved', description: 'Ready for voting and scheduling' },
+  { value: 'scheduled', label: 'Scheduled', description: 'Placed in a slot now' },
   { value: 'pending', label: 'Pending', description: 'Awaiting review' },
-]
-
-interface Track {
-  id: string
-  name: string
-  color: string | null
-}
-
-interface Venue {
-  id: string
-  name: string
-}
-
-interface TimeSlot {
-  id: string
-  start_time: string
-  end_time: string
-  label: string | null
-  day_date: string | null
-  venue_id: string | null
-  is_break: boolean
-}
-
-interface UserProfile {
-  id: string
-  display_name: string | null
-  email: string
-}
-
-function getAccessToken(): string | null {
-  const storageKey = `sb-${new URL(SUPABASE_URL).hostname.split('.')[0]}-auth-token`
-  const stored = localStorage.getItem(storageKey)
-  if (stored) {
-    try {
-      const session = JSON.parse(stored)
-      return session?.access_token || null
-    } catch {
-      return null
-    }
-  }
-  return null
-}
+] as const
 
 export default function AdminCreateSessionPage() {
-  const router = useRouter()
-  const params = useParams()
-  const slug = params.slug as string
-  const { user, isLoading: authLoading } = useAuth()
   const event = useEvent()
-  const { isAdmin } = useEventRole()
+  const { can } = useEventRole()
+  const base = `/api/v1/events/${event.slug}/admin`
+  const formats = event.allowedFormats.length ? event.allowedFormats : ['talk', 'workshop', 'discussion', 'panel', 'demo']
+  const durations = event.allowedDurations.length ? [...event.allowedDurations].sort((a, b) => a - b) : [15, 30, 60, 90]
 
-  // Form state
   const [title, setTitle] = React.useState('')
   const [description, setDescription] = React.useState('')
-  const [format, setFormat] = React.useState('talk')
-  const [duration, setDuration] = React.useState(60)
-  const [status, setStatus] = React.useState('approved')
+  const [format, setFormat] = React.useState(formats[0])
+  const [duration, setDuration] = React.useState(durations.includes(60) ? 60 : durations[0])
+  const [status, setStatus] = React.useState<(typeof STATUSES)[number]['value']>('approved')
   const [trackId, setTrackId] = React.useState<string | null>(null)
   const [tags, setTags] = React.useState<string[]>([])
   const [customTag, setCustomTag] = React.useState('')
-
-  // Host selection
-  const [hostType, setHostType] = React.useState<'existing' | 'external'>('external')
-  const [hostSearch, setHostSearch] = React.useState('')
-  const [hostSearchResults, setHostSearchResults] = React.useState<UserProfile[]>([])
-  const [selectedHost, setSelectedHost] = React.useState<UserProfile | null>(null)
-  const [externalHostName, setExternalHostName] = React.useState('')
-  const [isSearching, setIsSearching] = React.useState(false)
-
-  // Scheduling (for status = 'scheduled')
+  const [listedName, setListedName] = React.useState('')
   const [venueId, setVenueId] = React.useState<string | null>(null)
   const [timeSlotId, setTimeSlotId] = React.useState<string | null>(null)
 
-  // Data
-  const [tracks, setTracks] = React.useState<Track[]>([])
-  const [venues, setVenues] = React.useState<Venue[]>([])
-  const [timeSlots, setTimeSlots] = React.useState<TimeSlot[]>([])
+  const [tracks, setTracks] = React.useState<AdminTrack[]>([])
+  const [venues, setVenues] = React.useState<AdminVenue[]>([])
+  const [timeSlots, setTimeSlots] = React.useState<AdminTimeSlot[]>([])
+  const [loadError, setLoadError] = React.useState<string | null>(null)
 
-  // UI state
   const [mode, setMode] = React.useState<'single' | 'bulk'>('single')
   const [isSubmitting, setIsSubmitting] = React.useState(false)
-  const [isSuccess, setIsSuccess] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
-  const [createdSessionId, setCreatedSessionId] = React.useState<string | null>(null)
+  const [created, setCreated] = React.useState<{ id: string; title: string; status: string } | null>(null)
   const [bulkImportCount, setBulkImportCount] = React.useState(0)
 
-  // Fetch tracks, venues, time slots
   React.useEffect(() => {
-    const fetchData = async () => {
-      const token = getAccessToken()
-      const headers: Record<string, string> = {
-        'apikey': SUPABASE_KEY,
-        'Authorization': `Bearer ${token || SUPABASE_KEY}`,
-      }
+    let cancelled = false
+    Promise.all([
+      apiFetch<{ tracks: AdminTrack[] }>(`${base}/tracks`),
+      apiFetch<{ venues: AdminVenue[] }>(`${base}/venues`),
+      apiFetch<{ timeSlots: AdminTimeSlot[] }>(`${base}/time-slots`),
+    ])
+      .then(([t, v, s]) => {
+        if (cancelled) return
+        setTracks(t.tracks.filter((track) => track.is_active))
+        setVenues(v.venues)
+        setTimeSlots(s.timeSlots)
+      })
+      .catch((e) => { if (!cancelled) setLoadError(e instanceof ApiError ? e.message : 'Tracks and rooms could not be loaded.') })
+    return () => { cancelled = true }
+  }, [base])
 
-      const [tracksRes, venuesRes, slotsRes] = await Promise.all([
-        fetch(
-          `${SUPABASE_URL}/rest/v1/tracks?event_id=eq.${event.id}&is_active=eq.true&select=id,name,color&order=name`,
-          { headers }
-        ),
-        fetch(
-          `${SUPABASE_URL}/rest/v1/venues?event_id=eq.${event.id}&select=id,name&order=name`,
-          { headers }
-        ),
-        fetch(
-          `${SUPABASE_URL}/rest/v1/time_slots?event_id=eq.${event.id}&is_break=eq.false&select=id,start_time,end_time,label,day_date,venue_id&order=start_time`,
-          { headers }
-        ),
-      ])
-
-      if (tracksRes.ok) setTracks(await tracksRes.json())
-      if (venuesRes.ok) setVenues(await venuesRes.json())
-      if (slotsRes.ok) setTimeSlots(await slotsRes.json())
-    }
-
-    if (event.id) fetchData()
-  }, [event.id])
-
-  // Search users for host selection
-  React.useEffect(() => {
-    const searchUsers = async () => {
-      if (hostType !== 'existing' || hostSearch.length < 2) {
-        setHostSearchResults([])
-        return
-      }
-
-      setIsSearching(true)
-      const token = getAccessToken()
-
-      try {
-        const response = await fetch(
-          `${SUPABASE_URL}/rest/v1/profiles?or=(display_name.ilike.*${hostSearch}*,email.ilike.*${hostSearch}*)&select=id,display_name,email&limit=10`,
-          {
-            headers: {
-              'apikey': SUPABASE_KEY,
-              'Authorization': `Bearer ${token || SUPABASE_KEY}`,
-            },
-          }
-        )
-
-        if (response.ok) {
-          const data = await response.json()
-          setHostSearchResults(data)
-        }
-      } catch (err) {
-        console.error('Error searching users:', err)
-      } finally {
-        setIsSearching(false)
-      }
-    }
-
-    const debounce = setTimeout(searchUsers, 300)
-    return () => clearTimeout(debounce)
-  }, [hostSearch, hostType])
-
-  const handleAddTag = (tag: string) => {
-    const normalizedTag = tag.toLowerCase().trim()
-    if (normalizedTag && !tags.includes(normalizedTag) && tags.length < 5) {
-      setTags([...tags, normalizedTag])
-    }
+  const addTag = (tag: string) => {
+    const normalized = tag.toLowerCase().trim()
+    if (normalized && !tags.includes(normalized) && tags.length < 5) setTags([...tags, normalized])
     setCustomTag('')
   }
 
-  const handleRemoveTag = (tag: string) => {
-    setTags(tags.filter((t) => t !== tag))
+  const freeSlots = React.useMemo(
+    () => (venueId ? timeSlots.filter((t) => t.venue_id === venueId && !t.is_break && t.sessions.length === 0) : []),
+    [timeSlots, venueId],
+  )
+
+  const reset = () => {
+    setCreated(null)
+    setTitle('')
+    setDescription('')
+    setFormat(formats[0])
+    setStatus('approved')
+    setTrackId(null)
+    setTags([])
+    setListedName('')
+    setVenueId(null)
+    setTimeSlotId(null)
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setError(null)
-
-    if (!title.trim()) {
-      setError('Title is required')
-      return
-    }
-
-    if (hostType === 'external' && !externalHostName.trim()) {
-      setError('Host name is required for external speakers')
-      return
-    }
-
-    if (status === 'scheduled' && (!venueId || !timeSlotId)) {
-      setError('Please select a venue and time slot for scheduled sessions')
-      return
-    }
-
-    const token = getAccessToken()
-    if (!token) {
-      setError('Session expired. Please log in again.')
-      return
-    }
-
+    if (!title.trim()) { setError('Title is required'); return }
+    if (status === 'scheduled' && !timeSlotId) { setError('Choose a room and a free time slot for a scheduled session'); return }
     setIsSubmitting(true)
-
     try {
-      const response = await fetch(`/api/v1/events/${slug}/admin/sessions`, {
+      const res = await apiFetch<{ id: string; status: string }>(`${base}/sessions`, {
         method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
+        json: {
           title: title.trim(),
           description: description.trim() || null,
           format,
           duration,
           status,
           track_id: trackId,
-          topic_tags: tags.length > 0 ? tags : null,
-          host_id: hostType === 'existing' && selectedHost ? selectedHost.id : null,
-          host_name: hostType === 'external' ? externalHostName.trim() : (selectedHost?.display_name || selectedHost?.email),
-          venue_id: status === 'scheduled' ? venueId : null,
+          topic_tags: tags.length ? tags : null,
+          host_name: listedName.trim() || null,
           time_slot_id: status === 'scheduled' ? timeSlotId : null,
-        }),
+        },
       })
-
-      if (!response.ok) {
-        const errorData = await response.json()
-        throw new Error(errorData.error || 'Failed to create session')
-      }
-
-      const data = await response.json()
-      setCreatedSessionId(data.id)
-      setIsSuccess(true)
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Failed to create session'
-      setError(message)
+      setCreated({ id: res.id, title: title.trim(), status: res.status })
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'The session could not be created.')
     } finally {
       setIsSubmitting(false)
     }
   }
 
-  // Filter time slots by selected venue
-  const filteredTimeSlots = React.useMemo(() => {
-    if (!venueId) return []
-    return timeSlots.filter(slot => slot.venue_id === venueId)
-  }, [timeSlots, venueId])
-
-  // Format time slot for display
-  const formatTimeSlot = (slot: TimeSlot) => {
-    const start = new Date(slot.start_time)
-    const end = new Date(slot.end_time)
-    const dayLabel = slot.day_date
-      ? new Date(slot.day_date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
-      : ''
-    const timeLabel = `${start.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })} - ${end.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}`
-    return `${dayLabel} ${timeLabel}${slot.label ? ` (${slot.label})` : ''}`
+  if (!can('manageSchedule')) {
+    return <Card><CardContent className="py-8 text-center text-muted-foreground">Only owners and admins can add sessions.</CardContent></Card>
   }
 
-  if (authLoading) {
+  if (created) {
     return (
-      <div className="flex items-center justify-center py-12">
-        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+      <div className="max-w-md mx-auto">
+        <Card>
+          <CardHeader className="text-center">
+            <div className="flex justify-center mb-4"><div className="rounded-full bg-green-500/10 p-4"><CheckCircle className="h-12 w-12 text-green-500" aria-hidden /></div></div>
+            <CardTitle className="text-2xl">Session created</CardTitle>
+            <CardDescription>&ldquo;{created.title}&rdquo; is {created.status}.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex gap-3">
+              <Button variant="outline" className="flex-1" asChild><Link href={`/e/${event.slug}/sessions/${created.id}`}>View session</Link></Button>
+              <Button className="flex-1" onClick={reset}>Create another</Button>
+            </div>
+            <Button variant="ghost" className="w-full" asChild><Link href={`/e/${event.slug}/admin`}>Back to overview</Link></Button>
+          </CardContent>
+        </Card>
       </div>
     )
   }
 
-  if (!user || !isAdmin) {
-    return (
-      <Card>
-        <CardContent className="py-8 text-center">
-          <p className="text-muted-foreground">You don't have permission to create sessions.</p>
-        </CardContent>
-      </Card>
-    )
-  }
-
-  if (isSuccess) {
-    return (
-      <div className="max-w-md mx-auto">
-          <Card>
-            <CardHeader className="text-center">
-              <div className="flex justify-center mb-4">
-                <div className="rounded-full bg-green-500/10 p-4">
-                  <CheckCircle className="h-12 w-12 text-green-500" />
-                </div>
-              </div>
-              <CardTitle className="text-2xl">Session Created!</CardTitle>
-              <CardDescription>
-                "{title}" has been created with status: {status}
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="flex gap-3">
-                <Button variant="outline" className="flex-1" asChild>
-                  <a href={`/e/${slug}/sessions/${createdSessionId}`}>View Session</a>
-                </Button>
-                <Button
-                  className="flex-1"
-                  onClick={() => {
-                    setIsSuccess(false)
-                    setTitle('')
-                    setDescription('')
-                    setFormat('talk')
-                    setDuration(60)
-                    setStatus('approved')
-                    setTrackId(null)
-                    setTags([])
-                    setHostType('external')
-                    setSelectedHost(null)
-                    setExternalHostName('')
-                    setVenueId(null)
-                    setTimeSlotId(null)
-                    setCreatedSessionId(null)
-                  }}
-                >
-                  Create Another
-                </Button>
-              </div>
-              <Button variant="ghost" className="w-full" asChild>
-                <a href={`/e/${slug}/admin`}>Back to Admin</a>
-              </Button>
-            </CardContent>
-          </Card>
-        </div>
-    )
-  }
-
   return (
-      <div className="max-w-2xl">
-        <div className="mb-6">
-          <h1 className="text-2xl font-display font-bold">Create Session</h1>
-          <p className="text-muted-foreground mt-1">
-            Add a curated session for {event.name}
-          </p>
-        </div>
+    <div className="max-w-2xl">
+      <div className="mb-6">
+        <h1 className="text-2xl font-display font-bold">Add a session</h1>
+        <p className="text-muted-foreground mt-1">Add a curated session for {event.name}</p>
+      </div>
 
-        {/* Mode Toggle */}
-        <div className="flex gap-2 mb-6">
+      <div className="flex gap-2 mb-6" role="tablist" aria-label="How to add sessions">
+        {([['single', 'Single session', FileText], ['bulk', 'Import CSV', Upload]] as const).map(([value, label, Icon]) => (
           <button
+            key={value}
             type="button"
-            onClick={() => setMode('single')}
-            className={cn(
-              'flex items-center gap-2 px-4 py-2 rounded-lg border transition-colors',
-              mode === 'single'
-                ? 'border-primary bg-primary/10 text-primary'
-                : 'border-muted hover:border-muted-foreground/50'
-            )}
+            role="tab"
+            aria-selected={mode === value}
+            onClick={() => setMode(value)}
+            className={cn('flex items-center gap-2 px-4 py-2 rounded-lg border transition-colors', mode === value ? 'border-primary bg-primary/10 text-primary' : 'border-muted hover:border-muted-foreground/50')}
           >
-            <FileText className="h-4 w-4" />
-            Single Session
+            <Icon className="h-4 w-4" aria-hidden />
+            {label}
           </button>
-          <button
-            type="button"
-            onClick={() => setMode('bulk')}
-            className={cn(
-              'flex items-center gap-2 px-4 py-2 rounded-lg border transition-colors',
-              mode === 'bulk'
-                ? 'border-primary bg-primary/10 text-primary'
-                : 'border-muted hover:border-muted-foreground/50'
-            )}
-          >
-            <Upload className="h-4 w-4" />
-            Bulk Import (CSV)
-          </button>
-        </div>
+        ))}
+      </div>
 
-        {/* Bulk Import Success Message */}
-        {bulkImportCount > 0 && mode === 'bulk' && (
-          <div className="mb-6 p-4 bg-green-500/10 border border-green-500/20 rounded-lg flex items-center gap-3">
-            <CheckCircle className="h-5 w-5 text-green-500" />
-            <div>
-              <p className="font-medium text-green-700 dark:text-green-300">
-                Successfully imported {bulkImportCount} session{bulkImportCount > 1 ? 's' : ''}
-              </p>
-              <a href={`/e/${slug}/admin`} className="text-sm text-green-600 dark:text-green-400 hover:underline">
-                View all sessions
-              </a>
-            </div>
+      {loadError && <p role="alert" className="mb-4 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">{loadError}</p>}
+
+      <div className="mb-6 flex gap-3 rounded-lg border bg-muted/40 p-4 text-sm">
+        <Info className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" aria-hidden />
+        <p className="text-muted-foreground">
+          Sessions you add have no host account: nobody&rsquo;s name goes on a public record they did not write. You can note the speaker as &ldquo;listed as&rdquo; — organizers see it, attendees and the network never do. When the speaker signs in and proposes the session themselves, it becomes theirs.
+        </p>
+      </div>
+
+      {bulkImportCount > 0 && mode === 'bulk' && (
+        <div role="status" className="mb-6 p-4 bg-green-500/10 border border-green-500/20 rounded-lg flex items-center gap-3">
+          <CheckCircle className="h-5 w-5 text-green-500" aria-hidden />
+          <div>
+            <p className="font-medium text-green-700 dark:text-green-300">Imported {bulkImportCount} session{bulkImportCount === 1 ? '' : 's'}</p>
+            <Link href={`/e/${event.slug}/admin`} className="text-sm text-green-600 dark:text-green-400 hover:underline">View all sessions</Link>
           </div>
-        )}
+        </div>
+      )}
 
-        {mode === 'bulk' ? (
-          <CSVSessionImport
-            eventSlug={slug}
-            tracks={tracks}
-            onImportComplete={(count) => setBulkImportCount(count)}
-          />
-        ) : (
+      {mode === 'bulk' ? (
+        <CSVSessionImport eventSlug={event.slug} tracks={tracks} allowedFormats={formats} onImportComplete={(count) => setBulkImportCount((n) => n + count)} />
+      ) : (
         <Card>
           <CardHeader>
-            <CardTitle>Session Details</CardTitle>
-            <CardDescription>
-              Create a session directly with full control over status and scheduling.
-            </CardDescription>
+            <CardTitle>Session details</CardTitle>
+            <CardDescription>Create a session with its status, track and (optionally) a time slot.</CardDescription>
           </CardHeader>
           <CardContent>
             <form onSubmit={handleSubmit} className="space-y-6">
-              {/* Title */}
               <div className="space-y-2">
-                <label className="text-sm font-medium">
-                  Title <span className="text-destructive">*</span>
-                </label>
-                <Input
-                  value={title}
-                  onChange={(e) => setTitle(e.target.value)}
-                  placeholder="Session title"
-                  maxLength={100}
-                />
-                <p className="text-xs text-muted-foreground">{title.length}/100</p>
+                <label htmlFor="session-title" className="text-sm font-medium">Title <span className="text-destructive">*</span></label>
+                <Input id="session-title" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Session title" maxLength={200} />
               </div>
 
-              {/* Description */}
               <div className="space-y-2">
-                <label className="text-sm font-medium">Description</label>
-                <Textarea
-                  value={description}
-                  onChange={(e) => setDescription(e.target.value)}
-                  placeholder="Describe the session..."
-                  rows={4}
-                  maxLength={500}
-                />
-                <p className="text-xs text-muted-foreground">{description.length}/500</p>
+                <label htmlFor="session-description" className="text-sm font-medium">Description</label>
+                <Textarea id="session-description" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Describe the session…" rows={4} maxLength={5000} />
               </div>
 
-              {/* Host Selection */}
-              <div className="space-y-3">
-                <label className="text-sm font-medium">
-                  Host <span className="text-destructive">*</span>
-                </label>
-                <div className="grid grid-cols-2 gap-3">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setHostType('external')
-                      setSelectedHost(null)
-                    }}
-                    className={cn(
-                      'p-3 rounded-lg border text-left transition-colors',
-                      hostType === 'external'
-                        ? 'border-primary bg-primary/10'
-                        : 'hover:border-muted-foreground/50'
-                    )}
-                  >
-                    <div className="font-medium text-sm">External Speaker</div>
-                    <div className="text-xs text-muted-foreground">Enter name manually</div>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setHostType('existing')}
-                    className={cn(
-                      'p-3 rounded-lg border text-left transition-colors',
-                      hostType === 'existing'
-                        ? 'border-primary bg-primary/10'
-                        : 'hover:border-muted-foreground/50'
-                    )}
-                  >
-                    <div className="font-medium text-sm">Existing User</div>
-                    <div className="text-xs text-muted-foreground">Search registered users</div>
-                  </button>
-                </div>
-
-                {hostType === 'external' ? (
-                  <Input
-                    value={externalHostName}
-                    onChange={(e) => setExternalHostName(e.target.value)}
-                    placeholder="Speaker name"
-                  />
-                ) : (
-                  <div className="space-y-2">
-                    {selectedHost ? (
-                      <div className="flex items-center gap-2 p-2 border rounded-lg bg-muted/50">
-                        <UserPlus className="h-4 w-4 text-muted-foreground" />
-                        <span className="flex-1 text-sm">
-                          {selectedHost.display_name || selectedHost.email}
-                        </span>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => setSelectedHost(null)}
-                        >
-                          <X className="h-4 w-4" />
-                        </Button>
-                      </div>
-                    ) : (
-                      <>
-                        <div className="relative">
-                          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                          <Input
-                            value={hostSearch}
-                            onChange={(e) => setHostSearch(e.target.value)}
-                            placeholder="Search by name or email..."
-                            className="pl-9"
-                          />
-                          {isSearching && (
-                            <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin" />
-                          )}
-                        </div>
-                        {hostSearchResults.length > 0 && (
-                          <div className="border rounded-lg divide-y max-h-48 overflow-y-auto">
-                            {hostSearchResults.map((profile) => (
-                              <button
-                                key={profile.id}
-                                type="button"
-                                onClick={() => {
-                                  setSelectedHost(profile)
-                                  setHostSearch('')
-                                  setHostSearchResults([])
-                                }}
-                                className="w-full p-2 text-left hover:bg-muted/50 text-sm"
-                              >
-                                <div className="font-medium">{profile.display_name || 'No name'}</div>
-                                <div className="text-xs text-muted-foreground">{profile.email}</div>
-                              </button>
-                            ))}
-                          </div>
-                        )}
-                      </>
-                    )}
-                  </div>
-                )}
+              <div className="space-y-2">
+                <label htmlFor="session-listed" className="text-sm font-medium">Speaker (listed as)</label>
+                <Input id="session-listed" value={listedName} onChange={(e) => setListedName(e.target.value)} placeholder="Optional — e.g., Alice Smith" maxLength={200} />
+                <p className="text-xs text-muted-foreground">Visible to organizers only. Never shown to attendees or published.</p>
               </div>
 
-              {/* Format */}
-              <div className="space-y-2">
-                <label className="text-sm font-medium">Format</label>
+              <fieldset className="space-y-2">
+                <legend className="text-sm font-medium">Format</legend>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                   {formats.map((f) => (
-                    <button
-                      key={f.value}
-                      type="button"
-                      onClick={() => setFormat(f.value)}
-                      className={cn(
-                        'p-3 rounded-lg border text-left transition-colors',
-                        format === f.value
-                          ? 'border-primary bg-primary/10'
-                          : 'hover:border-muted-foreground/50'
-                      )}
-                    >
-                      <div className="font-medium text-sm">{f.label}</div>
-                      <div className="text-xs text-muted-foreground">{f.description}</div>
+                    <button key={f} type="button" aria-pressed={format === f} onClick={() => setFormat(f)} className={cn('p-3 rounded-lg border text-left transition-colors', format === f ? 'border-primary bg-primary/10' : 'hover:border-muted-foreground/50')}>
+                      <div className="font-medium text-sm capitalize">{f}</div>
+                      {FORMAT_DESCRIPTIONS[f] && <div className="text-xs text-muted-foreground">{FORMAT_DESCRIPTIONS[f]}</div>}
                     </button>
                   ))}
                 </div>
-              </div>
+              </fieldset>
 
-              {/* Duration */}
-              <div className="space-y-2">
-                <label className="text-sm font-medium">Duration</label>
-                <div className="flex gap-2">
+              <fieldset className="space-y-2">
+                <legend className="text-sm font-medium">Duration</legend>
+                <div className="flex flex-wrap gap-2">
                   {durations.map((d) => (
-                    <button
-                      key={d.value}
-                      type="button"
-                      onClick={() => setDuration(d.value)}
-                      className={cn(
-                        'px-4 py-2 rounded-lg border transition-colors',
-                        duration === d.value
-                          ? 'border-primary bg-primary/10'
-                          : 'hover:border-muted-foreground/50'
-                      )}
-                    >
-                      {d.label}
+                    <button key={d} type="button" aria-pressed={duration === d} onClick={() => setDuration(d)} className={cn('px-4 py-2 rounded-lg border transition-colors', duration === d ? 'border-primary bg-primary/10' : 'hover:border-muted-foreground/50')}>
+                      {d} min
                     </button>
                   ))}
                 </div>
-              </div>
+              </fieldset>
 
-              {/* Status */}
-              <div className="space-y-2">
-                <label className="text-sm font-medium">Status</label>
+              <fieldset className="space-y-2">
+                <legend className="text-sm font-medium">Status</legend>
                 <div className="grid grid-cols-3 gap-2">
-                  {statuses.map((s) => (
+                  {STATUSES.map((s) => (
                     <button
                       key={s.value}
                       type="button"
-                      onClick={() => {
-                        setStatus(s.value)
-                        if (s.value !== 'scheduled') {
-                          setVenueId(null)
-                          setTimeSlotId(null)
-                        }
-                      }}
-                      className={cn(
-                        'p-3 rounded-lg border text-left transition-colors',
-                        status === s.value
-                          ? 'border-primary bg-primary/10'
-                          : 'hover:border-muted-foreground/50'
-                      )}
+                      aria-pressed={status === s.value}
+                      onClick={() => { setStatus(s.value); if (s.value !== 'scheduled') { setVenueId(null); setTimeSlotId(null) } }}
+                      className={cn('p-3 rounded-lg border text-left transition-colors', status === s.value ? 'border-primary bg-primary/10' : 'hover:border-muted-foreground/50')}
                     >
                       <div className="font-medium text-sm">{s.label}</div>
                       <div className="text-xs text-muted-foreground">{s.description}</div>
                     </button>
                   ))}
                 </div>
-              </div>
+              </fieldset>
 
-              {/* Scheduling (when status is 'scheduled') */}
               {status === 'scheduled' && (
                 <div className="space-y-4 p-4 border rounded-lg bg-muted/50">
-                  <h4 className="font-medium text-sm">Schedule Assignment</h4>
-
-                  {/* Venue */}
                   <div className="space-y-2">
-                    <label className="text-sm font-medium">Venue</label>
-                    <select
-                      value={venueId || ''}
-                      onChange={(e) => {
-                        setVenueId(e.target.value || null)
-                        setTimeSlotId(null)
-                      }}
-                      className="w-full rounded-lg border bg-background px-3 py-2 text-sm"
-                    >
-                      <option value="">Select venue...</option>
-                      {venues.map((v) => (
-                        <option key={v.id} value={v.id}>{v.name}</option>
-                      ))}
+                    <label htmlFor="session-venue" className="text-sm font-medium">Room</label>
+                    <select id="session-venue" value={venueId || ''} onChange={(e) => { setVenueId(e.target.value || null); setTimeSlotId(null) }} className="w-full rounded-lg border bg-background px-3 py-2 text-sm">
+                      <option value="">Select a room…</option>
+                      {venues.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
                     </select>
                   </div>
-
-                  {/* Time Slot */}
                   {venueId && (
                     <div className="space-y-2">
-                      <label className="text-sm font-medium">Time Slot</label>
-                      <select
-                        value={timeSlotId || ''}
-                        onChange={(e) => setTimeSlotId(e.target.value || null)}
-                        className="w-full rounded-lg border bg-background px-3 py-2 text-sm"
-                      >
-                        <option value="">Select time slot...</option>
-                        {filteredTimeSlots.map((slot) => (
+                      <label htmlFor="session-slot" className="text-sm font-medium">Free time slot</label>
+                      <select id="session-slot" value={timeSlotId || ''} onChange={(e) => setTimeSlotId(e.target.value || null)} className="w-full rounded-lg border bg-background px-3 py-2 text-sm">
+                        <option value="">Select a time…</option>
+                        {freeSlots.map((slot) => (
                           <option key={slot.id} value={slot.id}>
-                            {formatTimeSlot(slot)}
+                            {formatInEventTimezone(new Date(slot.start_time), event.timezone, 'datetime')}–{formatInEventTimezone(new Date(slot.end_time), event.timezone, 'time')}{slot.label ? ` (${slot.label})` : ''}
                           </option>
                         ))}
                       </select>
-                      {filteredTimeSlots.length === 0 && (
-                        <p className="text-xs text-muted-foreground">
-                          No time slots available for this venue
-                        </p>
-                      )}
+                      {freeSlots.length === 0 && <p className="text-xs text-muted-foreground">No free slots in this room</p>}
                     </div>
                   )}
                 </div>
               )}
 
-              {/* Track */}
               {tracks.length > 0 && (
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">Track</label>
+                <fieldset className="space-y-2">
+                  <legend className="text-sm font-medium">Track</legend>
                   <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setTrackId(null)}
-                      className={cn(
-                        'px-3 py-2 rounded-lg border text-sm transition-colors text-left',
-                        trackId === null
-                          ? 'border-primary bg-primary/10'
-                          : 'hover:border-muted-foreground/50'
-                      )}
-                    >
-                      None
-                    </button>
+                    <button type="button" aria-pressed={trackId === null} onClick={() => setTrackId(null)} className={cn('px-3 py-2 rounded-lg border text-sm transition-colors text-left', trackId === null ? 'border-primary bg-primary/10' : 'hover:border-muted-foreground/50')}>None</button>
                     {tracks.map((track) => (
-                      <button
-                        key={track.id}
-                        type="button"
-                        onClick={() => setTrackId(track.id)}
-                        className={cn(
-                          'px-3 py-2 rounded-lg border text-sm transition-colors text-left flex items-center gap-2',
-                          trackId === track.id
-                            ? 'border-primary bg-primary/10'
-                            : 'hover:border-muted-foreground/50'
-                        )}
-                      >
-                        {track.color && (
-                          <span
-                            className="w-2 h-2 rounded-full flex-shrink-0"
-                            style={{ backgroundColor: track.color }}
-                          />
-                        )}
+                      <button key={track.id} type="button" aria-pressed={trackId === track.id} onClick={() => setTrackId(track.id)} className={cn('px-3 py-2 rounded-lg border text-sm transition-colors text-left flex items-center gap-2', trackId === track.id ? 'border-primary bg-primary/10' : 'hover:border-muted-foreground/50')}>
+                        {track.color && <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: track.color }} aria-hidden />}
                         <span className="truncate">{track.name}</span>
                       </button>
                     ))}
                   </div>
-                </div>
+                </fieldset>
               )}
 
-              {/* Tags */}
               <div className="space-y-2">
-                <label className="text-sm font-medium">Tags (up to 5)</label>
+                <label htmlFor="session-tag" className="text-sm font-medium">Tags (up to 5)</label>
                 <div className="flex flex-wrap gap-1.5 mb-2">
                   {tags.map((tag) => (
-                    <Badge
-                      key={tag}
-                      variant="secondary"
-                      className="cursor-pointer hover:bg-destructive/20"
-                      onClick={() => handleRemoveTag(tag)}
-                    >
-                      {tag} ×
+                    <Badge key={tag} variant="secondary" className="gap-1">
+                      {tag}
+                      <button type="button" onClick={() => setTags(tags.filter((t) => t !== tag))} aria-label={`Remove tag ${tag}`}>×</button>
                     </Badge>
                   ))}
                 </div>
                 <div className="flex gap-2">
-                  <Input
-                    value={customTag}
-                    onChange={(e) => setCustomTag(e.target.value)}
-                    placeholder="Add a tag..."
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        e.preventDefault()
-                        handleAddTag(customTag)
-                      }
-                    }}
-                  />
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => handleAddTag(customTag)}
-                    disabled={!customTag.trim() || tags.length >= 5}
-                  >
-                    Add
-                  </Button>
+                  <Input id="session-tag" value={customTag} onChange={(e) => setCustomTag(e.target.value)} placeholder="Add a tag…" maxLength={40} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addTag(customTag) } }} />
+                  <Button type="button" variant="outline" onClick={() => addTag(customTag)} disabled={!customTag.trim() || tags.length >= 5}>Add</Button>
                 </div>
               </div>
 
-              {/* Error */}
-              {error && (
-                <div className="rounded-lg bg-destructive/10 border border-destructive/20 p-3 text-sm text-destructive">
-                  {error}
-                </div>
-              )}
+              {error && <div role="alert" className="rounded-lg bg-destructive/10 border border-destructive/20 p-3 text-sm text-destructive">{error}</div>}
 
-              {/* Submit */}
               <div className="flex gap-3">
-                <Button type="button" variant="outline" className="flex-1" asChild>
-                  <a href={`/e/${slug}/admin`}>Cancel</a>
-                </Button>
+                <Button type="button" variant="outline" className="flex-1" asChild><Link href={`/e/${event.slug}/admin`}>Cancel</Link></Button>
                 <Button type="submit" className="flex-1" disabled={isSubmitting}>
                   {isSubmitting && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-                  Create Session
+                  Create session
                 </Button>
               </div>
             </form>
           </CardContent>
         </Card>
-        )}
-      </div>
+      )}
+    </div>
   )
 }

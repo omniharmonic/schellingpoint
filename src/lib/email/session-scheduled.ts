@@ -1,4 +1,5 @@
-import { appUrl } from './base-template'
+import { appUrl, buildPlainText, PRODUCT_NAME } from './base-template'
+import { escapeHtml, safeHexColor, safeHref } from './escape'
 
 interface SessionScheduledEmailParams {
   sessionTitle: string
@@ -16,27 +17,41 @@ interface SessionScheduledEmailParams {
   eventLocation?: string // e.g., "Boulder, CO"
 }
 
-export function buildSessionScheduledEmail(params: SessionScheduledEmailParams) {
-  const {
-    sessionTitle,
-    hostName,
-    venueName,
-    venueAddress,
-    dateString,
-    timeString,
-    trackName,
-    trackColor,
-    sessionUrl,
-    eventName,
-    eventDateRange,
-    eventLocation,
-  } = params
+export function buildSessionScheduledEmail(params: SessionScheduledEmailParams): { subject: string; html: string; text: string } {
+  // Every interpolated value below is escaped: titles, names and venues are typed by people.
+  const sessionTitle = escapeHtml(params.sessionTitle)
+  const hostName = escapeHtml(params.hostName)
+  const venueName = escapeHtml(params.venueName)
+  const venueAddress = params.venueAddress ? escapeHtml(params.venueAddress) : null
+  const dateString = escapeHtml(params.dateString)
+  const timeString = escapeHtml(params.timeString)
+  const sessionUrl = safeHref(params.sessionUrl) ?? escapeHtml(appUrl())
+  const eventName = escapeHtml(params.eventName)
+  const eventDateRange = params.eventDateRange ? escapeHtml(params.eventDateRange) : undefined
+  const eventLocation = params.eventLocation ? escapeHtml(params.eventLocation) : undefined
 
-  const subject = `Your session "${sessionTitle}" has been scheduled! — ${eventName}`
+  const subject = `Your session "${params.sessionTitle}" has been scheduled! — ${params.eventName}`.replace(/[\r\n]+/g, ' ')
 
-  const trackDot = trackName
-    ? `<span style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: ${trackColor || '#B2FF00'}; margin-right: 6px; vertical-align: middle;"></span>${trackName}`
+  const trackDot = params.trackName
+    ? `<span style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: ${safeHexColor(params.trackColor, '#B2FF00')}; margin-right: 6px; vertical-align: middle;"></span>${escapeHtml(params.trackName)}`
     : null
+
+  const text = buildPlainText({
+    heading: 'Session scheduled',
+    paragraphs: [
+      `Hey ${params.hostName},`,
+      `Your session "${params.sessionTitle}" has been added to the official schedule.`,
+      [
+        `Date: ${params.dateString}`,
+        `Time: ${params.timeString}`,
+        `Venue: ${params.venueName}${params.venueAddress ? `, ${params.venueAddress}` : ''}`,
+        params.trackName ? `Track: ${params.trackName}` : null,
+      ].filter(Boolean).join('\n'),
+    ],
+    ctaUrl: params.sessionUrl,
+    ctaText: 'View your session',
+    eventName: params.eventName,
+  })
 
   const html = `<!DOCTYPE html>
 <html lang="en">
@@ -76,7 +91,7 @@ export function buildSessionScheduledEmail(params: SessionScheduledEmailParams) 
               <table role="presentation" cellspacing="0" cellpadding="0" border="0">
                 <tr>
                   <td style="padding-bottom: 16px;">
-                    <img src="${appUrl()}/logo.png" alt="Schelling Point" width="56" height="56" style="display: block; border: 0;">
+                    <img src="${escapeHtml(appUrl())}/logo.png" alt="${PRODUCT_NAME}" width="56" height="56" style="display: block; border: 0;">
                   </td>
                 </tr>
                 <tr>
@@ -235,7 +250,7 @@ export function buildSessionScheduledEmail(params: SessionScheduledEmailParams) 
           <tr>
             <td align="center" style="padding: 24px 20px;">
               <p style="margin: 0; font-size: 11px; color: #484f58;">
-                Powered by <a href="${appUrl()}" style="color: #6e7681; text-decoration: none;">Schelling Point</a>
+                Powered by <a href="${escapeHtml(appUrl())}" style="color: #6e7681; text-decoration: none;">${PRODUCT_NAME}</a>
               </p>
             </td>
           </tr>
@@ -248,5 +263,5 @@ export function buildSessionScheduledEmail(params: SessionScheduledEmailParams) 
 </body>
 </html>`
 
-  return { subject, html }
+  return { subject, html, text }
 }

@@ -18,16 +18,16 @@ type SessionStatus = 'pending' | 'approved' | 'rejected' | 'scheduled'
 interface Track {
   id: string
   name: string
-  color: string
+  color: string | null
 }
 
-interface FilterState {
+export interface FilterState {
   search: string
   statuses: SessionStatus[]
   tracks: string[]
   formats: string[]
-  minVotes: number | null
-  maxVotes: number | null
+  /** Sessions the network flagged: proposer edited after scheduling, or withdrew. */
+  flaggedOnly: boolean
   hasTimePreference: boolean | null
   hasCohosts: boolean | null
 }
@@ -46,8 +46,7 @@ export const defaultFilters: FilterState = {
   statuses: [],
   tracks: [],
   formats: [],
-  minVotes: null,
-  maxVotes: null,
+  flaggedOnly: false,
   hasTimePreference: null,
   hasCohosts: null,
 }
@@ -65,7 +64,7 @@ export function SessionFilters({
     filters.statuses.length > 0,
     filters.tracks.length > 0,
     filters.formats.length > 0,
-    filters.minVotes !== null || filters.maxVotes !== null,
+    filters.flaggedOnly,
     filters.hasTimePreference !== null,
     filters.hasCohosts !== null,
   ].filter(Boolean).length
@@ -201,7 +200,7 @@ export function SessionFilters({
                   >
                     <span
                       className="w-2.5 h-2.5 rounded-full"
-                      style={{ backgroundColor: track.color }}
+                      style={{ backgroundColor: track.color ?? undefined }}
                     />
                     {track.name}
                   </button>
@@ -233,40 +232,6 @@ export function SessionFilters({
             </div>
           )}
 
-          {/* Vote Range */}
-          <div className="space-y-2">
-            <label className="text-sm font-medium">Vote Count</label>
-            <div className="flex items-center gap-2">
-              <Input
-                type="number"
-                placeholder="Min"
-                value={filters.minVotes ?? ''}
-                onChange={(e) =>
-                  onFiltersChange({
-                    ...filters,
-                    minVotes: e.target.value ? parseInt(e.target.value) : null,
-                  })
-                }
-                className="w-24"
-                min={0}
-              />
-              <span className="text-muted-foreground">to</span>
-              <Input
-                type="number"
-                placeholder="Max"
-                value={filters.maxVotes ?? ''}
-                onChange={(e) =>
-                  onFiltersChange({
-                    ...filters,
-                    maxVotes: e.target.value ? parseInt(e.target.value) : null,
-                  })
-                }
-                className="w-24"
-                min={0}
-              />
-            </div>
-          </div>
-
           {/* Boolean Filters */}
           <div className="flex flex-wrap gap-4">
             <label className="flex items-center gap-2 text-sm cursor-pointer">
@@ -282,6 +247,15 @@ export function SessionFilters({
                 className="rounded border-input"
               />
               Has time preference
+            </label>
+            <label className="flex items-center gap-2 text-sm cursor-pointer">
+              <input
+                type="checkbox"
+                checked={filters.flaggedOnly}
+                onChange={(e) => onFiltersChange({ ...filters, flaggedOnly: e.target.checked })}
+                className="rounded border-input"
+              />
+              Needs review after network change
             </label>
             <label className="flex items-center gap-2 text-sm cursor-pointer">
               <input

@@ -1,12 +1,26 @@
 /**
- * Email templates for all notification types
- * Uses the base template for consistent styling
+ * Email templates for notifications.
+ *
+ * `renderNotificationEmail` renders any outbox row (src/lib/notifications/dispatch.ts): the
+ * title and body the emitting code wrote for the in-app feed become the email, with a
+ * per-type subject and call to action. The specific builders below are used directly by
+ * organizer tools (session emails, invitations).
+ *
+ * Every builder returns `{ subject, html, text }`; pass all three to `sendMail`.
+ * Values a person typed are escaped (see ./escape).
  */
 
-import { buildBaseEmail, appUrl as getAppUrl, type BaseEmailParams } from './base-template'
+import { appUrl, buildBaseEmail, buildPlainText, PRODUCT_NAME, type BaseEmailParams } from './base-template'
+import { escapeHtml, textToHtml } from './escape'
+
+export interface EmailContent {
+  subject: string
+  html: string
+  text: string
+}
 
 // Common event info interface
-interface EventInfo {
+export interface EventInfo {
   name: string
   slug: string
   logoUrl?: string
@@ -14,8 +28,19 @@ interface EventInfo {
   location?: string
 }
 
-// Build app URL for links (shared helper: NEXT_PUBLIC_APP_URL, else production domain)
-const appUrl = getAppUrl()
+function eventParams(event: EventInfo): Pick<BaseEmailParams, 'eventName' | 'eventLogoUrl' | 'eventDateRange' | 'eventLocation'> {
+  return {
+    eventName: event.name,
+    eventLogoUrl: event.logoUrl,
+    eventDateRange: event.dateRange,
+    eventLocation: event.location,
+  }
+}
+
+function subjectFor(text: string, event: EventInfo): string {
+  // Subjects are plain text; strip line breaks so a title cannot inject headers.
+  return `${text} — ${event.name}`.replace(/[\r\n]+/g, ' ')
+}
 
 // =============================================================================
 // SESSION STATUS EMAILS
@@ -28,140 +53,75 @@ interface SessionStatusEmailParams {
   sessionId: string
 }
 
-export function buildSessionApprovedEmail(params: SessionStatusEmailParams) {
+export function buildSessionApprovedEmail(params: SessionStatusEmailParams): EmailContent {
   const { event, hostName, sessionTitle, sessionId } = params
+  const ctaUrl = `${appUrl()}/e/${encodeURIComponent(event.slug)}/sessions/${encodeURIComponent(sessionId)}`
 
-  const baseParams: BaseEmailParams = {
-    eventName: event.name,
-    eventLogoUrl: event.logoUrl,
-    eventDateRange: event.dateRange,
-    eventLocation: event.location,
+  const html = buildBaseEmail({
+    ...eventParams(event),
     previewText: `Your session "${sessionTitle}" has been approved!`,
     heading: 'Session Approved!',
     bodyHtml: `
-      <p style="margin: 0 0 16px 0;">Hey ${hostName},</p>
+      <p style="margin: 0 0 16px 0;">Hey ${escapeHtml(hostName)},</p>
       <p style="margin: 0 0 16px 0;">Great news! Your session has been approved and is now visible to attendees:</p>
-      <p style="margin: 0 0 16px 0; font-weight: 600; font-size: 17px; color: #ffffff;">"${sessionTitle}"</p>
-      <p style="margin: 0;">Your session is now eligible for voting. Share it with others to gather support!</p>
+      <p style="margin: 0 0 16px 0; font-weight: 600; font-size: 17px; color: #ffffff;">"${escapeHtml(sessionTitle)}"</p>
+      <p style="margin: 0;">Share it with others to gather support.</p>
     `,
-    ctaUrl: `${appUrl}/e/${event.slug}/sessions/${sessionId}`,
+    ctaUrl,
     ctaText: 'View Your Session',
     footerNote: 'You can edit your session details or invite co-hosts from the session page.',
-  }
+  })
 
   return {
-    subject: `Your session "${sessionTitle}" has been approved! — ${event.name}`,
-    html: buildBaseEmail(baseParams),
+    subject: subjectFor(`Your session "${sessionTitle}" has been approved`, event),
+    html,
+    text: buildPlainText({
+      heading: 'Session approved',
+      paragraphs: [
+        `Hey ${hostName},`,
+        `Your session "${sessionTitle}" has been approved and is now visible to attendees.`,
+      ],
+      ctaUrl,
+      ctaText: 'View your session',
+      eventName: event.name,
+    }),
   }
 }
 
-export function buildSessionRejectedEmail(params: SessionStatusEmailParams & { reason?: string }) {
+export function buildSessionRejectedEmail(params: SessionStatusEmailParams & { reason?: string }): EmailContent {
   const { event, hostName, sessionTitle, reason } = params
 
   const reasonHtml = reason
-    ? `<p style="margin: 16px 0; padding: 12px 16px; background-color: #161b22; border-radius: 8px; border-left: 3px solid #8b949e; font-size: 14px; color: #8b949e;">${reason}</p>`
+    ? `<p style="margin: 16px 0; padding: 12px 16px; background-color: #161b22; border-radius: 8px; border-left: 3px solid #8b949e; font-size: 14px; color: #8b949e;">${escapeHtml(reason)}</p>`
     : ''
 
-  const baseParams: BaseEmailParams = {
-    eventName: event.name,
-    eventLogoUrl: event.logoUrl,
-    eventDateRange: event.dateRange,
-    eventLocation: event.location,
+  const html = buildBaseEmail({
+    ...eventParams(event),
     previewText: `Update on your session "${sessionTitle}"`,
     heading: 'Session Update',
     bodyHtml: `
-      <p style="margin: 0 0 16px 0;">Hey ${hostName},</p>
-      <p style="margin: 0 0 16px 0;">Thank you for submitting a session proposal for ${event.name}.</p>
+      <p style="margin: 0 0 16px 0;">Hey ${escapeHtml(hostName)},</p>
+      <p style="margin: 0 0 16px 0;">Thank you for submitting a session proposal for ${escapeHtml(event.name)}.</p>
       <p style="margin: 0 0 8px 0;">Unfortunately, we weren't able to include your session in the program:</p>
-      <p style="margin: 0 0 16px 0; font-weight: 500; color: #ffffff;">"${sessionTitle}"</p>
+      <p style="margin: 0 0 16px 0; font-weight: 500; color: #ffffff;">"${escapeHtml(sessionTitle)}"</p>
       ${reasonHtml}
       <p style="margin: 0;">We received many great submissions and had to make difficult choices. We hope to see you at the event!</p>
     `,
     footerNote: 'Feel free to reach out to the organizers if you have questions.',
-  }
+  })
 
   return {
-    subject: `Update on your session submission — ${event.name}`,
-    html: buildBaseEmail(baseParams),
-  }
-}
-
-// =============================================================================
-// VOTE MILESTONE EMAIL
-// =============================================================================
-
-interface VoteMilestoneEmailParams {
-  event: EventInfo
-  hostName: string
-  sessionTitle: string
-  sessionId: string
-  milestone: number
-  totalVotes: number
-}
-
-export function buildVoteMilestoneEmail(params: VoteMilestoneEmailParams) {
-  const { event, hostName, sessionTitle, sessionId, milestone, totalVotes } = params
-
-  const baseParams: BaseEmailParams = {
-    eventName: event.name,
-    eventLogoUrl: event.logoUrl,
-    eventDateRange: event.dateRange,
-    eventLocation: event.location,
-    previewText: `Your session reached ${milestone} votes!`,
-    heading: `${milestone} Votes!`,
-    bodyHtml: `
-      <p style="margin: 0 0 16px 0;">Hey ${hostName},</p>
-      <p style="margin: 0 0 16px 0;">Your session is gaining traction!</p>
-      <p style="margin: 0 0 8px 0; font-weight: 600; font-size: 17px; color: #ffffff;">"${sessionTitle}"</p>
-      <p style="margin: 0 0 16px 0;">Has now received <strong style="color: #B2FF00;">${totalVotes} votes</strong> from attendees.</p>
-      <p style="margin: 0;">Keep sharing to boost your chances of being scheduled!</p>
-    `,
-    ctaUrl: `${appUrl}/e/${event.slug}/sessions/${sessionId}`,
-    ctaText: 'View Your Session',
-  }
-
-  return {
-    subject: `Your session reached ${milestone} votes! — ${event.name}`,
-    html: buildBaseEmail(baseParams),
-  }
-}
-
-// =============================================================================
-// CO-HOST EMAILS
-// =============================================================================
-
-interface CohostInviteEmailParams {
-  event: EventInfo
-  inviteeName: string
-  hostName: string
-  sessionTitle: string
-  inviteToken: string
-}
-
-export function buildCohostInviteEmail(params: CohostInviteEmailParams) {
-  const { event, inviteeName, hostName, sessionTitle, inviteToken } = params
-
-  const baseParams: BaseEmailParams = {
-    eventName: event.name,
-    eventLogoUrl: event.logoUrl,
-    eventDateRange: event.dateRange,
-    eventLocation: event.location,
-    previewText: `${hostName} invited you to co-host "${sessionTitle}"`,
-    heading: 'Co-host Invitation',
-    bodyHtml: `
-      <p style="margin: 0 0 16px 0;">Hey ${inviteeName},</p>
-      <p style="margin: 0 0 16px 0;"><strong style="color: #ffffff;">${hostName}</strong> has invited you to co-host a session at ${event.name}:</p>
-      <p style="margin: 0 0 16px 0; font-weight: 600; font-size: 17px; color: #ffffff;">"${sessionTitle}"</p>
-      <p style="margin: 0;">Click below to view the session and accept the invitation.</p>
-    `,
-    ctaUrl: `${appUrl}/invite/${inviteToken}`,
-    ctaText: 'View Invitation',
-    footerNote: 'This invitation will expire in 7 days.',
-  }
-
-  return {
-    subject: `${hostName} invited you to co-host a session — ${event.name}`,
-    html: buildBaseEmail(baseParams),
+    subject: subjectFor('Update on your session submission', event),
+    html,
+    text: buildPlainText({
+      heading: 'Session update',
+      paragraphs: [
+        `Hey ${hostName},`,
+        `Thank you for submitting "${sessionTitle}" to ${event.name}. Unfortunately, we weren't able to include it in the program.`,
+        reason ? `Reason: ${reason}` : null,
+      ],
+      eventName: event.name,
+    }),
   }
 }
 
@@ -178,189 +138,131 @@ interface EventInvitationEmailParams {
   expiresAt: string
 }
 
-export function buildEventInvitationEmail(params: EventInvitationEmailParams) {
+export function buildEventInvitationEmail(params: EventInvitationEmailParams): EmailContent {
   const { event, inviteeEmail, inviterName, role, inviteToken, expiresAt } = params
 
-  const expiresDate = new Date(expiresAt)
-  const expiresText = expiresDate.toLocaleDateString('en-US', {
+  const expiresText = new Date(expiresAt).toLocaleDateString('en-US', {
     month: 'long',
     day: 'numeric',
     year: 'numeric',
+    timeZone: 'UTC',
   })
-
   const roleDisplay = role.charAt(0).toUpperCase() + role.slice(1)
+  const ctaUrl = `${appUrl()}/invite/e/${encodeURIComponent(inviteToken)}`
 
-  const baseParams: BaseEmailParams = {
-    eventName: event.name,
-    eventLogoUrl: event.logoUrl,
-    eventDateRange: event.dateRange,
-    eventLocation: event.location,
+  const html = buildBaseEmail({
+    ...eventParams(event),
     previewText: `${inviterName} invited you to join ${event.name}`,
     heading: `You're invited!`,
     bodyHtml: `
       <p style="margin: 0 0 16px 0;">Hey there,</p>
-      <p style="margin: 0 0 16px 0;"><strong style="color: #ffffff;">${inviterName}</strong> has invited you to join <strong style="color: #ffffff;">${event.name}</strong> as a <strong style="color: #ffffff;">${roleDisplay}</strong>.</p>
+      <p style="margin: 0 0 16px 0;"><strong style="color: #ffffff;">${escapeHtml(inviterName)}</strong> has invited you to join <strong style="color: #ffffff;">${escapeHtml(event.name)}</strong> as a <strong style="color: #ffffff;">${escapeHtml(roleDisplay)}</strong>.</p>
       <p style="margin: 0 0 16px 0;">Click the button below to accept your invitation and join the event.</p>
     `,
-    ctaUrl: `${appUrl}/invite/e/${inviteToken}`,
+    ctaUrl,
     ctaText: 'Accept Invitation',
     footerNote: `This invitation was sent to ${inviteeEmail} and expires on ${expiresText}.`,
-  }
+  })
 
   return {
-    subject: `You're invited to join ${event.name}`,
-    html: buildBaseEmail(baseParams),
-  }
-}
-
-interface CohostResponseEmailParams {
-  event: EventInfo
-  hostName: string
-  cohostName: string
-  sessionTitle: string
-  sessionId: string
-  accepted: boolean
-}
-
-export function buildCohostResponseEmail(params: CohostResponseEmailParams) {
-  const { event, hostName, cohostName, sessionTitle, sessionId, accepted } = params
-
-  const heading = accepted ? 'Co-host Accepted!' : 'Co-host Declined'
-  const message = accepted
-    ? `<strong style="color: #ffffff;">${cohostName}</strong> accepted your invitation to co-host this session.`
-    : `<strong style="color: #ffffff;">${cohostName}</strong> declined your invitation to co-host.`
-
-  const baseParams: BaseEmailParams = {
-    eventName: event.name,
-    eventLogoUrl: event.logoUrl,
-    eventDateRange: event.dateRange,
-    eventLocation: event.location,
-    previewText: `${cohostName} ${accepted ? 'accepted' : 'declined'} your co-host invitation`,
-    heading,
-    bodyHtml: `
-      <p style="margin: 0 0 16px 0;">Hey ${hostName},</p>
-      <p style="margin: 0 0 16px 0;">${message}</p>
-      <p style="margin: 0 0 16px 0; font-weight: 500; color: #ffffff;">"${sessionTitle}"</p>
-    `,
-    ctaUrl: `${appUrl}/e/${event.slug}/sessions/${sessionId}`,
-    ctaText: 'View Session',
-  }
-
-  return {
-    subject: `${cohostName} ${accepted ? 'accepted' : 'declined'} your co-host invitation — ${event.name}`,
-    html: buildBaseEmail(baseParams),
+    subject: `You're invited to join ${event.name}`.replace(/[\r\n]+/g, ' '),
+    html,
+    text: buildPlainText({
+      heading: `You're invited to ${event.name}`,
+      paragraphs: [`${inviterName} has invited you to join ${event.name} as a ${roleDisplay}.`],
+      ctaUrl,
+      ctaText: 'Accept the invitation',
+      footerNote: `This invitation was sent to ${inviteeEmail} and expires on ${expiresText}.`,
+      eventName: event.name,
+    }),
   }
 }
 
 // =============================================================================
-// ADMIN EMAILS
+// OUTBOX NOTIFICATIONS
 // =============================================================================
 
-interface NewProposalEmailParams {
-  event: EventInfo
-  adminName: string
-  sessionTitle: string
-  hostName: string
-  pendingCount: number
+/** Call-to-action label per notification type (the link is the row's action_url). */
+const CTA_TEXT: Record<string, string> = {
+  session_submitted: 'View your session',
+  session_approved: 'View your session',
+  session_rejected: 'View your session',
+  session_scheduled: 'View your session',
+  session_rescheduled: 'See the new time',
+  session_cancelled: 'View the schedule',
+  cohost_invited: 'View invitation',
+  cohost_accepted: 'View session',
+  cohost_declined: 'View session',
+  voting_opened: 'Start voting',
+  voting_closed: 'See the sessions',
+  schedule_published: 'View schedule',
+  event_reminder: 'View event',
+  admin_announcement: 'Read more',
+  new_proposal: 'Review proposals',
+  proposal_needs_review: 'Review proposals',
+  proposal_changed: 'Review and re-publish',
+  approval_requested: 'Review request',
+  event_invitation: 'View invitation',
+  ticket_confirmed: 'View your ticket',
 }
 
-export function buildNewProposalEmail(params: NewProposalEmailParams) {
-  const { event, adminName, sessionTitle, hostName, pendingCount } = params
-
-  const baseParams: BaseEmailParams = {
-    eventName: event.name,
-    eventLogoUrl: event.logoUrl,
-    eventDateRange: event.dateRange,
-    eventLocation: event.location,
-    previewText: `New session proposal: "${sessionTitle}" by ${hostName}`,
-    heading: 'New Session Proposal',
-    bodyHtml: `
-      <p style="margin: 0 0 16px 0;">Hey ${adminName},</p>
-      <p style="margin: 0 0 16px 0;">A new session has been proposed for ${event.name}:</p>
-      <p style="margin: 0 0 8px 0; font-weight: 600; font-size: 17px; color: #ffffff;">"${sessionTitle}"</p>
-      <p style="margin: 0 0 16px 0; color: #8b949e;">by ${hostName}</p>
-      ${pendingCount > 1 ? `<p style="margin: 0;">You have <strong>${pendingCount} proposals</strong> waiting for review.</p>` : ''}
-    `,
-    ctaUrl: `${appUrl}/e/${event.slug}/admin/proposals`,
-    ctaText: 'Review Proposals',
-  }
-
-  return {
-    subject: `New proposal: "${sessionTitle}" — ${event.name}`,
-    html: buildBaseEmail(baseParams),
-  }
-}
-
-// =============================================================================
-// EVENT ANNOUNCEMENT EMAILS
-// =============================================================================
-
-interface AnnouncementEmailParams {
-  event: EventInfo
-  recipientName: string
+export interface NotificationEmailInput {
+  type: string
   title: string
-  message: string
-  ctaUrl?: string
-  ctaText?: string
+  body: string | null
+  /** App-relative (`/e/slug/...`) or absolute on the app origin; anything else is dropped. */
+  actionUrl: string | null
+  recipientName: string | null
+  event: EventInfo | null
 }
 
-export function buildAnnouncementEmail(params: AnnouncementEmailParams) {
-  const { event, recipientName, title, message, ctaUrl, ctaText } = params
-
-  const baseParams: BaseEmailParams = {
-    eventName: event.name,
-    eventLogoUrl: event.logoUrl,
-    eventDateRange: event.dateRange,
-    eventLocation: event.location,
-    previewText: title,
-    heading: title,
-    bodyHtml: `
-      <p style="margin: 0 0 16px 0;">Hey ${recipientName},</p>
-      <div style="margin: 0;">${message}</div>
-    `,
-    ctaUrl,
-    ctaText,
+/**
+ * Absolute link for an action URL, only if it points into this app. Notifications are
+ * written by our own code, but a link in an email is exactly what phishing borrows, so
+ * foreign origins are refused rather than trusted.
+ */
+export function notificationLink(actionUrl: string | null): string | null {
+  if (!actionUrl) return null
+  const origin = appUrl()
+  if (actionUrl.startsWith('/') && !actionUrl.startsWith('//')) return `${origin}${actionUrl}`
+  try {
+    const url = new URL(actionUrl)
+    return url.origin === new URL(origin).origin ? url.toString() : null
+  } catch {
+    return null
   }
+}
+
+export function renderNotificationEmail(input: NotificationEmailInput): EmailContent {
+  const event: EventInfo = input.event ?? { name: PRODUCT_NAME, slug: '' }
+  const greeting = input.recipientName ? `Hey ${input.recipientName},` : 'Hey there,'
+  const ctaUrl = notificationLink(input.actionUrl)
+  const ctaText = CTA_TEXT[input.type] ?? 'Open'
+  const body = input.body?.trim() || null
+
+  const html = buildBaseEmail({
+    ...eventParams(event),
+    previewText: body ? body.slice(0, 140) : input.title,
+    heading: input.title,
+    bodyHtml: `
+      <p style="margin: 0 0 16px 0;">${escapeHtml(greeting)}</p>
+      ${body ? textToHtml(body) : ''}
+    `,
+    ctaUrl: ctaUrl ?? undefined,
+    ctaText: ctaUrl ? ctaText : undefined,
+    footerNote: 'You can change which emails you get in the notification settings for this event.',
+  })
 
   return {
-    subject: `${title} — ${event.name}`,
-    html: buildBaseEmail(baseParams),
+    subject: subjectFor(input.title, event),
+    html,
+    text: buildPlainText({
+      heading: input.title,
+      paragraphs: [greeting, body],
+      ctaUrl,
+      ctaText,
+      footerNote: 'You can change which emails you get in the notification settings for this event.',
+      eventName: event.name,
+    }),
   }
-}
-
-export function buildVotingOpenEmail(params: { event: EventInfo; recipientName: string; votingEndsAt?: string }) {
-  const { event, recipientName, votingEndsAt } = params
-
-  const endsText = votingEndsAt
-    ? `Voting is open until ${votingEndsAt}.`
-    : 'Get your votes in before voting closes!'
-
-  return buildAnnouncementEmail({
-    event,
-    recipientName,
-    title: 'Voting is Now Open!',
-    message: `
-      <p style="margin: 0 0 16px 0;">It's time to vote for the sessions you want to see at ${event.name}!</p>
-      <p style="margin: 0 0 16px 0;">Browse the session proposals and use your vote credits to support the topics that interest you most.</p>
-      <p style="margin: 0;">${endsText}</p>
-    `,
-    ctaUrl: `${appUrl}/e/${event.slug}/sessions`,
-    ctaText: 'Start Voting',
-  })
-}
-
-export function buildSchedulePublishedEmail(params: { event: EventInfo; recipientName: string }) {
-  const { event, recipientName } = params
-
-  return buildAnnouncementEmail({
-    event,
-    recipientName,
-    title: 'The Schedule is Live!',
-    message: `
-      <p style="margin: 0 0 16px 0;">The official schedule for ${event.name} has been published!</p>
-      <p style="margin: 0;">Check out all the sessions, plan your day, and add your favorites to your personal schedule.</p>
-    `,
-    ctaUrl: `${appUrl}/e/${event.slug}/schedule`,
-    ctaText: 'View Schedule',
-  })
 }

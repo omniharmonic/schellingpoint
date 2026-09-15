@@ -1,36 +1,56 @@
-import { NextResponse, after } from 'next/server'
-import { getUserFromRequest } from '@/lib/api/getUser'
-import { createAdminClient } from '@/lib/supabase/server'
+import { NextResponse } from 'next/server'
+import type postgres from 'postgres'
+import { sql, dbErrorResponse } from '@/lib/db'
+import { assertSameOrigin, requireViewer } from '@/lib/auth/viewer'
 import { canRolePerform } from '@/lib/permissions'
 import { canDelete, isValidTransition } from '@/lib/events/lifecycle'
 import { formatInEventTimezone, parseTimeInTimezone } from '@/lib/events/timezone'
-import { publishPolicy } from '@/lib/atproto/publish'
-import { publishTally } from '@/lib/atproto/tally'
-import type { EventRow, EventStatus, EventTheme } from '@/types/event'
+import { readPolicyThresholds, validatePolicyThresholds } from '@/lib/events/policy'
+import { deleteGatheringIdentity, GatheringIdentityError } from '@/lib/events/identity'
+import { evictGatheringActor, mintGatheringActor } from '@/lib/atproto/actors'
+import { forgetGatheringHost } from '@/lib/events/hosts'
+import { publishGatheringRecords, publishPolicyRecord, type NetworkWrite } from '@/lib/events/network'
+import { isHiddenEvent, type EventRecord } from '@/lib/events'
+import { notify } from '@/lib/notifications'
+import { openRound } from '@/lib/voting/rounds'
+import { isVotingError } from '@/lib/voting/errors'
+import type { EventRoleName, EventStatus, EventTheme } from '@/types/event'
 
 /**
  * PATCH /api/events/[eventId]/settings
  *
- * Partial update of every organizer-editable event column. Only the keys
- * present in the body are validated and written, so each settings section can
- * save independently. Validation failures return `{ error, field }` with 400.
+ * Partial update of every organizer-editable event column (owner/admin). Only the keys
+ * present in the body are validated and written, so each settings section saves on its
+ * own. Validation failures return `{ error, field }` with 400.
+ *
+ * Lifecycle (spec §8, plan §7.2), in this order:
+ *   - leaving `draft` needs the gathering's identity; a missing one is minted first
+ *   - one transaction: the row update (optimistic on the status we read), the voting
+ *     round opened on entering `voting_open` (package C), and `voting_opened` /
+ *     `voting_closed` notifications to members (package E's `notify`)
+ *   - after commit, best-effort network writes (package F): `publishGathering` when the
+ *     gathering leaves draft or a published gathering's public fields or phase change,
+ *     `publishPolicy` when only its rules change. Outcomes are on the response as `network`.
+ *   Closing and tallying a round is the close job's work (package C), not this route's.
  *
  * DELETE /api/events/[eventId]/settings
  *
- * Owner-only hard delete, allowed only while the event is still a draft.
- * Every child table references events(id) ON DELETE CASCADE.
+ * Owner-only hard delete of a draft that never published anything. Every child table
+ * cascades from events(id); the gathering's PDS account and credential go with it.
  */
 
 const KNOWN_FORMATS = ['talk', 'workshop', 'panel', 'discussion', 'demo', 'fireside', 'ceremony'] as const
 const STATUSES: EventStatus[] = ['draft', 'published', 'proposals_open', 'voting_open', 'scheduling', 'live', 'completed', 'archived']
 const LOCAL_DATETIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/
 const HEX_COLOR = /^#(?:[\da-f]{3}|[\da-f]{6})$/i
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const NO_STORE = { 'Cache-Control': 'private, no-store' }
 
 type Body = Record<string, unknown>
-type EventUpdate = Partial<Omit<EventRow, 'id' | 'created_at' | 'location_geo'>>
+type EventUpdate = Record<string, unknown>
 
 class ValidationError extends Error {
-  constructor(message: string, public field: string) { super(message) }
+  constructor(message: string, public field: string, public status = 400, public code?: string) { super(message) }
 }
 const fail = (message: string, field: string): never => { throw new ValidationError(message, field) }
 
@@ -41,6 +61,7 @@ const isValidTimezone = (value: unknown): value is string => {
   if (typeof value !== 'string' || !value) return false
   try { new Intl.DateTimeFormat('en', { timeZone: value }); return true } catch { return false }
 }
+const json = (body: unknown, status = 200) => NextResponse.json(body, { status, headers: NO_STORE })
 
 function optionalText(body: Body, key: string, max: number, required = false): string | null | undefined {
   if (!(key in body)) return undefined
@@ -53,22 +74,21 @@ function optionalText(body: Body, key: string, max: number, required = false): s
   return trimmed || null
 }
 
-function optionalUrl(body: Body, key: string): string | null | undefined {
+/** An image is either one of our uploads (`/uploads/…`) or an absolute http(s) URL. */
+function optionalImageUrl(body: Body, key: string): string | null | undefined {
   if (!(key in body)) return undefined
   const value = body[key]
   if (value === null || value === '') return null
-  if (typeof value !== 'string' || value.length > 2048) fail('Enter a valid image URL.', key)
+  if (typeof value !== 'string' || value.length > 2048) return fail('Enter a valid image URL.', key)
+  if (/^\/uploads\/[a-z0-9/_.-]+$/i.test(value) && !value.includes('..')) return value
   try {
-    const url = new URL(value as string)
+    const url = new URL(value)
     if (!['http:', 'https:'].includes(url.protocol)) throw new Error()
   } catch { fail('Image URLs must start with http:// or https://.', key) }
-  return value as string
+  return value
 }
 
-/**
- * Deadlines arrive either as ISO instants or as datetime-local strings, which
- * represent the event's clock (same convention as event creation).
- */
+/** Deadlines arrive as ISO instants or datetime-local strings on the event's clock. */
 function optionalInstant(body: Body, key: string, timezone: string, label: string): string | null | undefined {
   if (!(key in body)) return undefined
   const value = body[key]
@@ -115,23 +135,33 @@ function mergeTheme(existing: EventTheme | null, incoming: unknown): EventTheme 
   return next
 }
 
+const ALLOWED_KEYS = new Set([
+  'name', 'tagline', 'description', 'location_name', 'location_address', 'visibility', 'status',
+  'start_date', 'end_date', 'timezone', 'vote_credits_per_user', 'voting_mechanism',
+  'voting_opens_at', 'voting_closes_at', 'proposals_open_at', 'proposals_close_at',
+  'allowed_formats', 'allowed_durations', 'max_proposals_per_user', 'require_proposal_approval',
+  'suggested_topics', 'theme', 'logo_url', 'banner_url', 'policy_thresholds',
+])
+
 /** Build the column update from the untrusted body, validating against the current row. */
-function buildUpdate(body: Body, current: EventRow): EventUpdate {
+function buildUpdate(body: Body, current: EventRecord): EventUpdate {
+  for (const key of Object.keys(body)) {
+    if (!ALLOWED_KEYS.has(key)) fail(`${key.replace(/_/g, ' ')} cannot be changed here.`, key)
+  }
   const update: EventUpdate = {}
-  const name = optionalText(body, 'name', 160, true); if (name !== undefined) update.name = name as string
+  const name = optionalText(body, 'name', 160, true); if (name !== undefined) update.name = name
   for (const [key, max] of [['tagline', 240], ['description', 10000], ['location_name', 200], ['location_address', 500]] as const) {
     const value = optionalText(body, key, max); if (value !== undefined) update[key] = value
   }
   if ('visibility' in body) {
     if (!['public', 'unlisted', 'private'].includes(body.visibility as string)) fail('Choose a valid visibility.', 'visibility')
-    update.visibility = body.visibility as EventRow['visibility']
+    update.visibility = body.visibility
   }
   if ('status' in body) {
     if (!STATUSES.includes(body.status as EventStatus)) fail('Choose a valid event phase.', 'status')
-    update.status = body.status as EventStatus
+    update.status = body.status
   }
 
-  // Dates & timezone (validated against the merged values)
   if ('start_date' in body && !isDateString(body.start_date)) fail('Choose a valid start date.', 'start_date')
   if ('end_date' in body && !isDateString(body.end_date)) fail('Choose a valid end date.', 'end_date')
   const startDate = ('start_date' in body ? body.start_date : current.start_date) as string
@@ -143,15 +173,14 @@ function buildUpdate(body: Body, current: EventRow): EventUpdate {
   const timezone = ('timezone' in body ? body.timezone : current.timezone) as string
   if ('timezone' in body) update.timezone = timezone
 
-  // Voting config
   if ('vote_credits_per_user' in body) {
     const credits = body.vote_credits_per_user
     if (!Number.isInteger(credits) || (credits as number) <= 0 || (credits as number) > 2147483647) fail('Vote credits must be a positive whole number.', 'vote_credits_per_user')
-    update.vote_credits_per_user = credits as number
+    update.vote_credits_per_user = credits
   }
   if ('voting_mechanism' in body) {
     if (!['quadratic', 'linear', 'approval'].includes(body.voting_mechanism as string)) fail('Choose a voting method.', 'voting_mechanism')
-    update.voting_mechanism = body.voting_mechanism as EventRow['voting_mechanism']
+    update.voting_mechanism = body.voting_mechanism
   }
   const windows = [
     ['voting_opens_at', 'voting_closes_at', 'voting'],
@@ -167,7 +196,6 @@ function buildUpdate(body: Body, current: EventRow): EventUpdate {
     if (closes !== undefined) update[closeKey] = closes
   }
 
-  // Proposal config
   if ('allowed_formats' in body) {
     const formats = body.allowed_formats
     if (!Array.isArray(formats) || !formats.length || formats.some(f => typeof f !== 'string' || !(KNOWN_FORMATS as readonly string[]).includes(f))) fail('Choose at least one supported session format.', 'allowed_formats')
@@ -181,11 +209,11 @@ function buildUpdate(body: Body, current: EventRow): EventUpdate {
   if ('max_proposals_per_user' in body) {
     const max = body.max_proposals_per_user
     if (!Number.isInteger(max) || (max as number) < 0 || (max as number) > 1000) fail('Proposal limit must be a whole number; use 0 for unlimited.', 'max_proposals_per_user')
-    update.max_proposals_per_user = max as number
+    update.max_proposals_per_user = max
   }
   if ('require_proposal_approval' in body) {
     if (typeof body.require_proposal_approval !== 'boolean') fail('Proposal approval must be on or off.', 'require_proposal_approval')
-    update.require_proposal_approval = body.require_proposal_approval as boolean
+    update.require_proposal_approval = body.require_proposal_approval
   }
   if ('suggested_topics' in body) {
     const topics = body.suggested_topics
@@ -193,148 +221,207 @@ function buildUpdate(body: Body, current: EventRow): EventUpdate {
     const cleaned = Array.from(new Set(((topics || []) as string[]).map(t => t.trim()).filter(Boolean))).slice(0, 50)
     update.suggested_topics = cleaned.length ? cleaned : null
   }
+  if ('policy_thresholds' in body) {
+    const result = validatePolicyThresholds(body.policy_thresholds, readPolicyThresholds(current.policy_thresholds))
+    if (!result.ok) fail(result.error, result.field === 'policy_thresholds' ? 'policy_thresholds' : `policy_thresholds.${result.field}`)
+    else update.policy_thresholds = result.value
+  }
 
-  // Branding
   if ('theme' in body) update.theme = mergeTheme(current.theme, body.theme)
-  const logo = optionalUrl(body, 'logo_url'); if (logo !== undefined) update.logo_url = logo
-  const banner = optionalUrl(body, 'banner_url'); if (banner !== undefined) update.banner_url = banner
+  const logo = optionalImageUrl(body, 'logo_url'); if (logo !== undefined) update.logo_url = logo
+  const banner = optionalImageUrl(body, 'banner_url'); if (banner !== undefined) update.banner_url = banner
 
   return update
 }
 
-/** Settings whose change rewrites the public `freeschool.draft.policy` record. */
-const POLICY_KEYS: Array<keyof EventUpdate> = [
+/** Rules that live in the public `freeschool.draft.policy` record. */
+const POLICY_KEYS = [
   'vote_credits_per_user', 'voting_mechanism', 'voting_opens_at', 'voting_closes_at',
   'proposals_open_at', 'proposals_close_at', 'allowed_formats', 'allowed_durations',
-  'max_proposals_per_user', 'require_proposal_approval',
+  'max_proposals_per_user', 'require_proposal_approval', 'policy_thresholds',
 ]
+/** Fields of the public `gathering` record and the gathering's own calendar event. */
+const GATHERING_KEYS = ['name', 'tagline', 'description', 'start_date', 'end_date', 'timezone', 'location_name', 'location_address', 'status']
 
-/**
- * Network side effects of a settings save, for gatherings with a linked actor.
- * Runs after the response (`after`): a tally can mean dozens of PDS writes and
- * a network failure must never turn a saved setting into an error.
- */
-function scheduleNetworkWrites(eventId: string, userId: string, current: EventRow, nextStatus: EventStatus, update: EventUpdate): void {
-  const votingClosed = current.status === 'voting_open' && nextStatus !== 'voting_open'
-  const policyChanged = POLICY_KEYS.some((key) => key in update)
-  if (!votingClosed && !policyChanged) return
-  after(async () => {
-    if (votingClosed) {
-      try {
-        const { results } = await publishTally({ eventId, callerUserId: userId, round: 'pre-event' })
-        const failed = results.filter((r) => r.error)
-        if (failed.length) console.error('[settings] tally publish had failures:', failed)
-      } catch (err) {
-        console.error('[settings] tally publish failed:', err)
-      }
-    }
-    if (policyChanged) {
-      try {
-        const { results } = await publishPolicy({ eventId, callerUserId: userId })
-        const failed = results.filter((r) => r.error)
-        if (failed.length) console.error('[settings] policy publish had failures:', failed)
-      } catch (err) {
-        console.error('[settings] policy publish failed:', err)
-      }
-    }
-  })
+const JSON_COLUMNS = new Set(['theme', 'policy_thresholds'])
+
+async function loadForViewer(eventId: string, accountId: string): Promise<{ event: EventRecord; role: EventRoleName | null } | null> {
+  if (!UUID.test(eventId)) return null
+  const [event] = await sql<EventRecord[]>`select * from events where id = ${eventId}`
+  if (!event) return null
+  const [member] = await sql<{ role: EventRoleName }[]>`select role from event_members where event_id = ${eventId} and user_id = ${accountId}`
+  return { event, role: member?.role ?? null }
 }
 
-async function loadMembership(eventId: string, userId: string) {
-  const db = await createAdminClient()
-  const { data: member, error } = await db.from('event_members').select('role').eq('event_id', eventId).eq('user_id', userId).maybeSingle()
-  return { db, member, error }
-}
-
-/** Fan out a lifecycle notification to every member. Never fails the request. */
-async function notifyMembers(db: Awaited<ReturnType<typeof createAdminClient>>, event: Pick<EventRow, 'id' | 'slug' | 'name' | 'timezone' | 'voting_closes_at'>): Promise<number> {
-  try {
-    const { data: members, error } = await db.from('event_members').select('user_id').eq('event_id', event.id)
-    if (error || !members?.length) return 0
-    const votingEndsAt = event.voting_closes_at ? formatInEventTimezone(new Date(event.voting_closes_at), event.timezone, 'full') : undefined
-    const rows = members.map(member => ({
-      user_id: member.user_id,
-      event_id: event.id,
-      type: 'voting_opened',
-      title: `Voting is open for ${event.name}`,
-      body: votingEndsAt ? `Spend your credits on the sessions you want to see. Voting closes ${votingEndsAt}.` : 'Spend your credits on the sessions you want to see.',
-      action_url: `/e/${event.slug}/sessions`,
-      data: { voting_ends_at: votingEndsAt ?? null },
-    }))
-    const { error: insertError } = await db.from('notifications').insert(rows)
-    if (insertError) { console.error('[settings] voting_opened notifications failed:', insertError); return 0 }
-    return rows.length
-  } catch (err) {
-    console.error('[settings] voting_opened notifications failed:', err)
-    return 0
-  }
+async function members(t: postgres.TransactionSql, eventId: string): Promise<string[]> {
+  const rows = await t<{ user_id: string }[]>`select user_id from event_members where event_id = ${eventId}`
+  return rows.map((r) => r.user_id)
 }
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ eventId: string }> }) {
+  const bad = assertSameOrigin(request)
+  if (bad) return bad
+  const viewer = await requireViewer(request)
+  if (viewer instanceof Response) return viewer
   const { eventId } = await params
-  const user = await getUserFromRequest(request)
-  if (!user) return NextResponse.json({ error: 'Sign in to manage this event.' }, { status: 401 })
-  const { db, member, error: memberError } = await loadMembership(eventId, user.id)
-  if (memberError) return NextResponse.json({ error: 'Could not verify your event access. Try again.' }, { status: 500 })
-  if (!member || !canRolePerform(member.role, 'editEventSettings')) return NextResponse.json({ error: 'Only this event’s organizers can change its settings.' }, { status: 403 })
+
+  const loaded = await loadForViewer(eventId, viewer.accountId)
+  if (!loaded || (isHiddenEvent(loaded.event) && !loaded.role)) return json({ error: 'Event not found' }, 404)
+  if (!loaded.role || !canRolePerform(loaded.role, 'editEventSettings')) {
+    return json({ error: 'Only this event’s organizers can change its settings.' }, 403)
+  }
+  let current = loaded.event
 
   const body = await request.json().catch(() => null)
-  if (!isRecord(body) || !Object.keys(body).length) return NextResponse.json({ error: 'Send at least one setting to update.', field: null }, { status: 400 })
-
-  const { data: event, error } = await db.from('events').select('*').eq('id', eventId).single()
-  if (error || !event) return NextResponse.json({ error: 'Could not load this event.' }, { status: 404 })
-  const current = event as EventRow
+  if (!isRecord(body) || !Object.keys(body).length) return json({ error: 'Send at least one setting to update.', field: null }, 400)
 
   let update: EventUpdate
   try { update = buildUpdate(body, current) }
   catch (err) {
-    if (err instanceof ValidationError) return NextResponse.json({ error: err.message, field: err.field }, { status: 400 })
+    if (err instanceof ValidationError) return json({ error: err.message, field: err.field }, err.status)
     throw err
   }
 
-  const nextStatus = update.status ?? current.status
-  if (nextStatus !== current.status && !isValidTransition(current.status, nextStatus)) {
-    return NextResponse.json({ error: 'That phase change is no longer available. Refresh the page and try again.', field: 'status' }, { status: 409 })
+  const nextStatus = (update.status as EventStatus | undefined) ?? current.status
+  const statusChanged = nextStatus !== current.status
+  if (statusChanged && !isValidTransition(current.status, nextStatus)) {
+    return json({ error: 'That phase change is no longer available. Refresh the page and try again.', field: 'status' }, 409)
+  }
+  const leavingDraft = statusChanged && current.status === 'draft'
+
+  // A published gathering is a DID with records (spec §8): no identity, no publishing.
+  if (leavingDraft && !current.actor_did) {
+    try {
+      const minted = await mintGatheringActor(current.id, viewer.accountId)
+      current = { ...current, actor_did: minted.did, actor_handle: minted.handle }
+    } catch (e) {
+      const message = e instanceof GatheringIdentityError ? e.message : 'The network identity could not be created.'
+      return json({ error: `${message} The gathering stays a draft; try again shortly.`, field: 'status', code: 'IdentityMissing' }, 503)
+    }
   }
 
-  // Optimistic concurrency on status: the row must still be in the phase we
-  // read, otherwise another organizer moved it and this save is stale.
-  const { data: saved, error: saveError } = await db.from('events')
-    .update({ ...update, updated_at: new Date().toISOString() })
-    .eq('id', eventId).eq('status', current.status)
-    .select('*').maybeSingle()
-  if (saveError) {
-    console.error('[settings] save failed:', saveError)
-    return NextResponse.json({ error: 'Could not save event settings. Your changes are still in the form.' }, { status: 500 })
-  }
-  if (!saved) return NextResponse.json({ error: 'Another organizer changed the event phase. Refresh before saving.', field: 'status' }, { status: 409 })
+  const enteringVoting = statusChanged && nextStatus === 'voting_open'
+  const leavingVoting = statusChanged && current.status === 'voting_open'
 
+  let saved: EventRecord | undefined
   let notified = 0
-  if (nextStatus === 'voting_open' && current.status !== 'voting_open') notified = await notifyMembers(db, saved as EventRow)
+  try {
+    saved = await sql.begin(async (t) => {
+      // Keys come from ALLOWED_KEYS only (buildUpdate refuses anything else).
+      const values: Record<string, postgres.ParameterOrJSON<never>> = { updated_at: new Date().toISOString() }
+      for (const [key, value] of Object.entries(update)) {
+        values[key] = JSON_COLUMNS.has(key) ? t.json(value as never) : (value as postgres.ParameterOrJSON<never>)
+      }
+      // Optimistic concurrency on status: another organizer may have moved the phase.
+      const [row] = await t<EventRecord[]>`
+        update events set ${t(values, Object.keys(values))}
+        where id = ${current.id} and status = ${current.status}
+        returning *
+      `
+      if (!row) return undefined
 
-  if ((saved as { actor_did?: string | null }).actor_did) scheduleNetworkWrites(eventId, user.id, current, nextStatus, update)
+      if (enteringVoting) {
+        await openRound(current.id, {}, t)
+        const votingEndsAt = row.voting_closes_at ? formatInEventTimezone(new Date(row.voting_closes_at), row.timezone, 'full') : null
+        notified = await notify(t, {
+          eventId: row.id,
+          userIds: await members(t, row.id),
+          type: 'voting_opened',
+          title: `Voting is open for ${row.name}`,
+          body: votingEndsAt
+            ? `Spend your credits on the sessions you want to see. Voting closes ${votingEndsAt}.`
+            : 'Spend your credits on the sessions you want to see.',
+          actionUrl: `/e/${row.slug}/sessions`,
+          data: { voting_ends_at: votingEndsAt },
+        })
+      } else if (leavingVoting) {
+        notified = await notify(t, {
+          eventId: row.id,
+          userIds: await members(t, row.id),
+          type: 'voting_closed',
+          title: `Voting has closed for ${row.name}`,
+          body: 'Thanks for shaping the program. The organizers are putting the schedule together.',
+          actionUrl: `/e/${row.slug}`,
+          data: {},
+        })
+      }
+      return row
+    })
+  } catch (e) {
+    if (isVotingError(e)) {
+      const field = e.field === 'closesAt' ? 'voting_closes_at' : e.field === 'opensAt' ? 'voting_opens_at' : e.field ?? 'status'
+      return json({ error: `Voting could not open: ${e.message}`, field, code: e.code }, e.status)
+    }
+    const mapped = dbErrorResponse(e)
+    if (mapped) return mapped
+    console.error('[settings] save failed:', e)
+    return json({ error: 'Could not save event settings. Your changes are still in the form.' }, 500)
+  }
+  if (!saved) return json({ error: 'Another organizer changed the event phase. Refresh before saving.', field: 'status' }, 409)
 
-  return NextResponse.json({ success: true, event: saved, notified })
+  // Committed. Now the network, best-effort, never inside the transaction.
+  const network: NetworkWrite[] = []
+  if (saved.actor_did) {
+    const alreadyPublished = Boolean(saved.atproto_published_at)
+    const gatheringChanged = GATHERING_KEYS.some((key) => key in update)
+    const policyChanged = POLICY_KEYS.some((key) => key in update)
+    if (leavingDraft || (alreadyPublished && gatheringChanged)) {
+      network.push(await publishGatheringRecords(saved.id, viewer.accountId))
+    } else if (alreadyPublished && policyChanged) {
+      network.push(await publishPolicyRecord(saved.id, viewer.accountId))
+    }
+  }
+
+  // The publish step stamps uri/cid columns; answer with the row as it now stands.
+  const [fresh] = network.length ? await sql<EventRecord[]>`select * from events where id = ${saved.id}` : [saved]
+  return json({ success: true, event: fresh ?? saved, notified, network })
 }
 
 export async function DELETE(request: Request, { params }: { params: Promise<{ eventId: string }> }) {
+  const bad = assertSameOrigin(request)
+  if (bad) return bad
+  const viewer = await requireViewer(request)
+  if (viewer instanceof Response) return viewer
   const { eventId } = await params
-  const user = await getUserFromRequest(request)
-  if (!user) return NextResponse.json({ error: 'Sign in to manage this event.' }, { status: 401 })
-  const { db, member, error: memberError } = await loadMembership(eventId, user.id)
-  if (memberError) return NextResponse.json({ error: 'Could not verify your event access. Try again.' }, { status: 500 })
-  if (!member || !canRolePerform(member.role, 'deleteEvent')) return NextResponse.json({ error: 'Only the event owner can delete it.' }, { status: 403 })
 
-  const { data: event, error } = await db.from('events').select('id, status').eq('id', eventId).single()
-  if (error || !event) return NextResponse.json({ error: 'Could not load this event.' }, { status: 404 })
-  if (!canDelete(event.status as EventStatus)) return NextResponse.json({ error: 'Only draft gatherings can be deleted. Archive this one instead.' }, { status: 409 })
-
-  // Children (sessions, votes, members, tickets, notifications, …) cascade from events(id).
-  const { data: deleted, error: deleteError } = await db.from('events').delete().eq('id', eventId).eq('status', 'draft').select('id').maybeSingle()
-  if (deleteError) {
-    console.error('[settings] delete failed:', deleteError)
-    return NextResponse.json({ error: 'Could not delete this event. Try again.' }, { status: 500 })
+  const loaded = await loadForViewer(eventId, viewer.accountId)
+  if (!loaded || (isHiddenEvent(loaded.event) && !loaded.role)) return json({ error: 'Event not found' }, 404)
+  if (!loaded.role || !canRolePerform(loaded.role, 'deleteEvent')) return json({ error: 'Only the event owner can delete it.' }, 403)
+  if (!canDelete(loaded.event.status as EventStatus)) {
+    return json({ error: 'Only draft gatherings can be deleted. Archive this one instead.' }, 409)
   }
-  if (!deleted) return NextResponse.json({ error: 'This event was published or removed by another organizer. Refresh the page.' }, { status: 409 })
-  return NextResponse.json({ success: true })
+  if (loaded.event.atproto_published_at) {
+    return json({ error: 'This gathering has published records on the network, so it can only be archived.', code: 'PublishedRecords' }, 409)
+  }
+
+  try {
+    const outcome = await sql.begin(async (t) => {
+      const [event] = await t<{ id: string; slug: string; name: string; status: string; actor_did: string | null; atproto_published_at: string | null }[]>`
+        select id, slug, name, status, actor_did, atproto_published_at from events where id = ${eventId} for update
+      `
+      if (!event || event.status !== 'draft' || event.atproto_published_at) return 'conflict' as const
+      if (event.actor_did) {
+        await t`
+          insert into at_audit (event_id, actor_did, caller_user_id, action, decision, reason)
+          values (${event.id}, ${event.actor_did}, ${viewer.accountId}, 'delete-identity', 'allow',
+                  ${`draft gathering "${event.name.slice(0, 80)}" deleted by its owner; it never published a record`})
+        `
+        // Inside the transaction on purpose: if the PDS refuses, the draft (and its row
+        // pointing at the account) stays, so nothing is orphaned on either side.
+        await deleteGatheringIdentity(event.actor_did)
+      }
+      // Children (sessions, members, tickets, notifications, …) cascade from events(id).
+      await t`delete from events where id = ${event.id}`
+      return event.slug
+    })
+    if (outcome === 'conflict') {
+      return json({ error: 'This event was published or removed by another organizer. Refresh the page.' }, 409)
+    }
+    evictGatheringActor(eventId)
+    forgetGatheringHost(outcome)
+    return json({ success: true })
+  } catch (e) {
+    console.error('[settings] delete failed:', e)
+    return json({ error: 'Could not delete this event and its network identity. Nothing was removed; try again.' }, 502)
+  }
 }

@@ -3,7 +3,7 @@
 import * as React from 'react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { FileText, LayoutGrid, Settings, ArrowLeft, Megaphone, BarChart3, Tags, Ticket, DollarSign, Users, Menu, X, ScanLine, Globe } from 'lucide-react'
+import { FileText, LayoutGrid, Settings, ArrowLeft, Megaphone, BarChart3, Tags, Ticket, DollarSign, Users, Menu, X, ScanLine, Globe, Loader2, Lock } from 'lucide-react'
 import { useEvent, useEventRole } from '@/contexts/EventContext'
 import { NetworkMark } from '@/components/GatheringArtwork'
 import { WorkspaceHeader } from '@/components/WorkspaceHeader'
@@ -12,13 +12,13 @@ import { Badge } from '@/components/ui/badge'
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
   const event = useEvent()
-  const { can, isAdmin, role } = useEventRole()
+  const { can, isAdmin, role, isLoading } = useEventRole()
   const pathname = usePathname()
   const [open, setOpen] = React.useState(false)
   const base = `/e/${event.slug}/admin`
   const groups = [
     { label: 'Program', items: [
-      { label: 'Overview & sessions', href: base, icon: FileText, show: true },
+      { label: 'Overview & sessions', href: base, icon: FileText, show: can('approveProposals') || can('manageSchedule') },
       { label: 'Schedule builder', href: `${base}/schedule`, icon: LayoutGrid, show: can('manageSchedule') },
       { label: 'Tracks', href: `${base}/tracks`, icon: Tags, show: can('manageTracks') },
     ] },
@@ -44,6 +44,24 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
     document.addEventListener('keydown', close)
     return () => document.removeEventListener('keydown', close)
   }, [])
+  // The organizer workspace is for organizer roles only; every API it calls enforces the same.
+  const organizer = can('approveProposals') || can('manageSchedule') || can('viewAnalytics') || can('sendCommunications')
+  if (isLoading) {
+    return <div className="min-h-screen flex items-center justify-center" role="status" aria-label="Loading organizer workspace"><Loader2 className="h-8 w-8 animate-spin text-muted-foreground"/></div>
+  }
+  if (!organizer) {
+    return <main id="workspace-main" className="min-h-screen flex items-center justify-center p-6 bg-background">
+      <div className="max-w-md text-center rounded-2xl border bg-card p-8">
+        <Lock className="h-8 w-8 mx-auto mb-4 text-muted-foreground" aria-hidden/>
+        <h1 className="text-xl font-semibold mb-2">Organizers only</h1>
+        <p className="text-sm text-muted-foreground mb-6">{role ? 'Your role in this gathering does not include the organizer workspace.' : 'Sign in with an organizer account to open the organizer workspace.'}</p>
+        <div className="flex flex-wrap justify-center gap-2">
+          <Button asChild variant="outline"><Link href={`/e/${event.slug}`}>Back to {event.name}</Link></Button>
+          {!role && <Button asChild><Link href={`/login?returnTo=${encodeURIComponent(`/e/${event.slug}/admin`)}`}>Sign in</Link></Button>}
+        </div>
+      </div>
+    </main>
+  }
   const navigation = <nav aria-label="Organizer navigation" className="space-y-6">
     {groups.map(group => group.items.some(item => item.show) && <div key={group.label}>
       <p className="px-3 mb-2 text-xs text-muted-foreground">{group.label}</p>

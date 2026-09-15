@@ -1,216 +1,91 @@
 /**
- * Accept Event Invitation
- * POST - Accept invitation and join event
+ * POST /api/v1/invitations/[token]/accept — join the event the invitation is for.
  *
- * Email-bound invitations are single-use (accepted_at). Shareable links are
- * bounded by max_uses (null = unlimited); use_count is incremented with a
- * compare-and-swap UPDATE so concurrent accepts cannot exceed the limit.
+ * In one transaction, with the invitation row locked:
+ * - revoked / expired → 410; an email invitation for another address → 403
+ * - already a member: an invitation to a higher role upgrades them (never an owner, never a
+ *   downgrade); otherwise nothing is granted and a link use is not consumed
+ * - email invitations are single-use (`accepted_at`); links consume one use with a
+ *   compare-and-swap (`use_count < max_uses`), so concurrent accepts can never exceed the limit
+ * - each redemption stamps `last_redeemed_at` for the 30-day inviter retention (spec §9)
  */
+import { tx } from '@/lib/db'
+import { assertSameOrigin, requireViewer } from '@/lib/auth/viewer'
+import { isRoleHigherThan } from '@/lib/permissions'
+import { errorResponse, fail, json } from '@/lib/scheduling/admin-api'
+import type { EventRoleName } from '@/types/event'
 
-import { NextRequest, NextResponse } from 'next/server'
-import { createAdminClient } from '@/lib/supabase/server'
-import { getUserFromRequest } from '@/lib/api/getUser'
+export const dynamic = 'force-dynamic'
 
-const EXHAUSTED = { error: 'This invitation has reached its use limit' }
+const TOKEN = /^[0-9a-f]{64}$/
 
-type Admin = Awaited<ReturnType<typeof createAdminClient>>
-
-/**
- * Atomically reserve one use of a link invitation.
- * Returns 'ok' when a use was reserved, 'exhausted' when the limit is reached.
- * The UPDATE is guarded by the last-seen use_count (compare-and-swap), and the
- * value we read was verified below max_uses, so two racing accepts can never
- * both succeed past the limit: the loser sees 0 rows and re-reads.
- */
-async function reserveUse(supabase: Admin, invitationId: string): Promise<'ok' | 'exhausted' | 'error'> {
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const { data: current, error: readError } = await supabase
-      .from('event_invitations')
-      .select('use_count, max_uses')
-      .eq('id', invitationId)
-      .single()
-
-    if (readError || !current) return 'error'
-    if (current.max_uses !== null && current.use_count >= current.max_uses) return 'exhausted'
-
-    const { data: updated, error: updateError } = await supabase
-      .from('event_invitations')
-      .update({ use_count: current.use_count + 1 })
-      .eq('id', invitationId)
-      .eq('use_count', current.use_count) // CAS: someone else incremented → 0 rows
-      .select('id')
-
-    if (updateError) return 'error'
-    if (updated && updated.length === 1) return 'ok'
-    // Lost the race; re-read and try again.
-  }
-  return 'error'
-}
-
-async function releaseUse(supabase: Admin, invitationId: string) {
-  const { data: current } = await supabase
-    .from('event_invitations')
-    .select('use_count')
-    .eq('id', invitationId)
-    .single()
-  if (current && current.use_count > 0) {
-    await supabase
-      .from('event_invitations')
-      .update({ use_count: current.use_count - 1 })
-      .eq('id', invitationId)
-      .eq('use_count', current.use_count)
-  }
-}
-
-export async function POST(
-  request: NextRequest,
-  { params }: { params: Promise<{ token: string }> }
-) {
+export async function POST(request: Request, { params }: { params: Promise<{ token: string }> }) {
+  const crossOrigin = assertSameOrigin(request)
+  if (crossOrigin) return crossOrigin
+  const viewer = await requireViewer(request)
+  if (viewer instanceof Response) return fail(401, 'Sign in to accept this invitation')
   const { token } = await params
+  if (!TOKEN.test(token)) return fail(404, 'Invalid invitation')
 
-  const user = await getUserFromRequest(request)
-  if (!user) {
-    return NextResponse.json({ error: 'Please log in to accept invitation' }, { status: 401 })
-  }
+  try {
+    const outcome = await tx(async (t) => {
+      const [inv] = await t<{
+        id: string; event_id: string; email: string | null; role: EventRoleName; accepted_at: string | null
+        revoked_at: string | null; max_uses: number | null; use_count: number; expired: boolean
+        slug: string; name: string
+      }[]>`
+        select i.id, i.event_id, i.email, i.role, i.accepted_at, i.revoked_at, i.max_uses, i.use_count,
+               i.expires_at <= now() as expired, e.slug, e.name
+        from event_invitations i join events e on e.id = i.event_id
+        where i.token = ${token}
+        for update of i
+      `
+      if (!inv) return { ok: false as const, status: 404, error: 'Invalid invitation' }
+      if (inv.revoked_at) return { ok: false as const, status: 410, error: 'This invitation has been revoked' }
+      if (inv.expired) return { ok: false as const, status: 410, error: 'This invitation has expired' }
+      const isEmailInvite = Boolean(inv.email)
+      if (isEmailInvite && inv.accepted_at) return { ok: false as const, status: 409, error: 'This invitation has already been used' }
+      if (isEmailInvite && (viewer.email ?? '').toLowerCase() !== inv.email!.toLowerCase()) {
+        return { ok: false as const, status: 403, error: 'This invitation was sent to a different email address' }
+      }
 
-  const supabase = await createAdminClient()
+      const [member] = await t<{ id: string; role: EventRoleName }[]>`
+        select id, role from event_members where event_id = ${inv.event_id} and user_id = ${viewer.accountId} for update
+      `
+      const upgrade = member && member.role !== 'owner' && isRoleHigherThan(inv.role, member.role)
+      if (member && !upgrade) {
+        if (isEmailInvite) {
+          await t`update event_invitations set accepted_at = now(), last_redeemed_at = now() where id = ${inv.id} and accepted_at is null`
+        }
+        return { ok: true as const, eventSlug: inv.slug, role: member.role, message: `You are already a member of ${inv.name}` }
+      }
 
-  // Find invitation
-  const { data: invitation, error: inviteError } = await supabase
-    .from('event_invitations')
-    .select('id, event_id, email, role, expires_at, accepted_at, revoked_at, max_uses, use_count')
-    .eq('token', token)
-    .single()
+      if (isEmailInvite) {
+        const claimed = await t`
+          update event_invitations set accepted_at = now(), last_redeemed_at = now()
+          where id = ${inv.id} and accepted_at is null
+          returning id
+        `
+        if (claimed.length === 0) return { ok: false as const, status: 409, error: 'This invitation has already been used' }
+      } else {
+        const claimed = await t`
+          update event_invitations set use_count = use_count + 1, last_redeemed_at = now()
+          where id = ${inv.id} and use_count = ${inv.use_count} and (max_uses is null or use_count < max_uses)
+          returning id
+        `
+        if (claimed.length === 0) return { ok: false as const, status: 410, error: 'This invitation has reached its use limit' }
+      }
 
-  if (inviteError || !invitation) {
-    return NextResponse.json({ error: 'Invalid invitation' }, { status: 404 })
-  }
-
-  const isEmailInvite = !!invitation.email
-
-  // Check if already accepted (only for email-specific invitations)
-  if (isEmailInvite && invitation.accepted_at) {
-    return NextResponse.json({ error: 'Invitation already used' }, { status: 400 })
-  }
-
-  // Check if revoked
-  if (invitation.revoked_at) {
-    return NextResponse.json({ error: 'Invitation has been revoked' }, { status: 400 })
-  }
-
-  // Check expiration
-  if (new Date(invitation.expires_at) < new Date()) {
-    return NextResponse.json({ error: 'Invitation has expired' }, { status: 400 })
-  }
-
-  // Early exhausted check for link invites (the authoritative check is the CAS below)
-  if (!isEmailInvite && invitation.max_uses !== null && invitation.use_count >= invitation.max_uses) {
-    return NextResponse.json(EXHAUSTED, { status: 410 })
-  }
-
-  // If email-specific, verify email matches.
-  // Check the user's profile email first, then fall back to auth.users email
-  // (which is the source of truth since we require email auth).
-  if (invitation.email) {
-    let userEmail: string | null = null
-
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('email')
-      .eq('id', user.id)
-      .maybeSingle()
-
-    userEmail = profile?.email ?? null
-
-    // Fallback to auth user email (always present)
-    if (!userEmail && user.email) {
-      userEmail = user.email
-    }
-
-    if (!userEmail || userEmail.toLowerCase() !== invitation.email.toLowerCase()) {
-      return NextResponse.json({
-        error: 'This invitation was sent to a different email address'
-      }, { status: 403 })
-    }
-  }
-
-  // Check if already a member
-  const { data: existingMember } = await supabase
-    .from('event_members')
-    .select('id')
-    .eq('event_id', invitation.event_id)
-    .eq('user_id', user.id)
-    .maybeSingle()
-
-  if (existingMember) {
-    // Mark invitation as accepted anyway (for email invitations). Link
-    // invitations do not consume a use when nothing was granted.
-    if (isEmailInvite) {
-      await supabase
-        .from('event_invitations')
-        .update({ accepted_at: new Date().toISOString() })
-        .eq('id', invitation.id)
-    }
-
-    // Get event slug for redirect
-    const { data: event } = await supabase
-      .from('events')
-      .select('slug')
-      .eq('id', invitation.event_id)
-      .single()
-
-    return NextResponse.json({
-      success: true,
-      message: 'You are already a member of this event',
-      eventSlug: event?.slug
+      if (member) {
+        await t`update event_members set role = ${inv.role} where id = ${member.id}`
+      } else {
+        await t`insert into event_members (event_id, user_id, role) values (${inv.event_id}, ${viewer.accountId}, ${inv.role})`
+      }
+      return { ok: true as const, eventSlug: inv.slug, role: inv.role, message: `Welcome to ${inv.name}!` }
     })
+    if (!outcome.ok) return fail(outcome.status, outcome.error)
+    return json({ success: true, message: outcome.message, eventSlug: outcome.eventSlug, role: outcome.role })
+  } catch (e) {
+    return errorResponse(e, 'accept invitation')
   }
-
-  // Reserve a use of the link before granting membership
-  if (!isEmailInvite) {
-    const reserved = await reserveUse(supabase, invitation.id)
-    if (reserved === 'exhausted') {
-      return NextResponse.json(EXHAUSTED, { status: 410 })
-    }
-    if (reserved === 'error') {
-      return NextResponse.json({ error: 'Failed to join event' }, { status: 500 })
-    }
-  }
-
-  // Add user to event
-  const { error: memberError } = await supabase
-    .from('event_members')
-    .insert({
-      event_id: invitation.event_id,
-      user_id: user.id,
-      role: invitation.role,
-    })
-
-  if (memberError) {
-    console.error('Error adding member:', memberError)
-    if (!isEmailInvite) await releaseUse(supabase, invitation.id)
-    return NextResponse.json({ error: 'Failed to join event' }, { status: 500 })
-  }
-
-  // Mark invitation as accepted (only for email invitations)
-  if (isEmailInvite) {
-    await supabase
-      .from('event_invitations')
-      .update({ accepted_at: new Date().toISOString() })
-      .eq('id', invitation.id)
-  }
-
-  // Get event slug for redirect
-  const { data: event } = await supabase
-    .from('events')
-    .select('slug, name')
-    .eq('id', invitation.event_id)
-    .single()
-
-  return NextResponse.json({
-    success: true,
-    message: `Welcome to ${event?.name}!`,
-    eventSlug: event?.slug,
-    role: invitation.role
-  })
 }

@@ -2,6 +2,7 @@
 
 import { useReducer, useCallback } from 'react';
 import type { EventVisibility } from '@/types/event';
+import { DEFAULT_POLICY_THRESHOLDS, type GatheringPolicyThresholds } from '@/lib/events/policy';
 
 // ============================================================================
 // Types
@@ -71,6 +72,13 @@ export interface WizardVoting {
   requireProposalApproval: boolean;
   allowedFormats: string[];
   allowedDurations: number[];
+  /** Written into the gathering's public policy record (spec §8). */
+  policyThresholds: GatheringPolicyThresholds;
+}
+
+export interface WizardIdentity {
+  /** The organizer has read that the gathering gets a public identity and permanent public records. */
+  acknowledged: boolean;
 }
 
 export interface WizardTheme {
@@ -106,6 +114,7 @@ export interface WizardState {
   suggestedTopics: string[];
   voting: WizardVoting;
   branding: WizardBranding;
+  identity: WizardIdentity;
   validation: Record<string, string[]>; // step -> error messages
 }
 
@@ -131,6 +140,7 @@ export type WizardAction =
   | { type: 'REMOVE_TIME_SLOT'; payload: string }
   | { type: 'UPDATE_VOTING'; payload: Partial<WizardVoting> }
   | { type: 'UPDATE_BRANDING'; payload: Partial<WizardBranding> }
+  | { type: 'UPDATE_IDENTITY'; payload: Partial<WizardIdentity> }
   | { type: 'SET_VALIDATION_ERRORS'; payload: { step: string; errors: string[] } }
   | { type: 'CLEAR_VALIDATION_ERRORS'; payload: string }
   | { type: 'RESET' }
@@ -148,6 +158,7 @@ export const WIZARD_STEPS = [
   'tracks',
   'voting',
   'branding',
+  'identity',
   'review',
 ] as const;
 
@@ -190,6 +201,7 @@ export const INITIAL_STATE: WizardState = {
     requireProposalApproval: false,
     allowedFormats: ['talk', 'workshop', 'panel', 'discussion'],
     allowedDurations: [15, 30, 45, 60],
+    policyThresholds: { ...DEFAULT_POLICY_THRESHOLDS },
   },
   branding: {
     logoUrl: null,
@@ -207,8 +219,17 @@ export const INITIAL_STATE: WizardState = {
       website: '',
     },
   },
+  identity: {
+    acknowledged: false,
+  },
   validation: {},
 };
+
+/** Longest slug that can be a gathering subdomain (`src/lib/auth/handles.ts` GATHERING_LABEL_RE). */
+export const MAX_SLUG_LENGTH = 32;
+/** Longest slug the PDS accepts as the gathering's own handle label; longer slugs get a generated handle. */
+export const HANDLE_LABEL_MAX = 18;
+const SLUG_LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{1,30}[a-z0-9])?$/;
 
 // ============================================================================
 // Helper Functions
@@ -243,7 +264,7 @@ export function isStepValid(state: WizardState, step: number): boolean {
     case 'basics':
       return (
         state.basics.name.trim().length > 0 &&
-        state.basics.slug.trim().length > 0 &&
+        SLUG_LABEL_RE.test(state.basics.slug) &&
         state.basics.eventType.length > 0
       );
 
@@ -279,8 +300,12 @@ export function isStepValid(state: WizardState, step: number): boolean {
         Array.isArray(state.voting.allowedFormats) &&
         state.voting.allowedFormats.length > 0 &&
         Array.isArray(state.voting.allowedDurations) &&
-        state.voting.allowedDurations.length > 0
+        state.voting.allowedDurations.length > 0 &&
+        thresholdsValid(state.voting.policyThresholds)
       );
+
+    case 'identity':
+      return state.identity.acknowledged;
 
     case 'branding':
       // Branding is optional, defaults are fine
@@ -312,6 +337,8 @@ export function getStepValidationErrors(state: WizardState, step: number): strin
       }
       if (state.basics.slug && !/^[a-z0-9-]+$/.test(state.basics.slug)) {
         errors.push('Slug can only contain lowercase letters, numbers, and hyphens');
+      } else if (state.basics.slug && !SLUG_LABEL_RE.test(state.basics.slug)) {
+        errors.push(`Use 3–${MAX_SLUG_LENGTH} characters that start and end with a letter or number`);
       }
       break;
 
@@ -347,6 +374,15 @@ export function getStepValidationErrors(state: WizardState, step: number): strin
       if (!Array.isArray(state.voting.allowedDurations) || state.voting.allowedDurations.length === 0) {
         errors.push('At least one session duration must be allowed');
       }
+      if (!thresholdsValid(state.voting.policyThresholds)) {
+        errors.push('Choose valid approval and privacy thresholds');
+      }
+      break;
+
+    case 'identity':
+      if (!state.identity.acknowledged) {
+        errors.push('Confirm you understand what becomes public before creating the gathering');
+      }
       break;
 
     default:
@@ -354,6 +390,11 @@ export function getStepValidationErrors(state: WizardState, step: number): strin
   }
 
   return errors;
+}
+
+function thresholdsValid(t: GatheringPolicyThresholds | undefined): boolean {
+  return !!t && Number.isInteger(t.destructiveActionStewards) && t.destructiveActionStewards >= 1 && t.destructiveActionStewards <= 5
+    && Number.isInteger(t.feedbackK) && t.feedbackK >= 2 && t.feedbackK <= 10 && typeof t.publishRoles === 'boolean';
 }
 
 // ============================================================================
@@ -549,6 +590,15 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
       };
     }
 
+    case 'UPDATE_IDENTITY':
+      return {
+        ...state,
+        identity: {
+          ...state.identity,
+          ...action.payload,
+        },
+      };
+
     case 'SET_VALIDATION_ERRORS':
       return {
         ...state,
@@ -591,7 +641,13 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
         voting: {
           ...INITIAL_STATE.voting,
           ...action.payload.voting,
+          policyThresholds: {
+            ...INITIAL_STATE.voting.policyThresholds,
+            ...action.payload.voting?.policyThresholds,
+          },
         },
+        // Acknowledgement is never restored from a saved draft: it is given right before creating.
+        identity: { ...INITIAL_STATE.identity },
         branding: {
           ...INITIAL_STATE.branding,
           ...action.payload.branding,
@@ -628,7 +684,12 @@ export function useWizardState(initialState?: Partial<WizardState>) {
           dates: { ...INITIAL_STATE.dates, ...initialState.dates },
           schedule: { ...INITIAL_STATE.schedule, ...initialState.schedule },
           suggestedTopics: initialState.suggestedTopics || INITIAL_STATE.suggestedTopics,
-          voting: { ...INITIAL_STATE.voting, ...initialState.voting },
+          voting: {
+            ...INITIAL_STATE.voting,
+            ...initialState.voting,
+            policyThresholds: { ...INITIAL_STATE.voting.policyThresholds, ...initialState.voting?.policyThresholds },
+          },
+          identity: { ...INITIAL_STATE.identity, ...initialState.identity },
           branding: {
             ...INITIAL_STATE.branding,
             ...initialState.branding,

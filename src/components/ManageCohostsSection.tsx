@@ -4,37 +4,8 @@ import * as React from 'react'
 import { User, X, Copy, Check, Loader2, Plus, LogOut, Link2 } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
-
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!
-
-function getAccessToken(): string | null {
-  const storageKey = `sb-${new URL(SUPABASE_URL).hostname.split('.')[0]}-auth-token`
-  const stored = localStorage.getItem(storageKey)
-  if (stored) {
-    try {
-      const session = JSON.parse(stored)
-      return session?.access_token || null
-    } catch {
-      return null
-    }
-  }
-  return null
-}
-
-function authHeaders(): HeadersInit {
-  const token = getAccessToken()
-  return token ? { 'Authorization': `Bearer ${token}` } : {}
-}
-
-interface Cohost {
-  user_id: string
-  display_order: number
-  profile: {
-    id: string
-    display_name: string | null
-    avatar_url: string | null
-  } | null
-}
+import { apiFetch } from '@/lib/api/client'
+import type { SessionView } from '@/app/api/v1/sessions/_lib/read'
 
 interface Invite {
   id: string
@@ -46,191 +17,135 @@ interface Invite {
 
 interface ManageCohostsSectionProps {
   sessionId: string
-  hostId: string
-  userId: string
-  isAdmin: boolean
-  cohosts: Cohost[]
+  cohosts: SessionView['cohosts']
+  /** The viewer proposed this session. */
+  isHost: boolean
+  /** The viewer organizes the event. */
+  isOrganizer: boolean
   onCohostsChange: () => void
 }
 
-export function ManageCohostsSection({
-  sessionId,
-  hostId,
-  userId,
-  isAdmin,
-  cohosts,
-  onCohostsChange,
-}: ManageCohostsSectionProps) {
+/**
+ * Co-hosting is a double opt-in (spec §4.2): the proposer (or an organizer) shares an invite
+ * link that names nobody; a person becomes a co-host only by accepting it themselves, which
+ * writes a co-host record into their own repository. A co-host can step down (deleting that
+ * record); the proposer can remove someone from their session; organizers cannot un-co-host.
+ */
+export function ManageCohostsSection({ sessionId, cohosts, isHost, isOrganizer, onCohostsChange }: ManageCohostsSectionProps) {
   const [invites, setInvites] = React.useState<Invite[]>([])
-  const [isLoadingInvites, setIsLoadingInvites] = React.useState(false)
   const [isCreatingInvite, setIsCreatingInvite] = React.useState(false)
   const [copiedToken, setCopiedToken] = React.useState<string | null>(null)
-  const [removingId, setRemovingId] = React.useState<string | null>(null)
-  const [revokingId, setRevokingId] = React.useState<string | null>(null)
-  const [isLeaving, setIsLeaving] = React.useState(false)
+  const [busyId, setBusyId] = React.useState<string | null>(null)
+  const [error, setError] = React.useState<string | null>(null)
 
-  const isPrimaryHost = hostId === userId
-  const isCohost = cohosts.some(c => c.user_id === userId)
-  const canManage = isPrimaryHost || isAdmin
+  const canInvite = isHost || isOrganizer
+  const me = cohosts.find((c) => c.is_viewer)
 
-  // Fetch invites for primary host / admin
-  React.useEffect(() => {
-    if (!canManage) return
-    fetchInvites()
-  }, [canManage, sessionId])
-
-  const fetchInvites = async () => {
-    setIsLoadingInvites(true)
+  const fetchInvites = React.useCallback(async () => {
     try {
-      const response = await fetch(`/api/sessions/${sessionId}/invites`, {
-        headers: authHeaders(),
-      })
-      if (response.ok) {
-        const data = await response.json()
-        setInvites(data.filter((i: Invite) => i.status === 'pending'))
-      }
+      const data = await apiFetch<{ invites: Invite[] }>(`/api/sessions/${sessionId}/invites`)
+      setInvites(data.invites)
     } catch (err) {
-      console.error('Error fetching invites:', err)
+      setError(err instanceof Error ? err.message : 'Invite links could not load')
+    }
+  }, [sessionId])
+
+  React.useEffect(() => {
+    if (canInvite) fetchInvites()
+  }, [canInvite, fetchInvites])
+
+  const run = async (id: string, action: () => Promise<unknown>) => {
+    setBusyId(id)
+    setError(null)
+    try {
+      await action()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'That did not work. Please try again.')
     } finally {
-      setIsLoadingInvites(false)
+      setBusyId(null)
     }
   }
 
   const handleCreateInvite = async () => {
     setIsCreatingInvite(true)
+    setError(null)
     try {
-      const response = await fetch(`/api/sessions/${sessionId}/invites`, {
-        method: 'POST',
-        headers: authHeaders(),
-      })
-      if (response.ok) {
-        await fetchInvites()
-      }
+      await apiFetch(`/api/sessions/${sessionId}/invites`, { method: 'POST' })
+      await fetchInvites()
     } catch (err) {
-      console.error('Error creating invite:', err)
+      setError(err instanceof Error ? err.message : 'The invite link could not be created')
     } finally {
       setIsCreatingInvite(false)
     }
   }
 
-  const handleRevokeInvite = async (inviteId: string) => {
-    setRevokingId(inviteId)
-    try {
-      const response = await fetch(`/api/sessions/${sessionId}/invites/${inviteId}`, {
-        method: 'DELETE',
-        headers: authHeaders(),
-      })
-      if (response.ok) {
-        setInvites(prev => prev.filter(i => i.id !== inviteId))
-      }
-    } catch (err) {
-      console.error('Error revoking invite:', err)
-    } finally {
-      setRevokingId(null)
-    }
-  }
-
   const handleCopyLink = async (token: string) => {
-    const url = `${window.location.origin}/invite/${token}`
-    await navigator.clipboard.writeText(url)
+    await navigator.clipboard.writeText(`${window.location.origin}/invite/${token}`)
     setCopiedToken(token)
     setTimeout(() => setCopiedToken(null), 2000)
   }
 
-  const handleRemoveCohost = async (cohostUserId: string) => {
-    setRemovingId(cohostUserId)
-    try {
-      const response = await fetch(`/api/sessions/${sessionId}/cohosts/${cohostUserId}`, {
-        method: 'DELETE',
-        headers: authHeaders(),
-      })
-      if (response.ok) {
-        onCohostsChange()
-      }
-    } catch (err) {
-      console.error('Error removing co-host:', err)
-    } finally {
-      setRemovingId(null)
-    }
-  }
-
-  const handleLeave = async () => {
-    setIsLeaving(true)
-    try {
-      const response = await fetch(`/api/sessions/${sessionId}/cohosts/${userId}`, {
-        method: 'DELETE',
-        headers: authHeaders(),
-      })
-      if (response.ok) {
-        onCohostsChange()
-      }
-    } catch (err) {
-      console.error('Error leaving:', err)
-    } finally {
-      setIsLeaving(false)
-    }
-  }
-
-  // Co-host view: just a leave button
-  if (isCohost && !canManage) {
+  if (me && !isHost) {
     return (
       <Card className="p-6">
         <h3 className="font-semibold mb-4">Co-Host</h3>
         <p className="text-sm text-muted-foreground mb-3">
-          You are a co-host of this session.
+          You co-host this session. Stepping down removes your co-host record from your repository.
         </p>
+        {error && <p role="alert" className="text-sm text-destructive mb-3">{error}</p>}
         <Button
           variant="outline"
           className="w-full justify-start text-destructive hover:text-destructive hover:bg-destructive/10"
-          onClick={handleLeave}
-          disabled={isLeaving}
+          onClick={() => run('me', async () => {
+            await apiFetch(`/api/sessions/${sessionId}/cohosts/me`, { method: 'DELETE' })
+            onCohostsChange()
+          })}
+          disabled={busyId === 'me'}
         >
-          {isLeaving ? (
-            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-          ) : (
-            <LogOut className="h-4 w-4 mr-2" />
-          )}
-          Leave as Co-Host
+          {busyId === 'me' ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <LogOut className="h-4 w-4 mr-2" />}
+          Step down as co-host
         </Button>
       </Card>
     )
   }
 
-  // Primary host / admin view: full management
-  if (!canManage) return null
+  if (!canInvite) return null
 
   return (
     <Card className="p-6">
-      <h3 className="font-semibold mb-4">Co-Hosts</h3>
+      <h3 className="font-semibold mb-1">Co-Hosts</h3>
+      <p className="text-xs text-muted-foreground mb-4">Co-hosts join by accepting an invite link themselves.</p>
+      {error && <p role="alert" className="text-sm text-destructive mb-3">{error}</p>}
 
-      {/* Current co-hosts */}
       {cohosts.length > 0 ? (
         <div className="space-y-2 mb-4">
-          {cohosts.map(cohost => (
-            <div key={cohost.user_id} className="flex items-center justify-between gap-2 p-2 rounded-lg bg-muted/50">
+          {cohosts.map((cohost) => (
+            <div key={cohost.id} className="flex items-center justify-between gap-2 p-2 rounded-lg bg-muted/50">
               <div className="flex items-center gap-2 min-w-0">
                 <div className="h-7 w-7 rounded-full bg-muted flex items-center justify-center overflow-hidden shrink-0">
-                  {cohost.profile?.avatar_url ? (
-                    <img src={cohost.profile.avatar_url} alt={cohost.profile.display_name || ''} className="h-full w-full object-cover" />
+                  {cohost.avatar_url ? (
+                    <img src={cohost.avatar_url} alt={cohost.display_name || ''} className="h-full w-full object-cover" />
                   ) : (
                     <User className="h-3.5 w-3.5 text-muted-foreground" />
                   )}
                 </div>
-                <span className="text-sm truncate">{cohost.profile?.display_name || 'Unknown'}</span>
+                <span className="text-sm truncate">{cohost.display_name || (cohost.handle ? `@${cohost.handle}` : 'Co-host')}</span>
               </div>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive"
-                onClick={() => handleRemoveCohost(cohost.user_id)}
-                disabled={removingId === cohost.user_id}
-              >
-                {removingId === cohost.user_id ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <X className="h-3.5 w-3.5" />
-                )}
-              </Button>
+              {isHost && (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive"
+                  aria-label={`Remove ${cohost.display_name || 'co-host'}`}
+                  onClick={() => run(cohost.id, async () => {
+                    await apiFetch(`/api/sessions/${sessionId}/cohosts/${cohost.id}`, { method: 'DELETE' })
+                    onCohostsChange()
+                  })}
+                  disabled={busyId === cohost.id}
+                >
+                  {busyId === cohost.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />}
+                </Button>
+              )}
             </div>
           ))}
         </div>
@@ -238,45 +153,31 @@ export function ManageCohostsSection({
         <p className="text-sm text-muted-foreground mb-4">No co-hosts yet</p>
       )}
 
-      {/* Pending invites */}
       {invites.length > 0 && (
         <div className="space-y-2 mb-4">
-          <p className="text-xs font-medium text-muted-foreground">Pending Invites</p>
-          {invites.map(invite => (
+          <p className="text-xs font-medium text-muted-foreground">Open invite links</p>
+          {invites.map((invite) => (
             <div key={invite.id} className="flex items-center justify-between gap-2 p-2 rounded-lg border border-dashed">
               <div className="flex items-center gap-2 min-w-0">
                 <Link2 className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                <span className="text-xs text-muted-foreground truncate">
-                  Expires {new Date(invite.expires_at).toLocaleDateString()}
-                </span>
+                <span className="text-xs text-muted-foreground truncate">Expires {new Date(invite.expires_at).toLocaleDateString()}</span>
               </div>
               <div className="flex gap-1 shrink-0">
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-7 w-7"
-                  onClick={() => handleCopyLink(invite.token)}
-                  title="Copy invite link"
-                >
-                  {copiedToken === invite.token ? (
-                    <Check className="h-3.5 w-3.5 text-green-500" />
-                  ) : (
-                    <Copy className="h-3.5 w-3.5" />
-                  )}
+                <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => handleCopyLink(invite.token)} aria-label="Copy invite link">
+                  {copiedToken === invite.token ? <Check className="h-3.5 w-3.5 text-green-500" /> : <Copy className="h-3.5 w-3.5" />}
                 </Button>
                 <Button
                   variant="ghost"
                   size="icon"
                   className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                  onClick={() => handleRevokeInvite(invite.id)}
-                  disabled={revokingId === invite.id}
-                  title="Revoke invite"
+                  onClick={() => run(invite.id, async () => {
+                    await apiFetch(`/api/sessions/${sessionId}/invites/${invite.id}`, { method: 'DELETE' })
+                    setInvites((prev) => prev.filter((i) => i.id !== invite.id))
+                  })}
+                  disabled={busyId === invite.id}
+                  aria-label="Revoke invite link"
                 >
-                  {revokingId === invite.id ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  ) : (
-                    <X className="h-3.5 w-3.5" />
-                  )}
+                  {busyId === invite.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />}
                 </Button>
               </div>
             </div>
@@ -284,18 +185,8 @@ export function ManageCohostsSection({
         </div>
       )}
 
-      {/* Create invite button */}
-      <Button
-        variant="outline"
-        className="w-full justify-start"
-        onClick={handleCreateInvite}
-        disabled={isCreatingInvite}
-      >
-        {isCreatingInvite ? (
-          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-        ) : (
-          <Plus className="h-4 w-4 mr-2" />
-        )}
+      <Button variant="outline" className="w-full justify-start" onClick={handleCreateInvite} disabled={isCreatingInvite}>
+        {isCreatingInvite ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Plus className="h-4 w-4 mr-2" />}
         Create Invite Link
       </Button>
     </Card>

@@ -14,24 +14,22 @@ import {
   generateGoogleCalendarURL,
   generateOutlookCalendarURL,
   generateYahooCalendarURL,
-  type ICSEvent,
+  sessionToICSEvent,
 } from '@/lib/calendar/ics'
 
 interface AddToCalendarProps {
-  /** Session data for calendar event */
+  /** Session data for the calendar entry */
   session: {
     id: string
     title: string
-    description?: string
-    host_name?: string
-    time_slot?: {
-      start_time: string
-      end_time: string
-    } | null
-    venue?: {
-      name: string
-      address?: string
-    } | null
+    description?: string | null
+    /** A linked host's own display name (never a name someone else typed). */
+    hostLabel?: string | null
+    is_self_hosted?: boolean
+    self_hosted_start_time?: string | null
+    self_hosted_end_time?: string | null
+    time_slot?: { start_time: string; end_time: string } | null
+    venue?: { name: string; address?: string | null } | null
   }
   /** Event slug for ICS download URL */
   eventSlug: string
@@ -50,38 +48,25 @@ export function AddToCalendar({
   variant = 'default',
   size = 'default',
 }: AddToCalendarProps) {
-  const timeSlot = session.time_slot
+  const start = session.time_slot?.start_time ?? (session.is_self_hosted ? session.self_hosted_start_time : null)
+  const end = session.time_slot?.end_time ?? (session.is_self_hosted ? session.self_hosted_end_time : null)
+  if (!start || !end) return null
 
-  // Don't render if session isn't scheduled
-  if (!timeSlot?.start_time || !timeSlot?.end_time) {
-    return null
-  }
+  const location = session.is_self_hosted
+    ? 'Self-hosted — see the session page'
+    : [session.venue?.name || eventLocation, session.venue?.address].filter(Boolean).join(', ')
 
-  // Build location string
-  let location = session.venue?.name || eventLocation || ''
-  if (session.venue?.address) {
-    location += `, ${session.venue.address}`
-  }
-
-  // Build description
-  let description = session.description || ''
-  if (session.host_name) {
-    description = `Host: ${session.host_name}\n\n${description}`
-  }
-  const baseUrl = typeof window !== 'undefined' ? window.location.origin : ''
-  const sessionUrl = `${baseUrl}/e/${eventSlug}/sessions/${session.id}`
-  description += `\n\nView session: ${sessionUrl}`
-
-  const icsEvent: ICSEvent = {
-    uid: `session-${session.id}@schellingpoint.io`,
+  const origin = typeof window !== 'undefined' ? window.location.origin : ''
+  const icsEvent = sessionToICSEvent({
+    id: session.id,
     title: session.title,
-    description: description.trim(),
+    description: session.description,
+    hostLabel: session.hostLabel,
+    startTime: start,
+    endTime: end,
     location,
-    startTime: new Date(timeSlot.start_time),
-    endTime: new Date(timeSlot.end_time),
-    url: sessionUrl,
-    organizer: session.host_name,
-  }
+    eventSlug,
+  }, origin)
 
   const handleGoogleCalendar = () => {
     const url = generateGoogleCalendarURL(icsEvent)

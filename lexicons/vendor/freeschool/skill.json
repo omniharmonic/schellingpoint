@@ -1,0 +1,93 @@
+{
+  "lexicon": 1,
+  "id": "freeschool.draft.skill",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A node in the shared skill taxonomy. Authored by a taxonomy authority (a school or the co-op). rkey is the stable slug. Forkable: any school may publish proposed nodes in its own repo.",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": [
+          "id",
+          "label",
+          "status",
+          "createdAt"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Stable kebab-case slug; equals the rkey.",
+            "maxLength": 64
+          },
+          "label": {
+            "type": "string",
+            "maxLength": 800,
+            "maxGraphemes": 80
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 6000,
+            "maxGraphemes": 600
+          },
+          "broader": {
+            "type": "array",
+            "description": "AT-URIs of parent skill records (is-a / part-of). Multi-parent allowed. Weak refs by identity, not version, because taxonomy nodes are edited in place.",
+            "items": {
+              "type": "string",
+              "format": "at-uri"
+            },
+            "maxLength": 8
+          },
+          "prerequisites": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "at-uri"
+            },
+            "maxLength": 16
+          },
+          "externalIds": {
+            "type": "ref",
+            "ref": "#externalIds"
+          },
+          "status": {
+            "type": "string",
+            "knownValues": [
+              "canonical",
+              "proposed",
+              "deprecated"
+            ]
+          },
+          "replacedBy": {
+            "type": "string",
+            "format": "at-uri",
+            "description": "When deprecated, the node that supersedes this one."
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          }
+        }
+      }
+    },
+    "externalIds": {
+      "type": "object",
+      "properties": {
+        "esco": {
+          "type": "string",
+          "format": "uri"
+        },
+        "wikidata": {
+          "type": "string",
+          "description": "Wikidata QID, e.g. Q123",
+          "maxLength": 32
+        },
+        "onet": {
+          "type": "string",
+          "maxLength": 32
+        }
+      }
+    }
+  }
+}

@@ -1,29 +1,38 @@
 /**
- * Gathering-side publishing: every record the GATHERING writes about itself
- * and its programme, built from app rows and written through the actor port
- * (`putRecordAsGathering`) — never with a raw agent.
+ * Gathering-side publishing: every record the GATHERING writes about itself and its programme,
+ * built from app rows and written through the gathering actor port — never with a raw agent.
  *
- *  - `publishGathering`  policy, the gathering's calendar event + config, and
- *                        `schellingpoint.draft.gathering` at `self`
+ *  - `publishGathering`   policy, the gathering's calendar event + config, `gathering@self`
+ *                         (with `peers` and `tags`)
+ *  - `publishPolicy`      `freeschool.draft.policy` alone; `setPolicyThresholds` edits + republishes
  *  - `publishVenues` / `publishTracks` / `publishSlotGrids`
- *  - `publishSchedule`   per scheduled session: calendar event, config, slot
- *                        (+ a gathering-written stub proposal when the proposer
- *                        has not published their own — spec §11 phase 3)
- *  - `cancelSession` / `moveSession` / `republishSession`  (spec §6)
+ *  - `publishSchedule`    per scheduled session: calendar event, config, slot (+ a gathering-written
+ *                         stub proposal only when the proposer has no DID-backed record), then
+ *                         listing routing
+ *  - `moveSession` / `cancelSession`   the DESTRUCTIVE writes; reached only through `approvals.ts`
  *
- * Every rkey is deterministic (`docs/ATPROTO_IMPLEMENTATION.md` §2), so a
- * re-run rewrites the same records. When we hold the cid of a record we wrote
- * before, the write is CAS'd on it (`swapRecord`); on `InvalidSwap` (cid drift:
- * someone else rewrote or removed it) the current record is re-read from the
- * PDS and the write retried once against what is actually there.
+ * Idempotent: every rkey is deterministic, so a re-run rewrites the same records. Every write is
+ * CAS'd (`swapRecord`) on the cid we last saw — the one stored on the app row, else the one in
+ * `at_records` (read-your-writes), else `null` ("must not exist yet"). On `InvalidSwap` the live
+ * record is re-read from the PDS and the write retried once against its actual cid.
  *
- * Not `server-only`: the Playwright tests import it and inject fake deps. The
- * real deps (`actor.ts`, `write.ts`) are loaded lazily so importing this module
- * never pulls in a `server-only` module.
+ * A session already on the published schedule whose time or venue changed is NOT rewritten by
+ * `publishSchedule`: that is a move, and a move needs organiser approvals (spec §6).
+ *
+ * Server-only. The writer is injectable (`PublishDeps`) so failure-path tests can run the pipeline
+ * against a fake PDS (tests resolve `server-only` to Next's empty stub).
  */
-import { createAdminClient } from '@/lib/supabase/server'
+import 'server-only'
+import { sql, type Sql } from '@/lib/db'
 import { parseTimeInTimezone } from '@/lib/events/timezone'
-import type { DeleteAsGatheringInput, GatheringAction, PutAsGatheringInput } from './actor'
+import { readPolicyThresholds, validatePolicyThresholds, type GatheringPolicyThresholds } from '@/lib/events/policy'
+import type { Approval, DeleteAsGatheringInput, GatheringAction, PutAsGatheringInput } from './actor'
+import { GatheringNotLinkedError } from './actor'
+import { actorDidForEvent, deleteRecordAsGathering, putRecordAsGathering } from './actors'
+import { getIndexedCid } from './index-store'
+import { getRecord } from './write'
+// A function-only import cycle (listings uses publish's writer, publish routes listings after a slot).
+import { routeSessionListing } from './listings'
 import { EVENT_STATUS, NSID } from './nsids'
 import {
   addressLocation,
@@ -37,17 +46,22 @@ import {
   buildSlotRecord,
   buildTrackRecord,
   buildVenueRecord,
+  looksLikeUrl,
+  normalizeTags,
+  venueLocation,
   type ProposalSessionInput,
 } from './records'
 import { deterministicRkey, SELF_RKEY } from './rkey'
-import type { GatheringPhase, SlotRecord, StrongRef } from './types'
+import type { CalendarEventRecord, GatheringPhase, SlotRecord, StrongRef } from './types'
 import type { FetchedRecord } from './write'
+
+export { GatheringNotLinkedError }
 
 /* ────────────────────────────── contracts ────────────────────────────── */
 
 export interface PublishInput {
   eventId: string
-  /** Supabase user id of the organizer acting; `null` only for trusted server jobs. */
+  /** `accounts.id` of the organiser acting; `null` only for trusted server jobs. */
   callerUserId: string | null
 }
 
@@ -65,12 +79,17 @@ export interface PublishResult {
     | 'proposal-stub'
     | 'slot'
     | 'slot-superseded'
+    | 'listing'
     | 'tally'
+    | 'series'
+    | 'occurrence'
   /** App-side id the record was built from (event, venue, track, session, grid key). */
   id: string
   uri?: string
   cid?: string
   error?: string
+  /** A deliberate skip that is not a failure (e.g. a moved session awaiting approval). */
+  skipped?: string
 }
 
 export interface PublishOutput {
@@ -79,54 +98,34 @@ export interface PublishOutput {
 
 export type WriteResult = { uri: string; cid: string; auditId: string }
 
-/**
- * The writer, injectable so tests run the whole pipeline against a fake PDS.
- * Defaults: the gathering actor port + unauthenticated `getRecord`.
- */
+/** The writer, injectable so failure-path tests run the pipeline against a fake PDS. */
 export interface PublishDeps {
   put: (input: PutAsGatheringInput) => Promise<WriteResult>
   del: (input: DeleteAsGatheringInput) => Promise<{ auditId: string }>
   getRecord: <T = Record<string, unknown>>(repo: string, collection: string, rkey: string) => Promise<FetchedRecord<T> | null>
-  /** `events.actor_did` for the event; throws when the gathering is not linked. */
+  /** `events.actor_did`; throws `GatheringNotLinkedError`. */
   actorDidFor: (eventId: string) => Promise<string>
+  /** The cid we last saw for a uri (read-your-writes index). */
+  indexedCid: (uri: string) => Promise<string | null>
   /** Write uris/cids back to app tables. Tests pass `false`. */
   persist: boolean
 }
 
-export class GatheringNotLinkedError extends Error {
-  constructor(readonly eventId: string) {
-    super(`event ${eventId} has no gathering actor (events.actor_did is null)`)
-    this.name = 'GatheringNotLinkedError'
-  }
-}
-
-let cachedDeps: PublishDeps | undefined
-
-/** The production writer. Loaded lazily because `actor.ts` and `write.ts` are `server-only`. */
+/** The production writer: the gathering actor registry, unauthenticated reads, the index. */
 export async function defaultDeps(): Promise<PublishDeps> {
-  if (!cachedDeps) {
-    const [actor, write] = await Promise.all([import('./actor'), import('./write')])
-    cachedDeps = {
-      put: actor.putRecordAsGathering,
-      del: actor.deleteRecordAsGathering,
-      getRecord: write.getRecord,
-      actorDidFor: async (eventId) => {
-        const db = await createAdminClient()
-        const { data, error } = await db.from('events').select('actor_did').eq('id', eventId).maybeSingle()
-        if (error) throw new Error(`events get: ${error.message}`)
-        const did = (data?.actor_did as string | null) ?? null
-        if (!did) throw new GatheringNotLinkedError(eventId)
-        return did
-      },
-      persist: true,
-    }
+  return {
+    put: putRecordAsGathering,
+    del: deleteRecordAsGathering,
+    getRecord,
+    actorDidFor: actorDidForEvent,
+    indexedCid: (uri) => getIndexedCid(uri),
+    persist: true,
   }
-  return cachedDeps
 }
 
 /* ─────────────────────────────── rows ─────────────────────────────── */
 
-interface EventRow {
+export interface EventRow {
   id: string
   slug: string
   name: string
@@ -138,6 +137,7 @@ interface EventRow {
   location_name: string | null
   location_address: string | null
   status: string
+  visibility: string
   vote_credits_per_user: number | null
   voting_mechanism: string | null
   voting_opens_at: string | null
@@ -151,12 +151,14 @@ interface EventRow {
   max_attendees: number | null
   created_at: string
   updated_at: string | null
+  actor_did: string | null
   gathering_uri: string | null
   gathering_cid: string | null
   calendar_event_uri: string | null
   calendar_event_cid: string | null
   policy_uri: string | null
   atproto_tags: string[] | null
+  policy_thresholds: unknown
 }
 
 interface VenueRow {
@@ -167,6 +169,11 @@ interface VenueRow {
   features: string[] | null
   style: string | null
   address: string | null
+  locality: string | null
+  region: string | null
+  postal_code: string | null
+  country: string | null
+  is_private_residence: boolean
   notes: string | null
   is_primary: boolean | null
   created_at: string
@@ -183,6 +190,7 @@ interface TrackRow {
   is_active: boolean | null
   max_sessions: number | null
   display_order: number | null
+  skill_uris: string[] | null
   created_at: string
   at_uri: string | null
   at_cid: string | null
@@ -195,27 +203,32 @@ interface TimeSlotRow {
   label: string | null
   is_break: boolean | null
   venue_id: string | null
-  day_date: string
+  day_date: string | null
   created_at: string
 }
 
 export interface SessionRow {
   id: string
+  event_id: string
   title: string
   description: string | null
   format: string | null
   duration: number | null
   status: string
+  host_id: string | null
   venue_id: string | null
   time_slot_id: string | null
   track_id: string | null
   topic_tags: string[] | null
+  skill_uris: string[] | null
   expected_attendance: number | null
   required_features: string[] | null
   is_self_hosted: boolean | null
   self_hosted_start_time: string | null
   self_hosted_end_time: string | null
+  /** Exact address or meeting link: attendee-only, never written to a record (only `virtual` is derived). */
   custom_location: string | null
+  public_place: string | null
   created_at: string
   proposal_uri: string | null
   proposal_cid: string | null
@@ -223,43 +236,42 @@ export interface SessionRow {
   calendar_event_cid: string | null
   slot_uri: string | null
   slot_cid: string | null
+  cancelled_at: string | null
+  proposal_withdrawn_at: string | null
+  proposal_drift_cid: string | null
 }
-
-const SESSION_COLUMNS =
-  'id, title, description, format, duration, status, venue_id, time_slot_id, track_id, topic_tags, expected_attendance, ' +
-  'required_features, is_self_hosted, self_hosted_start_time, self_hosted_end_time, custom_location, created_at, ' +
-  'proposal_uri, proposal_cid, calendar_event_uri, calendar_event_cid, slot_uri, slot_cid'
-
-const VENUE_COLUMNS = 'id, name, slug, capacity, features, style, address, notes, is_primary, created_at, at_uri, at_cid'
-const TRACK_COLUMNS = 'id, name, slug, description, color, is_active, max_sessions, display_order, created_at, at_uri, at_cid'
-const TIME_SLOT_COLUMNS = 'id, start_time, end_time, label, is_break, venue_id, day_date, created_at'
 
 /* ─────────────────────────────── context ─────────────────────────────── */
 
-type Db = Awaited<ReturnType<typeof createAdminClient>>
-
 export interface PublishContext {
   deps: PublishDeps
-  db: Db
+  sql: Sql
   event: EventRow
   actorDid: string
   callerUserId: string | null
   appUrl: string
+  thresholds: GatheringPolicyThresholds
 }
 
 function appUrl(): string {
-  return (process.env.NEXT_PUBLIC_APP_URL?.trim() || 'https://schellingpoint.app').replace(/\/+$/, '')
+  return (process.env.NEXT_PUBLIC_APP_URL?.trim() || 'https://unconference.events').replace(/\/+$/, '')
 }
 
-/** @internal Load the event, its actor DID and the writer. Shared with `tally.ts`. */
+/** @internal Load the event, its actor DID and the writer. Shared with `tally.ts` and `approvals.ts`. */
 export async function loadPublishContext(input: PublishInput, deps?: PublishDeps): Promise<PublishContext> {
   const d = deps ?? (await defaultDeps())
-  const db = await createAdminClient()
-  const { data, error } = await db.from('events').select('*').eq('id', input.eventId).maybeSingle()
-  if (error) throw new Error(`events get: ${error.message}`)
-  if (!data) throw new Error(`event ${input.eventId} not found`)
+  const [event] = await sql<EventRow[]>`select * from events where id = ${input.eventId}`
+  if (!event) throw new Error(`event ${input.eventId} not found`)
   const actorDid = await d.actorDidFor(input.eventId)
-  return { deps: d, db, event: data as EventRow, actorDid, callerUserId: input.callerUserId, appUrl: appUrl() }
+  return {
+    deps: d,
+    sql,
+    event,
+    actorDid,
+    callerUserId: input.callerUserId,
+    appUrl: appUrl(),
+    thresholds: readPolicyThresholds(event.policy_thresholds),
+  }
 }
 
 export function gatheringUriFor(actorDid: string): string {
@@ -279,28 +291,43 @@ function isInvalidSwap(e: unknown): boolean {
   return err?.error === 'InvalidSwap' || /InvalidSwap/.test(err?.message ?? '')
 }
 
+export interface CasWriteInput {
+  action: GatheringAction
+  collection: string
+  rkey: string
+  record: object
+  reason: string
+  approvals?: Approval[]
+}
+
 /**
- * @internal Write through the port with CAS on the cid we last stored. On cid
- * drift, re-read the live record and retry once against its current cid
- * (`null` when it was removed, which asserts "must not exist").
+ * @internal Write through the port with CAS. `storedCid` (from the app row) wins; otherwise the
+ * index's cid; otherwise `null` = "must not exist". On `InvalidSwap` (someone else rewrote or
+ * removed the record) the live record is re-read and the write retried ONCE against its cid.
  */
-export async function putWithCas(
-  ctx: PublishContext,
-  input: { action: GatheringAction; collection: string; rkey: string; record: object; reason: string },
-  storedCid?: string | null,
-): Promise<WriteResult> {
+export async function putWithCas(ctx: PublishContext, input: CasWriteInput, storedCid?: string | null): Promise<WriteResult> {
+  const uri = `at://${ctx.actorDid}/${input.collection}/${input.rkey}`
+  const expected = storedCid ?? (await ctx.deps.indexedCid(uri))
   const base: PutAsGatheringInput = {
     eventId: ctx.event.id,
     callerUserId: ctx.callerUserId,
-    ...input,
+    action: input.action,
+    collection: input.collection,
+    rkey: input.rkey,
     record: input.record as Record<string, unknown>,
+    reason: input.reason,
+    ...(input.approvals ? { approvals: input.approvals } : {}),
   }
   try {
-    return await ctx.deps.put(storedCid ? { ...base, swapRecord: storedCid } : base)
+    return await ctx.deps.put({ ...base, swapRecord: expected ?? null })
   } catch (e) {
     if (!isInvalidSwap(e)) throw e
     const current = await ctx.deps.getRecord(ctx.actorDid, input.collection, input.rkey)
-    return ctx.deps.put({ ...base, swapRecord: current?.cid ?? null })
+    return ctx.deps.put({
+      ...base,
+      reason: `${input.reason} (retried after CAS mismatch)`,
+      swapRecord: current?.cid ?? null,
+    })
   }
 }
 
@@ -323,7 +350,7 @@ export async function attempt(
 
 /* ───────────────────────────── gathering ───────────────────────────── */
 
-const PHASE_BY_STATUS: Record<string, GatheringPhase> = {
+export const PHASE_BY_STATUS: Record<string, GatheringPhase> = {
   draft: 'draft',
   published: 'draft',
   proposals_open: 'proposals',
@@ -347,16 +374,17 @@ function dayBoundary(day: string, timezone: string, edge: 'start' | 'end'): Date
   return new Date(`${day}T${edge === 'start' ? '00:00' : '23:59'}:00Z`)
 }
 
-function policyRkey(eventId: string): string {
+export function policyRkey(eventId: string): string {
   return deterministicRkey('policy', eventId, 'v1')
 }
 
-function policyRecordFor(event: EventRow) {
+function policyRecordFor(event: EventRow, thresholds: GatheringPolicyThresholds) {
   return buildPolicyRecord({
     title: `${event.name} — participation policy`,
     version: '1',
     effectiveAt: event.updated_at ?? event.created_at,
     createdAt: event.created_at,
+    thresholds,
     config: {
       votingMechanism: event.voting_mechanism,
       creditsPerVoter: event.vote_credits_per_user,
@@ -372,30 +400,75 @@ function policyRecordFor(event: EventRow) {
   })
 }
 
-/**
- * Re-write the `freeschool.draft.policy` record in place (version "1"). Called
- * on its own when voting/proposal rules change; part of `publishGathering`.
- */
+async function writePolicy(ctx: PublishContext, results: PublishResult[], reason: string): Promise<StrongRef | null> {
+  const ref = await attempt(results, 'policy', ctx.event.id, () =>
+    putWithCas(ctx, {
+      action: 'write-policy',
+      collection: NSID.policy,
+      rkey: policyRkey(ctx.event.id),
+      record: policyRecordFor(ctx.event, ctx.thresholds),
+      reason,
+    }),
+  )
+  if (ref && ctx.deps.persist) await ctx.sql`update events set policy_uri = ${ref.uri} where id = ${ctx.event.id}`
+  return ref
+}
+
+/** Re-write the `freeschool.draft.policy` record in place (version "1"). */
 export async function publishPolicy(input: PublishInput, deps?: PublishDeps): Promise<PublishOutput> {
   const ctx = await loadPublishContext(input, deps)
   const results: PublishResult[] = []
-  const ref = await attempt(results, 'policy', ctx.event.id, () =>
-    putWithCas(ctx, {
-      action: 'publish-policy',
-      collection: NSID.policy,
-      rkey: policyRkey(ctx.event.id),
-      record: policyRecordFor(ctx.event),
-      reason: `publish policy for "${ctx.event.name}" (voting/proposal rules)`,
-    }),
-  )
-  if (ref && ctx.deps.persist) await ctx.db.from('events').update({ policy_uri: ref.uri }).eq('id', ctx.event.id)
+  await writePolicy(ctx, results, `publish policy for "${ctx.event.name}" (thresholds and participation rules)`)
   return { results }
 }
 
+export class PolicyThresholdsError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly field?: string,
+  ) {
+    super(message)
+    this.name = 'PolicyThresholdsError'
+  }
+}
+
 /**
- * Policy → the gathering's own calendar event → its config → the
- * `schellingpoint.draft.gathering` record at `self`. Persists uris/cids on
- * `events` and stamps `atproto_published_at`.
+ * Organisers set `destructiveActionStewards` (1..5), `feedbackK` (2..10) and `publishRoles`.
+ * Owner/admin only. Stored on `events.policy_thresholds` (package A's column) and, when the
+ * gathering is linked, re-published as the policy record in the same call. A partial object is
+ * merged over the current thresholds.
+ */
+export async function setPolicyThresholds(
+  eventId: string,
+  callerUserId: string,
+  thresholds: Partial<GatheringPolicyThresholds>,
+  deps?: PublishDeps,
+): Promise<{ thresholds: GatheringPolicyThresholds; results: PublishResult[] }> {
+  const [row] = await sql<{ policy_thresholds: unknown; actor_did: string | null; role: string | null }[]>`
+    select e.policy_thresholds, e.actor_did,
+           (select m.role from event_members m where m.event_id = e.id and m.user_id = ${callerUserId}) as role
+    from events e where e.id = ${eventId}
+  `
+  if (!row) throw new PolicyThresholdsError('Event not found', 404)
+  if (row.role !== 'owner' && row.role !== 'admin') throw new PolicyThresholdsError('Only an owner or admin can change the policy', 403)
+  const validated = validatePolicyThresholds(thresholds, readPolicyThresholds(row.policy_thresholds))
+  if (!validated.ok) throw new PolicyThresholdsError(validated.error, 400, validated.field)
+  await sql`update events set policy_thresholds = ${sql.json(validated.value as never)}, updated_at = now() where id = ${eventId}`
+  if (!row.actor_did) return { thresholds: validated.value, results: [] }
+  const { results } = await publishPolicy({ eventId, callerUserId }, deps)
+  return { thresholds: validated.value, results }
+}
+
+/** `schellingpoint.draft.gathering#handleDomain` is format `handle`: a bare label (local `test`) is not one. */
+function handleDomainForRecord(): string | null {
+  const domain = (process.env.PDS_HANDLE_DOMAIN ?? '').trim().replace(/^\.+/, '').toLowerCase()
+  return /^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$/.test(domain) ? domain : null
+}
+
+/**
+ * Policy → the gathering's own calendar event → its config → `schellingpoint.draft.gathering`
+ * at `self` with `peers` (peer gathering DIDs — organisations, never people) and `tags`.
  */
 export async function publishGathering(input: PublishInput, deps?: PublishDeps): Promise<PublishOutput> {
   const ctx = await loadPublishContext(input, deps)
@@ -405,23 +478,15 @@ export async function publishGathering(input: PublishInput, deps?: PublishDeps):
   const eventUrl = `${ctx.appUrl}/e/${event.slug}`
   const startsAt = dayBoundary(event.start_date, event.timezone, 'start')
   const endsAt = dayBoundary(event.end_date, event.timezone, 'end')
+  const phase = PHASE_BY_STATUS[event.status] ?? 'draft'
 
-  const policy = await attempt(results, 'policy', event.id, () =>
-    putWithCas(ctx, {
-      action: 'publish-policy',
-      collection: NSID.policy,
-      rkey: policyRkey(event.id),
-      record: policyRecordFor(event),
-      reason: `publish gathering "${event.name}": policy`,
-    }),
-  )
-  if (policy) update.policy_uri = policy.uri
+  const policy = await writePolicy(ctx, results, `publish gathering "${event.name}": policy`)
 
   const calendar = await attempt(results, 'gathering-event', event.id, () =>
     putWithCas(
       ctx,
       {
-        action: 'publish-event',
+        action: 'publish-gathering',
         collection: NSID.event,
         rkey: deterministicRkey('gathering', event.id),
         record: buildGatheringCalendarEvent({
@@ -429,10 +494,8 @@ export async function publishGathering(input: PublishInput, deps?: PublishDeps):
           description: event.description ?? event.tagline,
           startsAt,
           endsAt,
-          locations: event.location_address
-            ? [addressLocation({ name: event.location_name, street: event.location_address })]
-            : null,
-          uris: [{ uri: eventUrl, name: 'Schelling Point' }],
+          locations: event.location_address ? [addressLocation({ name: event.location_name, street: event.location_address })] : null,
+          uris: [{ uri: eventUrl, name: event.name.slice(0, 100) }],
           createdAt: event.created_at,
         }),
         reason: `publish gathering "${event.name}": calendar event`,
@@ -440,78 +503,101 @@ export async function publishGathering(input: PublishInput, deps?: PublishDeps):
       event.calendar_event_cid,
     ),
   )
-  if (calendar) {
-    update.calendar_event_uri = calendar.uri
-    update.calendar_event_cid = calendar.cid
+  if (!calendar) return { results }
+  update.calendar_event_uri = calendar.uri
+  update.calendar_event_cid = calendar.cid
 
-    await attempt(results, 'gathering-config', event.id, () =>
-      putWithCas(ctx, {
-        action: 'publish-event',
-        collection: NSID.eventConfig,
-        rkey: deterministicRkey('config', event.id),
-        record: buildEventConfig({
+  await attempt(results, 'gathering-config', event.id, () =>
+    putWithCas(ctx, {
+      action: 'publish-gathering',
+      collection: NSID.eventConfig,
+      rkey: deterministicRkey('config', event.id),
+      record: buildEventConfig({
+        event: calendar,
+        timezone: event.timezone,
+        capacity: event.max_attendees,
+        gatheringDid: actorDid,
+        tags: event.atproto_tags,
+        createdAt: event.created_at,
+      }),
+      reason: `publish gathering "${event.name}": event config`,
+    }),
+  )
+
+  const peers = await ctx.sql<{ peer_did: string }[]>`
+    select peer_did from peers where event_id = ${event.id} and peer_did <> ${actorDid} order by created_at limit 100
+  `
+  const gathering = await attempt(results, 'gathering', event.id, () =>
+    putWithCas(
+      ctx,
+      {
+        action: 'publish-gathering',
+        collection: NSID.gathering,
+        rkey: SELF_RKEY,
+        record: buildGatheringRecord({
+          name: event.name,
+          description: event.description ?? event.tagline,
+          region: event.location_name,
+          startsAt,
+          endsAt,
           event: calendar,
-          timezone: event.timezone,
-          capacity: event.max_attendees,
-          gatheringDid: actorDid,
+          phase,
+          policy: policy?.uri ?? event.policy_uri,
+          handleDomain: handleDomainForRecord(),
+          website: eventUrl,
+          peers: peers.map((p) => p.peer_did),
           tags: event.atproto_tags,
           createdAt: event.created_at,
         }),
-        reason: `publish gathering "${event.name}": event config`,
-      }),
-    )
-
-    const gathering = await attempt(results, 'gathering', event.id, () =>
-      putWithCas(
-        ctx,
-        {
-          action: 'publish-gathering',
-          collection: NSID.gathering,
-          rkey: SELF_RKEY,
-          record: buildGatheringRecord({
-            name: event.name,
-            description: event.description ?? event.tagline,
-            region: event.location_name,
-            startsAt,
-            endsAt,
-            event: calendar,
-            phase: PHASE_BY_STATUS[event.status] ?? 'draft',
-            policy: policy?.uri ?? event.policy_uri,
-            website: eventUrl,
-            tags: event.atproto_tags,
-            createdAt: event.created_at,
-          }),
-          reason: `publish gathering "${event.name}": gathering record (phase ${PHASE_BY_STATUS[event.status] ?? 'draft'})`,
-        },
-        event.gathering_cid,
-      ),
-    )
-    if (gathering) {
-      update.gathering_uri = gathering.uri
-      update.gathering_cid = gathering.cid
-      update.atproto_published_at = new Date().toISOString()
-    }
+        reason: `publish gathering "${event.name}": gathering record (phase ${phase}, ${peers.length} peers)`,
+      },
+      event.gathering_cid,
+    ),
+  )
+  if (gathering) {
+    update.gathering_uri = gathering.uri
+    update.gathering_cid = gathering.cid
   }
 
-  if (ctx.deps.persist && Object.keys(update).length) {
-    const { error } = await ctx.db.from('events').update(update).eq('id', event.id)
-    if (error) results.push({ kind: 'gathering', id: event.id, error: `persist: ${error.message}` })
+  if (ctx.deps.persist) {
+    await ctx.sql`
+      update events set
+        calendar_event_uri = ${(update.calendar_event_uri as string) ?? event.calendar_event_uri},
+        calendar_event_cid = ${(update.calendar_event_cid as string) ?? event.calendar_event_cid},
+        gathering_uri = ${(update.gathering_uri as string) ?? event.gathering_uri},
+        gathering_cid = ${(update.gathering_cid as string) ?? event.gathering_cid},
+        atproto_published_at = case when ${!!gathering} then now() else atproto_published_at end
+      where id = ${event.id}
+    `
   }
   return { results }
 }
 
 /* ─────────────────────────── venues / tracks ─────────────────────────── */
 
-function venueLocation(venue: Pick<VenueRow, 'name' | 'address'>) {
-  return addressLocation({ name: venue.name, street: venue.address })
+const venueSelect = (db: Sql) => db`
+  id, name, slug, capacity, features, style, address, locality, region, postal_code, country,
+  is_private_residence, notes, is_primary, created_at, at_uri, at_cid
+`
+
+function locationOfVenue(venue: VenueRow) {
+  return venueLocation({
+    name: venue.name,
+    street: venue.address,
+    locality: venue.locality,
+    region: venue.region,
+    postalCode: venue.postal_code,
+    country: venue.country,
+    privateResidence: venue.is_private_residence,
+  })
 }
 
 export async function publishVenues(input: PublishInput, deps?: PublishDeps): Promise<PublishOutput> {
   const ctx = await loadPublishContext(input, deps)
   const results: PublishResult[] = []
-  const { data, error } = await ctx.db.from('venues').select(VENUE_COLUMNS).eq('event_id', ctx.event.id).order('created_at')
-  if (error) throw new Error(`venues list: ${error.message}`)
-  for (const venue of (data ?? []) as VenueRow[]) {
+  const venues = await ctx.sql<VenueRow[]>`select ${venueSelect(ctx.sql)} from venues where event_id = ${ctx.event.id} order by created_at, id`
+  for (const venue of venues) {
+    const location = locationOfVenue(venue)
     const ref = await attempt(results, 'venue', venue.id, () =>
       putWithCas(
         ctx,
@@ -526,16 +612,17 @@ export async function publishVenues(input: PublishInput, deps?: PublishDeps): Pr
             features: venue.features,
             style: venue.style,
             primary: venue.is_primary,
-            locations: venue.address ? [venueLocation(venue)] : null,
-            notes: venue.notes,
+            locations: location ? [location] : null,
+            // Notes on a private home are exactly where a door code ends up: never published.
+            notes: venue.is_private_residence ? null : venue.notes,
             createdAt: venue.created_at,
           }),
-          reason: `publish venue "${venue.name}"`,
+          reason: `publish venue "${venue.name}"${venue.is_private_residence ? ' (private residence: locality only)' : ''}`,
         },
         venue.at_cid,
       ),
     )
-    if (ref && ctx.deps.persist) await ctx.db.from('venues').update({ at_uri: ref.uri, at_cid: ref.cid }).eq('id', venue.id)
+    if (ref && ctx.deps.persist) await ctx.sql`update venues set at_uri = ${ref.uri}, at_cid = ${ref.cid} where id = ${venue.id}`
   }
   return { results }
 }
@@ -543,9 +630,11 @@ export async function publishVenues(input: PublishInput, deps?: PublishDeps): Pr
 export async function publishTracks(input: PublishInput, deps?: PublishDeps): Promise<PublishOutput> {
   const ctx = await loadPublishContext(input, deps)
   const results: PublishResult[] = []
-  const { data, error } = await ctx.db.from('tracks').select(TRACK_COLUMNS).eq('event_id', ctx.event.id).order('display_order')
-  if (error) throw new Error(`tracks list: ${error.message}`)
-  for (const track of (data ?? []) as TrackRow[]) {
+  const tracks = await ctx.sql<TrackRow[]>`
+    select id, name, slug, description, color, is_active, max_sessions, display_order, skill_uris, created_at, at_uri, at_cid
+    from tracks where event_id = ${ctx.event.id} order by display_order nulls last, created_at, id
+  `
+  for (const track of tracks) {
     const ref = await attempt(results, 'track', track.id, () =>
       putWithCas(
         ctx,
@@ -558,6 +647,7 @@ export async function publishTracks(input: PublishInput, deps?: PublishDeps): Pr
             slug: track.slug,
             description: track.description,
             color: track.color,
+            skills: track.skill_uris,
             maxSessions: track.max_sessions,
             displayOrder: track.display_order,
             active: track.is_active,
@@ -568,34 +658,40 @@ export async function publishTracks(input: PublishInput, deps?: PublishDeps): Pr
         track.at_cid,
       ),
     )
-    if (ref && ctx.deps.persist) await ctx.db.from('tracks').update({ at_uri: ref.uri, at_cid: ref.cid }).eq('id', track.id)
+    if (ref && ctx.deps.persist) await ctx.sql`update tracks set at_uri = ${ref.uri}, at_cid = ${ref.cid} where id = ${track.id}`
   }
   return { results }
 }
 
 /* ───────────────────────────── slot grids ───────────────────────────── */
 
+function localDay(iso: string, timezone: string): string {
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(iso))
+  return parts
+}
+
 /** One `schellingpoint.draft.slotGrid` per (venue, day) built from `time_slots`. */
 export async function publishSlotGrids(input: PublishInput, deps?: PublishDeps): Promise<PublishOutput> {
   const ctx = await loadPublishContext(input, deps)
   const results: PublishResult[] = []
-  const [slotsRes, venuesRes, gridsRes] = await Promise.all([
-    ctx.db.from('time_slots').select(TIME_SLOT_COLUMNS).eq('event_id', ctx.event.id).order('start_time'),
-    ctx.db.from('venues').select('id, at_uri').eq('event_id', ctx.event.id),
-    ctx.db.from('at_slot_grids').select('id, venue_id, day_date, uri, cid').eq('event_id', ctx.event.id),
+  const [slots, venues, grids] = await Promise.all([
+    ctx.sql<TimeSlotRow[]>`
+      select id, start_time, end_time, label, is_break, venue_id, day_date, created_at
+      from time_slots where event_id = ${ctx.event.id} order by start_time, id
+    `,
+    ctx.sql<{ id: string; at_uri: string | null }[]>`select id, at_uri from venues where event_id = ${ctx.event.id}`,
+    ctx.sql<{ id: string; venue_id: string | null; day_date: string; uri: string | null; cid: string | null }[]>`
+      select id, venue_id, day_date, uri, cid from at_slot_grids where event_id = ${ctx.event.id}
+    `,
   ])
-  if (slotsRes.error) throw new Error(`time_slots list: ${slotsRes.error.message}`)
-  const venueUri = new Map<string, string | null>()
-  for (const v of (venuesRes.data ?? []) as Array<{ id: string; at_uri: string | null }>) venueUri.set(v.id, v.at_uri)
-  const existing = new Map<string, { id: string; uri: string | null; cid: string | null }>()
-  for (const g of (gridsRes.data ?? []) as Array<{ id: string; venue_id: string | null; day_date: string; uri: string | null; cid: string | null }>) {
-    existing.set(`${g.venue_id ?? ''}|${g.day_date}`, g)
-  }
+  const venueUri = new Map(venues.map((v) => [v.id, v.at_uri]))
+  const existing = new Map(grids.map((g) => [`${g.venue_id ?? ''}|${g.day_date}`, g]))
 
   const groups = new Map<string, { venueId: string | null; day: string; slots: TimeSlotRow[] }>()
-  for (const slot of (slotsRes.data ?? []) as TimeSlotRow[]) {
-    const key = `${slot.venue_id ?? ''}|${slot.day_date}`
-    const group = groups.get(key) ?? { venueId: slot.venue_id, day: slot.day_date, slots: [] }
+  for (const slot of slots) {
+    const day = slot.day_date ?? localDay(slot.start_time, ctx.event.timezone)
+    const key = `${slot.venue_id ?? ''}|${day}`
+    const group = groups.get(key) ?? { venueId: slot.venue_id, day, slots: [] }
     group.slots.push(slot)
     groups.set(key, group)
   }
@@ -614,22 +710,22 @@ export async function publishSlotGrids(input: PublishInput, deps?: PublishDeps):
             venue: group.venueId ? venueUri.get(group.venueId) : null,
             day: group.day,
             timezone: ctx.event.timezone,
-            slots: group.slots.map((s) => ({
-              startsAt: s.start_time,
-              endsAt: s.end_time,
-              label: s.label,
-              kind: s.is_break ? 'break' : 'session',
-            })),
-            createdAt: group.slots.reduce((min, s) => (s.created_at < min ? s.created_at : min), group.slots[0].created_at),
+            slots: group.slots.map((s) => ({ startsAt: s.start_time, endsAt: s.end_time, label: s.label, kind: s.is_break ? 'break' : 'session' })),
+            createdAt: group.slots.reduce((min, s) => (s.created_at < min ? s.created_at : min), group.slots[0]!.created_at),
           }),
-          reason: `publish slot grid for ${group.day}${group.venueId ? ` (venue ${group.venueId})` : ''}`,
+          reason: `publish slot grid for ${group.day}`,
         },
         prior?.cid,
       ),
     )
     if (ref && ctx.deps.persist) {
-      if (prior) await ctx.db.from('at_slot_grids').update({ uri: ref.uri, cid: ref.cid }).eq('id', prior.id)
-      else await ctx.db.from('at_slot_grids').insert({ event_id: ctx.event.id, venue_id: group.venueId, day_date: group.day, uri: ref.uri, cid: ref.cid })
+      if (prior) await ctx.sql`update at_slot_grids set uri = ${ref.uri}, cid = ${ref.cid} where id = ${prior.id}`
+      else {
+        await ctx.sql`
+          insert into at_slot_grids (event_id, venue_id, day_date, uri, cid)
+          values (${ctx.event.id}, ${group.venueId}, ${group.day}, ${ref.uri}, ${ref.cid})
+        `
+      }
     }
   }
   return { results }
@@ -637,48 +733,87 @@ export async function publishSlotGrids(input: PublishInput, deps?: PublishDeps):
 
 /* ────────────────────────────── schedule ────────────────────────────── */
 
-interface SessionBundle {
+export interface SessionBundle {
   session: SessionRow
   slot: TimeSlotRow | null
   venue: VenueRow | null
   track: TrackRow | null
 }
 
-async function loadSessions(ctx: PublishContext, sessionIds?: string[]): Promise<SessionBundle[]> {
-  let query = ctx.db.from('sessions').select(SESSION_COLUMNS).eq('event_id', ctx.event.id)
-  query = sessionIds ? query.in('id', sessionIds) : query.eq('status', 'scheduled').not('time_slot_id', 'is', null)
-  const [sessionsRes, venuesRes, tracksRes] = await Promise.all([
-    query.order('created_at'),
-    ctx.db.from('venues').select(VENUE_COLUMNS).eq('event_id', ctx.event.id),
-    ctx.db.from('tracks').select(TRACK_COLUMNS).eq('event_id', ctx.event.id),
+const sessionSelect = (db: Sql) => db`
+  id, event_id, title, description, format, duration, status, host_id, venue_id, time_slot_id, track_id, topic_tags,
+  skill_uris, expected_attendance, required_features, is_self_hosted, self_hosted_start_time, self_hosted_end_time,
+  custom_location, public_place, created_at, proposal_uri, proposal_cid, calendar_event_uri, calendar_event_cid, slot_uri, slot_cid,
+  cancelled_at, proposal_withdrawn_at, proposal_drift_cid
+`
+
+export async function loadSessionBundles(
+  ctx: PublishContext,
+  sessionIds?: string[],
+  overrideSlot?: { sessionId: string; timeSlotId: string; venueId: string | null },
+): Promise<SessionBundle[]> {
+  const sessions = sessionIds
+    ? await ctx.sql<SessionRow[]>`
+        select ${sessionSelect(ctx.sql)} from sessions where event_id = ${ctx.event.id} and id in ${ctx.sql(sessionIds)} order by created_at, id
+      `
+    : await ctx.sql<SessionRow[]>`
+        select ${sessionSelect(ctx.sql)} from sessions
+        where event_id = ${ctx.event.id} and status = 'scheduled' and time_slot_id is not null
+        order by created_at, id
+      `
+  if (!sessions.length) return []
+  const slotIds = [
+    ...new Set(
+      sessions
+        .map((s) => (overrideSlot && s.id === overrideSlot.sessionId ? overrideSlot.timeSlotId : s.time_slot_id))
+        .filter((id): id is string => !!id),
+    ),
+  ]
+  const [slots, venues, tracks] = await Promise.all([
+    slotIds.length
+      ? ctx.sql<TimeSlotRow[]>`
+          select id, start_time, end_time, label, is_break, venue_id, day_date, created_at
+          from time_slots where event_id = ${ctx.event.id} and id in ${ctx.sql(slotIds)}
+        `
+      : Promise.resolve([] as TimeSlotRow[]),
+    ctx.sql<VenueRow[]>`select ${venueSelect(ctx.sql)} from venues where event_id = ${ctx.event.id}`,
+    ctx.sql<TrackRow[]>`
+      select id, name, slug, description, color, is_active, max_sessions, display_order, skill_uris, created_at, at_uri, at_cid
+      from tracks where event_id = ${ctx.event.id}
+    `,
   ])
-  if (sessionsRes.error) throw new Error(`sessions list: ${sessionsRes.error.message}`)
-  const sessions = (sessionsRes.data ?? []) as unknown as SessionRow[]
-  const slotIds = sessions.map((s) => s.time_slot_id).filter((id): id is string => !!id)
-  const slotsRes = slotIds.length ? await ctx.db.from('time_slots').select(TIME_SLOT_COLUMNS).in('id', slotIds) : { data: [], error: null }
-  if (slotsRes.error) throw new Error(`time_slots list: ${slotsRes.error.message}`)
-  const slots = new Map(((slotsRes.data ?? []) as TimeSlotRow[]).map((s) => [s.id, s]))
-  const venues = new Map(((venuesRes.data ?? []) as VenueRow[]).map((v) => [v.id, v]))
-  const tracks = new Map(((tracksRes.data ?? []) as TrackRow[]).map((t) => [t.id, t]))
-  return sessions.map((session) => ({
-    session,
-    slot: session.time_slot_id ? (slots.get(session.time_slot_id) ?? null) : null,
-    venue: session.venue_id ? (venues.get(session.venue_id) ?? null) : null,
-    track: session.track_id ? (tracks.get(session.track_id) ?? null) : null,
-  }))
+  const slotById = new Map(slots.map((s) => [s.id, s]))
+  const venueById = new Map(venues.map((v) => [v.id, v]))
+  const trackById = new Map(tracks.map((t) => [t.id, t]))
+  return sessions.map((session) => {
+    const override = overrideSlot && session.id === overrideSlot.sessionId ? overrideSlot : null
+    const slot = slotById.get(override ? override.timeSlotId : (session.time_slot_id ?? '')) ?? null
+    const venueId = override ? (override.venueId ?? slot?.venue_id ?? null) : (session.venue_id ?? slot?.venue_id ?? null)
+    return {
+      session,
+      slot,
+      venue: venueId ? (venueById.get(venueId) ?? null) : null,
+      track: session.track_id ? (trackById.get(session.track_id) ?? null) : null,
+    }
+  })
 }
 
 function sessionUrl(ctx: PublishContext, sessionId: string): string {
   return `${ctx.appUrl}/e/${ctx.event.slug}/sessions/${sessionId}`
 }
 
-function sessionEventRkey(session: SessionRow): string {
+export function sessionEventRkey(session: Pick<SessionRow, 'id' | 'calendar_event_uri'>): string {
   return session.calendar_event_uri ? rkeyOf(session.calendar_event_uri) : deterministicRkey('session', session.id)
 }
 
 /** The slot record currently standing for this session (after a move it is the superseding one). */
-function currentSlotRkey(session: SessionRow): string {
+export function currentSlotRkey(session: Pick<SessionRow, 'id' | 'slot_uri'>): string {
   return session.slot_uri ? rkeyOf(session.slot_uri) : deterministicRkey('slot', session.id)
+}
+
+/** The rkey a move to `startsAt` writes its new slot under (so an approval can name it in advance). */
+export function movedSlotRkey(sessionId: string, startsAt: string): string {
+  return deterministicRkey('slot', sessionId, new Date(startsAt).toISOString())
 }
 
 function proposalInputFor(session: SessionRow): ProposalSessionInput {
@@ -693,18 +828,16 @@ function proposalInputFor(session: SessionRow): ProposalSessionInput {
     is_self_hosted: session.is_self_hosted,
     self_hosted_start_time: session.self_hosted_start_time,
     self_hosted_end_time: session.self_hosted_end_time,
-    custom_location: session.custom_location,
+    public_place: session.public_place,
     created_at: session.created_at,
-    imported_from: 'schellingpoint',
+    imported_from: 'unconference.events',
   }
 }
 
 /**
- * @internal The strongRef a slot/tally pins: the proposer's own published
- * proposal when there is one, else a gathering-written stub (`imported: true`,
- * no host name — spec §11 phase 3). The stub is idempotent, so callers simply
- * re-put it; its uri/cid are never stored in `sessions.proposal_*`, which is
- * reserved for the proposer's record.
+ * @internal The strongRef a slot/tally pins: the proposer's own DID-backed proposal when there is
+ * one, else a gathering-written stub (`imported: true`, no host name — spec §11 phase 3). The
+ * stub's uri/cid are never stored in `sessions.proposal_*`, which is reserved for the proposer.
  */
 export async function ensureProposalRef(
   ctx: PublishContext,
@@ -712,7 +845,9 @@ export async function ensureProposalRef(
   results: PublishResult[],
 ): Promise<StrongRef | null> {
   const { session, track } = bundle
-  if (session.proposal_uri && session.proposal_cid) return { uri: session.proposal_uri, cid: session.proposal_cid }
+  if (session.proposal_uri && session.proposal_cid && !session.proposal_withdrawn_at) {
+    return { uri: session.proposal_uri, cid: session.proposal_cid }
+  }
   return attempt(results, 'proposal-stub', session.id, () =>
     putWithCas(ctx, {
       action: 'publish-stub-proposal',
@@ -722,18 +857,21 @@ export async function ensureProposalRef(
         session: proposalInputFor(session),
         gatheringUri: gatheringUriFor(ctx.actorDid),
         trackUri: track?.at_uri,
+        skills: session.skill_uris,
       }),
-      reason: `stub proposal for "${session.title}" (proposer has not published one)`,
+      reason: `stub proposal for "${session.title}" (no DID-backed proposal from its author)`,
     }),
   )
 }
 
-function sessionEventRecord(
-  ctx: PublishContext,
-  bundle: SessionBundle,
-  times: { startsAt: string; endsAt: string },
-  status: 'scheduled' | 'rescheduled' | 'cancelled',
-) {
+/** Routing tags a scheduled session's config carries: its topics and its track's slug. */
+export function sessionTags(bundle: Pick<SessionBundle, 'session' | 'track'>): string[] {
+  return normalizeTags([...(bundle.session.topic_tags ?? []), bundle.track?.slug ?? null])
+}
+
+type EventStatusWord = 'scheduled' | 'rescheduled' | 'cancelled'
+
+function sessionEventRecord(ctx: PublishContext, bundle: SessionBundle, times: { startsAt: string; endsAt: string }, status: EventStatusWord): CalendarEventRecord {
   const { session, venue } = bundle
   const record = buildSessionCalendarEvent({
     name: session.title,
@@ -741,8 +879,9 @@ function sessionEventRecord(
     startsAt: times.startsAt,
     endsAt: times.endsAt,
     cancelled: status === 'cancelled',
-    customLocation: session.custom_location,
-    venueAddress: venue ? venueLocation(venue) : null,
+    virtual: looksLikeUrl(session.custom_location),
+    // A self-hosted session has no venue; its exact address stays app-side.
+    venueAddress: venue && !session.is_self_hosted ? locationOfVenue(venue) : null,
     sessionUrl: sessionUrl(ctx, session.id),
     createdAt: session.created_at,
   })
@@ -750,24 +889,25 @@ function sessionEventRecord(
 }
 
 interface SessionWriteOptions {
-  eventStatus: 'scheduled' | 'rescheduled'
+  eventStatus: EventStatusWord
   slotRkey: string
   slotCid?: string | null
   slotStatus: 'scheduled' | 'moved' | 'cancelled'
   supersedes?: StrongRef | null
   action: GatheringAction
   reasonPrefix: string
+  approvals?: Approval[]
 }
 
-/** Calendar event → config → (stub) proposal → slot, then persist on `sessions`. */
-async function writeSession(ctx: PublishContext, bundle: SessionBundle, results: PublishResult[], opts: SessionWriteOptions): Promise<void> {
+/** Calendar event → config → (stub) proposal → slot → listing, then persist on `sessions`. */
+async function writeSession(ctx: PublishContext, bundle: SessionBundle, results: PublishResult[], opts: SessionWriteOptions): Promise<boolean> {
   const { session, slot, venue, track } = bundle
   if (!slot) {
     results.push({ kind: 'session-event', id: session.id, error: 'session has no time slot' })
-    return
+    return false
   }
-  const times = { startsAt: slot.start_time, endsAt: slot.end_time }
-  const update: Record<string, unknown> = {}
+  const times = { startsAt: new Date(slot.start_time).toISOString(), endsAt: new Date(slot.end_time).toISOString() }
+  const tags = sessionTags(bundle)
 
   const calendar = await attempt(results, 'session-event', session.id, () =>
     putWithCas(
@@ -778,69 +918,81 @@ async function writeSession(ctx: PublishContext, bundle: SessionBundle, results:
         rkey: sessionEventRkey(session),
         record: sessionEventRecord(ctx, bundle, times, opts.eventStatus),
         reason: `${opts.reasonPrefix}: calendar event for "${session.title}"`,
+        approvals: opts.approvals,
       },
       session.calendar_event_cid,
     ),
   )
-  if (calendar) {
-    update.calendar_event_uri = calendar.uri
-    update.calendar_event_cid = calendar.cid
+  if (!calendar) return false
 
-    await attempt(results, 'session-config', session.id, () =>
-      putWithCas(ctx, {
-        action: opts.action,
-        collection: NSID.eventConfig,
-        rkey: deterministicRkey('config', session.id),
-        record: buildEventConfig({
-          event: calendar,
-          timezone: ctx.event.timezone,
-          capacity: venue?.capacity,
-          gatheringDid: ctx.actorDid,
-          tags: ctx.event.atproto_tags,
-          createdAt: session.created_at,
-        }),
-        reason: `${opts.reasonPrefix}: event config for "${session.title}"`,
+  await attempt(results, 'session-config', session.id, () =>
+    putWithCas(ctx, {
+      action: opts.action === 'move-slot' || opts.action === 'cancel-slot' ? 'publish-event' : opts.action,
+      collection: NSID.eventConfig,
+      rkey: deterministicRkey('config', session.id),
+      record: buildEventConfig({
+        event: calendar,
+        timezone: ctx.event.timezone,
+        capacity: venue?.capacity,
+        gatheringDid: ctx.actorDid,
+        tags,
+        createdAt: session.created_at,
       }),
+      reason: `${opts.reasonPrefix}: event config for "${session.title}"`,
+    }),
+  )
+
+  let slotRef: StrongRef | null = null
+  let pinnedProposal: StrongRef | null = null
+  const proposal = await ensureProposalRef(ctx, bundle, results)
+  if (proposal) {
+    pinnedProposal = proposal
+    slotRef = await attempt(results, 'slot', session.id, () =>
+      putWithCas(
+        ctx,
+        {
+          action: opts.action,
+          collection: NSID.slot,
+          rkey: opts.slotRkey,
+          record: buildSlotRecord({
+            gathering: gatheringUriFor(ctx.actorDid),
+            event: calendar,
+            proposal,
+            venue: venue?.at_uri,
+            track: track?.at_uri,
+            startsAt: times.startsAt,
+            endsAt: times.endsAt,
+            status: opts.slotStatus,
+            supersedes: opts.supersedes,
+            createdAt: session.created_at,
+          }),
+          reason: `${opts.reasonPrefix}: slot for "${session.title}"`,
+          approvals: opts.approvals,
+        },
+        opts.slotCid,
+      ),
     )
-
-    const proposal = await ensureProposalRef(ctx, bundle, results)
-    if (proposal) {
-      const slotRef = await attempt(results, 'slot', session.id, () =>
-        putWithCas(
-          ctx,
-          {
-            action: opts.action,
-            collection: NSID.slot,
-            rkey: opts.slotRkey,
-            record: buildSlotRecord({
-              gathering: gatheringUriFor(ctx.actorDid),
-              event: calendar,
-              proposal,
-              venue: venue?.at_uri,
-              track: track?.at_uri,
-              startsAt: times.startsAt,
-              endsAt: times.endsAt,
-              status: opts.slotStatus,
-              supersedes: opts.supersedes,
-              createdAt: session.created_at,
-            }),
-            reason: `${opts.reasonPrefix}: slot for "${session.title}"`,
-          },
-          opts.slotCid,
-        ),
-      )
-      if (slotRef) {
-        update.slot_uri = slotRef.uri
-        update.slot_cid = slotRef.cid
-        update.atproto_published_at = new Date().toISOString()
-      }
-    }
   }
 
-  if (ctx.deps.persist && Object.keys(update).length) {
-    const { error } = await ctx.db.from('sessions').update(update).eq('id', session.id)
-    if (error) results.push({ kind: 'slot', id: session.id, error: `persist: ${error.message}` })
+  if (ctx.deps.persist) {
+    const pinsCurrent = !!(pinnedProposal && session.proposal_cid && pinnedProposal.cid === session.proposal_cid)
+    await ctx.sql`
+      update sessions set
+        calendar_event_uri = ${calendar.uri},
+        calendar_event_cid = ${calendar.cid},
+        slot_uri = ${slotRef?.uri ?? session.slot_uri},
+        slot_cid = ${slotRef?.cid ?? session.slot_cid},
+        atproto_published_at = case when ${!!slotRef} then now() else atproto_published_at end,
+        proposal_drift_cid = case when ${!!slotRef && pinsCurrent} then null else proposal_drift_cid end,
+        proposal_drift_at = case when ${!!slotRef && pinsCurrent} then null else proposal_drift_at end
+      where id = ${session.id} and event_id = ${ctx.event.id}
+    `
   }
+
+  if (slotRef && opts.eventStatus !== 'cancelled') {
+    await routeSessionListing(ctx, { sessionId: session.id, event: calendar, tags }, results)
+  }
+  return !!slotRef
 }
 
 export interface PublishScheduleInput extends PublishInput {
@@ -848,20 +1000,51 @@ export interface PublishScheduleInput extends PublishInput {
   sessionIds?: string[]
 }
 
+/** True when a published slot and the app row disagree on time or venue: a MOVE, not a republish. */
+function differsFromPublished(live: SlotRecord, bundle: SessionBundle): boolean {
+  if (!bundle.slot) return false
+  return (
+    live.startsAt !== new Date(bundle.slot.start_time).toISOString() ||
+    live.endsAt !== new Date(bundle.slot.end_time).toISOString() ||
+    (live.venue ?? null) !== (bundle.venue?.at_uri ?? null)
+  )
+}
+
 /**
- * For every scheduled session: `community.lexicon.calendar.event`,
- * `coop.lexicon.event.config` and `schellingpoint.draft.slot` (pinning the
- * proposer's proposal or a stub). Idempotent; re-running rewrites in place.
+ * For every scheduled session: `community.lexicon.calendar.event`, `coop.lexicon.event.config`
+ * and `schellingpoint.draft.slot` pinning the proposer's proposal (or a stub), then listing
+ * routing. Idempotent. Sessions already published whose slot changed are skipped with
+ * `skipped: 'requires-approval'` — route them through `requestSessionMove`.
  */
 export async function publishSchedule(input: PublishScheduleInput, deps?: PublishDeps): Promise<PublishOutput> {
   const ctx = await loadPublishContext(input, deps)
   const results: PublishResult[] = []
-  for (const bundle of await loadSessions(ctx, input.sessionIds)) {
+  for (const bundle of await loadSessionBundles(ctx, input.sessionIds)) {
+    const { session } = bundle
+    let status: EventStatusWord = session.cancelled_at ? 'cancelled' : 'scheduled'
+    let supersedes: StrongRef | undefined
+    if (session.proposal_withdrawn_at && status !== 'cancelled') {
+      // We cannot resurrect someone else's record: the organisers cancel or re-fill the slot.
+      results.push({ kind: 'slot', id: session.id, skipped: 'proposal-withdrawn' })
+      continue
+    }
+    if (session.slot_uri) {
+      const live = await ctx.deps.getRecord<SlotRecord>(ctx.actorDid, NSID.slot, currentSlotRkey(session))
+      if (live && differsFromPublished(live.value, bundle)) {
+        results.push({ kind: 'slot', id: session.id, skipped: 'requires-approval' })
+        continue
+      }
+      supersedes = live?.value.supersedes
+      if (supersedes && status === 'scheduled') status = 'rescheduled'
+      if (live?.value.status === 'cancelled') status = 'cancelled'
+    }
+    if (session.proposal_drift_cid) await adoptDriftedProposal(ctx, bundle)
     await writeSession(ctx, bundle, results, {
-      eventStatus: 'scheduled',
-      slotRkey: currentSlotRkey(bundle.session),
-      slotCid: bundle.session.slot_cid,
-      slotStatus: 'scheduled',
+      eventStatus: status,
+      slotRkey: currentSlotRkey(session),
+      slotCid: session.slot_cid,
+      slotStatus: status === 'cancelled' ? 'cancelled' : 'scheduled',
+      supersedes,
       action: 'publish-slot',
       reasonPrefix: 'publish schedule',
     })
@@ -869,8 +1052,41 @@ export async function publishSchedule(input: PublishScheduleInput, deps?: Publis
   return { results }
 }
 
+/**
+ * "Review and re-publish" (spec §6): re-publishing a drifted session adopts the proposer's
+ * current record. The indexed record at the drifted cid replaces the public content on the app
+ * row, so the calendar event and the slot's strongRef move to the same version together.
+ */
+async function adoptDriftedProposal(ctx: PublishContext, bundle: SessionBundle): Promise<void> {
+  const { session } = bundle
+  if (!session.proposal_uri || !session.proposal_drift_cid) return
+  const [row] = await ctx.sql<{ cid: string | null; record: Record<string, unknown> }[]>`
+    select cid, record from at_records where uri = ${session.proposal_uri}
+  `
+  if (!row || row.cid !== session.proposal_drift_cid) return
+  const r = row.record as { title?: string; description?: string; topics?: string[]; skills?: string[]; expectedAttendance?: number; requiredFeatures?: string[] }
+  if (typeof r.title !== 'string') return
+  session.title = r.title
+  session.description = r.description ?? null
+  session.topic_tags = r.topics ?? []
+  session.skill_uris = (r.skills ?? []).slice(0, 5)
+  session.expected_attendance = r.expectedAttendance ?? null
+  session.required_features = r.requiredFeatures ?? []
+  session.proposal_cid = row.cid
+  if (ctx.deps.persist) {
+    await ctx.sql`
+      update sessions set title = ${session.title}, description = ${session.description}, topic_tags = ${session.topic_tags},
+        skill_uris = ${session.skill_uris}, expected_attendance = ${session.expected_attendance},
+        required_features = ${session.required_features}, proposal_cid = ${row.cid}, updated_at = now()
+      where id = ${session.id} and event_id = ${ctx.event.id}
+    `
+  }
+}
+
 export interface SessionInput extends PublishInput {
   sessionId: string
+  /** Organiser approvals backing a destructive write (`approvals.ts` collects them). */
+  approvals?: Approval[]
 }
 
 /** `publishSchedule` for one session. */
@@ -878,20 +1094,15 @@ export async function republishSession(input: SessionInput, deps?: PublishDeps):
   return publishSchedule({ eventId: input.eventId, callerUserId: input.callerUserId, sessionIds: [input.sessionId] }, deps)
 }
 
-async function loadOne(ctx: PublishContext, sessionId: string): Promise<SessionBundle | null> {
-  const [bundle] = await loadSessions(ctx, [sessionId])
-  return bundle ?? null
-}
-
 /**
- * Cancel a published session: the calendar event gets the base lexicon's
- * `status: cancelled`, the current slot `status: 'cancelled'`. The proposal is
- * never touched — it belongs to the proposer (spec §6).
+ * DESTRUCTIVE. Cancel a published session: the calendar event gets the base lexicon's
+ * `#cancelled` status, the current slot `status: 'cancelled'`. The proposal is never touched —
+ * it belongs to the proposer (spec §6). Needs `approvals` meeting the policy threshold.
  */
 export async function cancelSession(input: SessionInput, deps?: PublishDeps): Promise<PublishOutput> {
   const ctx = await loadPublishContext(input, deps)
   const results: PublishResult[] = []
-  const bundle = await loadOne(ctx, input.sessionId)
+  const [bundle] = await loadSessionBundles(ctx, [input.sessionId])
   if (!bundle) {
     results.push({ kind: 'session-event', id: input.sessionId, error: 'session not found in this event' })
     return { results }
@@ -902,19 +1113,18 @@ export async function cancelSession(input: SessionInput, deps?: PublishDeps): Pr
     return { results }
   }
   const [liveEvent, liveSlot] = await Promise.all([
-    ctx.deps.getRecord<{ startsAt?: string; endsAt?: string }>(ctx.actorDid, NSID.event, sessionEventRkey(session)),
+    ctx.deps.getRecord<CalendarEventRecord>(ctx.actorDid, NSID.event, sessionEventRkey(session)),
     ctx.deps.getRecord<SlotRecord>(ctx.actorDid, NSID.slot, currentSlotRkey(session)),
   ])
   const times =
-    bundle.slot ? { startsAt: bundle.slot.start_time, endsAt: bundle.slot.end_time }
+    liveSlot ? { startsAt: liveSlot.value.startsAt, endsAt: liveSlot.value.endsAt }
     : liveEvent?.value.startsAt && liveEvent.value.endsAt ? { startsAt: liveEvent.value.startsAt, endsAt: liveEvent.value.endsAt }
-    : liveSlot ? { startsAt: liveSlot.value.startsAt, endsAt: liveSlot.value.endsAt }
+    : bundle.slot ? { startsAt: bundle.slot.start_time, endsAt: bundle.slot.end_time }
     : null
   if (!times) {
     results.push({ kind: 'session-event', id: session.id, error: 'cannot determine the published times to cancel' })
     return { results }
   }
-  const update: Record<string, unknown> = {}
   const reason = `cancel session "${session.title}"`
 
   const calendar = await attempt(results, 'session-event', session.id, () =>
@@ -924,119 +1134,113 @@ export async function cancelSession(input: SessionInput, deps?: PublishDeps): Pr
         action: 'cancel-slot',
         collection: NSID.event,
         rkey: sessionEventRkey(session),
-        record: sessionEventRecord(ctx, bundle, times, 'cancelled'),
+        record: liveEvent
+          ? { ...liveEvent.value, status: EVENT_STATUS.cancelled }
+          : sessionEventRecord(ctx, bundle, times, 'cancelled'),
         reason: `${reason}: calendar event status cancelled`,
+        approvals: input.approvals,
       },
-      session.calendar_event_cid,
+      session.calendar_event_cid ?? liveEvent?.cid,
     ),
   )
-  if (calendar) {
-    update.calendar_event_uri = calendar.uri
-    update.calendar_event_cid = calendar.cid
-    const proposal = liveSlot?.value.proposal ?? (await ensureProposalRef(ctx, bundle, results))
-    if (proposal) {
-      const slotRef = await attempt(results, 'slot', session.id, () =>
-        putWithCas(
-          ctx,
-          {
-            action: 'cancel-slot',
-            collection: NSID.slot,
-            rkey: currentSlotRkey(session),
-            record: buildSlotRecord({
-              gathering: gatheringUriFor(ctx.actorDid),
-              event: calendar,
-              proposal,
-              venue: liveSlot?.value.venue ?? bundle.venue?.at_uri,
-              track: liveSlot?.value.track ?? bundle.track?.at_uri,
-              startsAt: times.startsAt,
-              endsAt: times.endsAt,
-              status: 'cancelled',
-              supersedes: liveSlot?.value.supersedes,
-              createdAt: liveSlot?.value.createdAt ?? session.created_at,
-            }),
-            reason: `${reason}: slot status cancelled`,
-          },
-          session.slot_cid,
-        ),
-      )
-      if (slotRef) {
-        update.slot_uri = slotRef.uri
-        update.slot_cid = slotRef.cid
-      }
-    }
+  if (!calendar) return { results }
+
+  let slotRef: StrongRef | null = null
+  const proposal = liveSlot?.value.proposal ?? (await ensureProposalRef(ctx, bundle, results))
+  if (proposal) {
+    slotRef = await attempt(results, 'slot', session.id, () =>
+      putWithCas(
+        ctx,
+        {
+          action: 'cancel-slot',
+          collection: NSID.slot,
+          rkey: currentSlotRkey(session),
+          record: buildSlotRecord({
+            gathering: gatheringUriFor(ctx.actorDid),
+            event: calendar,
+            proposal,
+            venue: liveSlot?.value.venue ?? bundle.venue?.at_uri,
+            track: liveSlot?.value.track ?? bundle.track?.at_uri,
+            startsAt: times.startsAt,
+            endsAt: times.endsAt,
+            status: 'cancelled',
+            supersedes: liveSlot?.value.supersedes,
+            createdAt: liveSlot?.value.createdAt ?? session.created_at,
+          }),
+          reason: `${reason}: slot status cancelled`,
+          approvals: input.approvals,
+        },
+        session.slot_cid ?? liveSlot?.cid,
+      ),
+    )
   }
-  if (ctx.deps.persist && Object.keys(update).length) {
-    const { error } = await ctx.db.from('sessions').update(update).eq('id', session.id)
-    if (error) results.push({ kind: 'slot', id: session.id, error: `persist: ${error.message}` })
+  if (ctx.deps.persist) {
+    await ctx.sql`
+      update sessions set
+        calendar_event_uri = ${calendar.uri}, calendar_event_cid = ${calendar.cid},
+        slot_uri = ${slotRef?.uri ?? session.slot_uri}, slot_cid = ${slotRef?.cid ?? session.slot_cid},
+        cancelled_at = case when ${!!slotRef} then coalesce(cancelled_at, now()) else cancelled_at end
+      where id = ${session.id} and event_id = ${ctx.event.id}
+    `
   }
   return { results }
 }
 
+export interface MoveSessionInput extends SessionInput {
+  /**
+   * Where the session moves to. When omitted, the session row's current `time_slot_id` /
+   * `venue_id` (an organiser already moved it in the schedule draft).
+   */
+  target?: { timeSlotId: string; venueId?: string | null }
+}
+
 /**
- * After the organizer moved a session in the app: a NEW slot record keyed on
- * the new start (`supersedes` → the previous slot), the calendar event updated
- * in place with `status: rescheduled` so subscribed calendars follow, and the
- * previous slot marked `moved`. Falls back to a plain (re)publish when the
- * session was never published or nothing actually changed.
+ * DESTRUCTIVE. A NEW slot record keyed on the new start (`supersedes` → the previous slot), the
+ * calendar event updated in place with `#rescheduled` so subscribed calendars follow, and the
+ * previous slot marked `moved`. Needs `approvals` meeting the policy threshold.
  */
-export async function moveSession(input: SessionInput, deps?: PublishDeps): Promise<PublishOutput> {
+export async function moveSession(input: MoveSessionInput, deps?: PublishDeps): Promise<PublishOutput> {
   const ctx = await loadPublishContext(input, deps)
   const results: PublishResult[] = []
-  const bundle = await loadOne(ctx, input.sessionId)
+  const override = input.target
+    ? { sessionId: input.sessionId, timeSlotId: input.target.timeSlotId, venueId: input.target.venueId ?? null }
+    : undefined
+  const [bundle] = await loadSessionBundles(ctx, [input.sessionId], override)
   if (!bundle) {
     results.push({ kind: 'session-event', id: input.sessionId, error: 'session not found in this event' })
     return { results }
   }
-  const { session, slot, venue } = bundle
+  const { session, slot } = bundle
   if (!slot) {
-    results.push({ kind: 'session-event', id: session.id, error: 'session has no time slot; cancel it or schedule it first' })
+    results.push({ kind: 'session-event', id: session.id, error: 'the target time slot does not exist in this event' })
     return { results }
   }
   if (!session.slot_uri || !session.slot_cid) {
-    await writeSession(ctx, bundle, results, {
-      eventStatus: 'scheduled',
-      slotRkey: currentSlotRkey(session),
-      slotCid: session.slot_cid,
-      slotStatus: 'scheduled',
-      action: 'publish-slot',
-      reasonPrefix: 'publish schedule (move requested but session was not yet published)',
-    })
+    results.push({ kind: 'slot', id: session.id, error: 'session is not on the published schedule; publish it instead of moving it' })
     return { results }
   }
 
   const previous = await ctx.deps.getRecord<SlotRecord>(ctx.actorDid, NSID.slot, currentSlotRkey(session))
-  const newStartsAt = new Date(slot.start_time).toISOString()
-  const unchanged =
-    previous &&
-    previous.value.startsAt === newStartsAt &&
-    previous.value.endsAt === new Date(slot.end_time).toISOString() &&
-    (previous.value.venue ?? null) === (venue?.at_uri ?? null)
-  if (unchanged) {
-    await writeSession(ctx, bundle, results, {
-      eventStatus: 'scheduled',
-      slotRkey: currentSlotRkey(session),
-      slotCid: session.slot_cid,
-      slotStatus: 'scheduled',
-      action: 'publish-slot',
-      reasonPrefix: 're-publish (move requested but the slot is unchanged)',
-    })
+  if (previous && !differsFromPublished(previous.value, bundle)) {
+    results.push({ kind: 'slot', id: session.id, skipped: 'unchanged' })
     return { results }
   }
-
-  const supersedes: StrongRef = { uri: session.slot_uri, cid: session.slot_cid }
-  await writeSession(ctx, bundle, results, {
+  const newStartsAt = new Date(slot.start_time).toISOString()
+  const supersedes: StrongRef = previous ? { uri: previous.uri, cid: previous.cid } : { uri: session.slot_uri, cid: session.slot_cid }
+  const moved = await writeSession(ctx, bundle, results, {
     eventStatus: 'rescheduled',
-    slotRkey: deterministicRkey('slot', session.id, newStartsAt),
+    slotRkey: movedSlotRkey(session.id, newStartsAt),
     slotCid: null,
     slotStatus: 'scheduled',
     supersedes,
     action: 'move-slot',
     reasonPrefix: `move session "${session.title}" to ${newStartsAt}`,
+    approvals: input.approvals,
   })
 
-  // Mark the slot people already have as superseded. Best effort: the new
-  // slot's `supersedes` link is the authoritative history either way.
-  if (previous) {
+  if (moved && previous && rkeyOf(previous.uri) !== movedSlotRkey(session.id, newStartsAt)) {
+    // Mark the slot people already have as superseded. The new slot's `supersedes` link is the
+    // authoritative history either way.
     await attempt(results, 'slot-superseded', session.id, () =>
       putWithCas(
         ctx,
@@ -1046,10 +1250,20 @@ export async function moveSession(input: SessionInput, deps?: PublishDeps): Prom
           rkey: rkeyOf(previous.uri),
           record: { ...previous.value, status: 'moved' },
           reason: `move session "${session.title}": previous slot marked moved`,
+          approvals: input.approvals,
         },
         previous.cid,
       ),
     )
+  }
+  if (moved && ctx.deps.persist) {
+    await ctx.sql`
+      update sessions set
+        time_slot_id = ${slot.id},
+        venue_id = ${bundle.venue?.id ?? null},
+        published_slot_id = ${slot.id}
+      where id = ${session.id} and event_id = ${ctx.event.id}
+    `
   }
   return { results }
 }

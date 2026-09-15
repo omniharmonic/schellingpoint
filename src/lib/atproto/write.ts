@@ -8,13 +8,21 @@ import 'server-only'
  * document and asked directly.
  */
 import { Agent, AtpAgent, XRPCError } from '@atproto/api'
-import { atUri, resolveDidDoc, resolveIdentifier } from './identity'
+import { pdsInternalUrl } from './config'
+import { atUri, describeOwnRepo, resolveDidDoc, resolveIdentifier } from './identity'
+import { isBorrowedNsid } from './nsids'
 import { assertNoUnknownFields, assertValidRecord } from './validate'
 
 /** Collections we borrow and must never extend (the sidecar rule, enforced at write time). */
-const BORROWED_PREFIXES = ['community.lexicon.', 'coop.lexicon.', 'freeschool.draft.']
 export function isBorrowedCollection(collection: string): boolean {
-  return BORROWED_PREFIXES.some((p) => collection.startsWith(p))
+  return isBorrowedNsid(collection)
+}
+
+/** The PDS refused a CAS write: the record's current cid is not the one we asserted. */
+export function isInvalidSwap(e: unknown): boolean {
+  if (e instanceof XRPCError) return e.error === 'InvalidSwap'
+  const err = e as { error?: string; message?: string } | undefined
+  return err?.error === 'InvalidSwap' || /InvalidSwap/.test(err?.message ?? '')
 }
 
 export interface WriteResult {
@@ -112,13 +120,20 @@ export async function deleteRecord(agent: Agent, input: DeleteRecordInput): Prom
 const pdsAgents = new Map<string, { agent: AtpAgent; at: number }>()
 const PDS_AGENT_TTL_MS = 10 * 60 * 1000
 
-/** An unauthenticated agent pointed at the PDS that hosts `repo`. */
+const PDS_AGENT_CACHE_CAP = 512
+
+/**
+ * An unauthenticated agent pointed at the PDS that hosts `repo`: our own PDS through its
+ * internal URL, anything else through the endpoint its DID document names.
+ */
 export async function pdsAgentFor(repo: string): Promise<{ did: string; agent: AtpAgent }> {
   const did = await resolveIdentifier(repo)
   const cached = pdsAgents.get(did)
   if (cached && Date.now() - cached.at < PDS_AGENT_TTL_MS) return { did, agent: cached.agent }
-  const doc = await resolveDidDoc(did)
-  const agent = new AtpAgent({ service: doc.pds })
+  const own = await describeOwnRepo(did).catch(() => null)
+  const service = own ? pdsInternalUrl() : (await resolveDidDoc(did)).pds
+  const agent = new AtpAgent({ service })
+  if (pdsAgents.size >= PDS_AGENT_CACHE_CAP) pdsAgents.delete(pdsAgents.keys().next().value as string)
   pdsAgents.set(did, { agent, at: Date.now() })
   return { did, agent }
 }
@@ -162,6 +177,30 @@ export async function listRecords<T = Record<string, unknown>>(
     records: res.data.records.map((r) => ({ uri: r.uri, cid: r.cid, value: r.value as T })),
     ...(res.data.cursor ? { cursor: res.data.cursor } : {}),
   }
+}
+
+/** A PDS clamps `listRecords` at 100 per page; ask for exactly that and follow the cursor. */
+export const LIST_RECORDS_PAGE = 100
+
+/**
+ * Every record in one collection of a repo, all pages. A page that comes back with a cursor
+ * but no records ends the walk (some PDS versions hand back a trailing cursor).
+ */
+export async function listAllRecords<T = Record<string, unknown>>(
+  repo: string,
+  collection: string,
+  opts: { maxPages?: number } = {},
+): Promise<FetchedRecord<T>[]> {
+  const out: FetchedRecord<T>[] = []
+  let cursor: string | undefined
+  let pages = 0
+  do {
+    const page = await listRecords<T>(repo, collection, { limit: LIST_RECORDS_PAGE, cursor })
+    out.push(...page.records)
+    cursor = page.records.length > 0 ? page.cursor : undefined
+    pages++
+  } while (cursor && pages < (opts.maxPages ?? 10_000))
+  return out
 }
 
 /** Convenience: the AT-URI a `putRecord` with these inputs will produce. */

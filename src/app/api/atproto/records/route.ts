@@ -1,22 +1,27 @@
 /**
  * GET /api/atproto/records?event=<slug>&collection=<nsid>&limit=<n>
  *
- * The "AppView read" for third parties: every indexed public record that
- * belongs to one gathering — what its actor wrote, plus the proposals offered
- * to it and the co-host / endorsement / RSVP records that chain to those.
- * Public, read-only, only for public/unlisted non-draft events. Everything
- * returned is already world-readable on the network; this just saves a
- * client from crawling repos.
+ * The AppView read for third parties: every indexed public record that belongs to one gathering —
+ * what its actor wrote, the proposals offered to it, and the co-host / endorsement / RSVP /
+ * time-preference records that chain to those.
+ *
+ * Visibility rules:
+ *   - a public or unlisted gathering that has left `draft`: anyone
+ *   - a private or draft gathering: members only; everyone else gets 404 (existence not disclosed)
+ *   - a person's record is served only while it references this gathering; nothing app-side
+ *     (RSVP rows, votes, rosters) is ever joined in
+ * Everything returned is already on the network; this saves a client from crawling repos.
  */
 import { NextRequest, NextResponse } from 'next/server'
-import { createAdminClient } from '@/lib/supabase/server'
+import { sql } from '@/lib/db'
+import { eventRole, getViewer } from '@/lib/auth/viewer'
 import { INDEXED_COLLECTIONS, NSID } from '@/lib/atproto/nsids'
 
+export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
 const DEFAULT_LIMIT = 100
 const MAX_LIMIT = 500
-const CACHE = 'public, max-age=60'
 
 interface RecordRow {
   uri: string
@@ -28,20 +33,6 @@ interface RecordRow {
   indexed_at: string
 }
 
-function shape(row: RecordRow) {
-  return {
-    uri: row.uri,
-    did: row.did,
-    collection: row.collection,
-    rkey: row.rkey,
-    cid: row.cid,
-    record: row.record,
-    indexedAt: row.indexed_at,
-  }
-}
-
-const SELECT = 'uri, did, collection, rkey, cid, record, indexed_at'
-
 export async function GET(request: NextRequest) {
   const params = request.nextUrl.searchParams
   const slug = params.get('event')?.trim()
@@ -49,115 +40,53 @@ export async function GET(request: NextRequest) {
   const limitRaw = Number(params.get('limit') ?? DEFAULT_LIMIT)
   const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), MAX_LIMIT) : DEFAULT_LIMIT
 
-  if (!slug) return NextResponse.json({ error: 'event is required' }, { status: 400 })
+  if (!slug) return NextResponse.json({ error: 'event is required', field: 'event' }, { status: 400 })
   if (collection && !(INDEXED_COLLECTIONS as readonly string[]).includes(collection)) {
-    return NextResponse.json({ error: 'unknown collection', collections: INDEXED_COLLECTIONS }, { status: 400 })
+    return NextResponse.json({ error: 'unknown collection', field: 'collection' }, { status: 400 })
   }
 
-  const db = await createAdminClient()
-  const { data: event, error: eventError } = await db
-    .from('events')
-    .select('id, slug, status, visibility, actor_did, gathering_uri, calendar_event_uri')
-    .eq('slug', slug)
-    .maybeSingle()
-  if (eventError) return NextResponse.json({ error: eventError.message }, { status: 500 })
-  if (!event || event.status === 'draft' || !['public', 'unlisted'].includes(event.visibility as string)) {
-    return NextResponse.json({ error: 'event not found' }, { status: 404 })
+  const [event] = await sql<{ id: string; status: string; visibility: string; actor_did: string | null; gathering_uri: string | null; calendar_event_uri: string | null }[]>`
+    select id, status, visibility, actor_did, gathering_uri, calendar_event_uri from events where slug = ${slug}
+  `
+  if (!event) return NextResponse.json({ error: 'Event not found' }, { status: 404 })
+  const openToAll = ['public', 'unlisted'].includes(event.visibility) && event.status !== 'draft'
+  let cacheControl = 'public, max-age=60'
+  if (!openToAll) {
+    const viewer = await getViewer(request)
+    const role = viewer ? await eventRole(event.id, viewer.accountId) : null
+    if (!role) return NextResponse.json({ error: 'Event not found' }, { status: 404 })
+    cacheControl = 'private, no-store'
   }
 
   const wanted = collection ? [collection] : [...INDEXED_COLLECTIONS]
-  const byUri = new Map<string, RecordRow>()
-  const take = (rows: RecordRow[] | null | undefined) => {
-    for (const r of rows ?? []) if (!byUri.has(r.uri)) byUri.set(r.uri, r)
-  }
+  const gatheringUri = event.gathering_uri ?? (event.actor_did ? `at://${event.actor_did}/${NSID.gathering}/self` : null)
 
-  // 1. Everything the gathering actor wrote, in the wanted collections.
-  if (event.actor_did) {
-    const { data, error } = await db
-      .from('at_records')
-      .select(SELECT)
-      .eq('did', event.actor_did)
-      .in('collection', wanted)
-      .order('indexed_at', { ascending: false })
-      .limit(limit)
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-    take(data as RecordRow[])
-  }
+  const rows = await sql<RecordRow[]>`
+    with proposals as (
+      select proposal_uri as uri from sessions where event_id = ${event.id} and proposal_uri is not null
+      union
+      select uri from at_records where collection = ${NSID.proposal} and record ->> 'gathering' = ${gatheringUri ?? ''}
+    ),
+    calendar as (
+      select calendar_event_uri as uri from sessions where event_id = ${event.id} and calendar_event_uri is not null
+      union
+      select ${event.calendar_event_uri ?? ''}::text
+    )
+    select uri, did, collection, rkey, cid, record, indexed_at from at_records
+    where collection = any(${wanted}::text[])
+      and (
+        did = ${event.actor_did ?? ''}
+        or (collection = ${NSID.proposal} and uri in (select uri from proposals))
+        or (collection in (${NSID.cohost}, ${NSID.endorsement}, ${NSID.timePreference})
+            and record -> 'proposal' ->> 'uri' in (select uri from proposals))
+        or (collection = ${NSID.rsvp} and record -> 'subject' ->> 'uri' in (select uri from calendar))
+      )
+    order by indexed_at desc
+    limit ${limit}
+  `
 
-  // 2. Proposals offered to this gathering: by `gathering` URI, and by the
-  //    sessions that link to a proposer's record.
-  const proposalUris = new Set<string>()
-  const { data: sessions, error: sessionError } = await db
-    .from('sessions')
-    .select('proposal_uri, calendar_event_uri')
-    .eq('event_id', event.id)
-    .not('proposal_uri', 'is', null)
-  if (sessionError) return NextResponse.json({ error: sessionError.message }, { status: 500 })
-  const calendarUris = new Set<string>()
-  if (event.calendar_event_uri) calendarUris.add(event.calendar_event_uri as string)
-  for (const s of (sessions ?? []) as { proposal_uri: string | null; calendar_event_uri: string | null }[]) {
-    if (s.proposal_uri) proposalUris.add(s.proposal_uri)
-    if (s.calendar_event_uri) calendarUris.add(s.calendar_event_uri)
-  }
-
-  if (wanted.includes(NSID.proposal)) {
-    if (event.gathering_uri) {
-      const { data, error } = await db
-        .from('at_records')
-        .select(SELECT)
-        .eq('collection', NSID.proposal)
-        .eq('record->>gathering', event.gathering_uri as string)
-        .order('indexed_at', { ascending: false })
-        .limit(limit)
-      if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-      take(data as RecordRow[])
-      for (const r of (data ?? []) as RecordRow[]) proposalUris.add(r.uri)
-    }
-    if (proposalUris.size) {
-      const { data, error } = await db
-        .from('at_records')
-        .select(SELECT)
-        .eq('collection', NSID.proposal)
-        .in('uri', [...proposalUris])
-        .limit(limit)
-      if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-      take(data as RecordRow[])
-    }
-  }
-
-  // 3. Records that strongRef one of those proposals (co-host, endorsement) …
-  if (proposalUris.size) {
-    for (const nsid of [NSID.cohost, NSID.endorsement]) {
-      if (!wanted.includes(nsid)) continue
-      const { data, error } = await db
-        .from('at_records')
-        .select(SELECT)
-        .eq('collection', nsid)
-        .in('record->proposal->>uri', [...proposalUris])
-        .order('indexed_at', { ascending: false })
-        .limit(limit)
-      if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-      take(data as RecordRow[])
-    }
-  }
-
-  // 4. … and opt-in RSVPs on the gathering's calendar events.
-  if (wanted.includes(NSID.rsvp) && calendarUris.size) {
-    const { data, error } = await db
-      .from('at_records')
-      .select(SELECT)
-      .eq('collection', NSID.rsvp)
-      .in('record->subject->>uri', [...calendarUris])
-      .order('indexed_at', { ascending: false })
-      .limit(limit)
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-    take(data as RecordRow[])
-  }
-
-  const records = [...byUri.values()]
-    .sort((a, b) => (a.indexed_at < b.indexed_at ? 1 : a.indexed_at > b.indexed_at ? -1 : 0))
-    .slice(0, limit)
-    .map(shape)
-
-  return NextResponse.json(records, { headers: { 'Cache-Control': CACHE } })
+  return NextResponse.json(
+    rows.map((r) => ({ uri: r.uri, did: r.did, collection: r.collection, rkey: r.rkey, cid: r.cid, record: r.record, indexedAt: r.indexed_at })),
+    { headers: { 'Cache-Control': cacheControl } },
+  )
 }

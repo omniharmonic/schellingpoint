@@ -18,6 +18,7 @@ import {
   CheckCircle2,
   ExternalLink,
   Globe,
+  Fingerprint,
 } from 'lucide-react';
 import type { WizardState, WizardAction, WizardStepName } from '../useWizardState';
 import { WIZARD_STEPS, getNumberFromStep, isStepValid, getStepValidationErrors } from '../useWizardState';
@@ -239,7 +240,7 @@ export function ReviewStep({ state, dispatch, onSubmit, isSubmitting }: ReviewSt
   );
 
   // Check if all required steps are valid
-  const allStepsValid = validateWizardState(state).valid;
+  const allStepsValid = validateWizardState(state).valid && state.identity.acknowledged;
 
   // Handle form submission
   const handleSubmit = async () => {
@@ -465,6 +466,18 @@ export function ReviewStep({ state, dispatch, onSubmit, isSubmitting }: ReviewSt
               label="Require Approval"
               value={voting.requireProposalApproval ? 'Yes' : 'No'}
             />
+            <DataRow
+              label="Approvals to move or cancel a published session"
+              value={voting.policyThresholds.destructiveActionStewards}
+            />
+            <DataRow
+              label="Fewest voters before a count is shown"
+              value={voting.policyThresholds.feedbackK}
+            />
+            <DataRow
+              label="Publish organizer roles"
+              value={voting.policyThresholds.publishRoles ? 'Allowed (each person opts in)' : 'Off'}
+            />
           </div>
 
           {/* Proposal Window */}
@@ -631,6 +644,23 @@ export function ReviewStep({ state, dispatch, onSubmit, isSubmitting }: ReviewSt
               </div>
             </div>
           )}
+        </div>
+      </Section>
+
+      {/* Identity Section */}
+      <Section
+        title="Network identity"
+        icon={<Fingerprint className="h-5 w-5" />}
+        stepName="identity"
+        onEdit={handleEdit}
+        isValid={isStepValid(state, getNumberFromStep('identity'))}
+      >
+        <div className="space-y-1">
+          <DataRow label="Gathering identity" value="Created with the event (a draft publishes nothing)" />
+          <DataRow
+            label="What becomes public"
+            value={state.identity.acknowledged ? 'Acknowledged' : 'Not yet acknowledged'}
+          />
         </div>
       </Section>
 

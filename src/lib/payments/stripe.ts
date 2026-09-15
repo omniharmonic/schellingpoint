@@ -1,11 +1,16 @@
+import 'server-only'
 import Stripe from 'stripe'
+import { calculatePlatformFee } from './format'
 
-// Initialize Stripe client
+/**
+ * Stripe is optional: without STRIPE_SECRET_KEY every payment route answers 503 and free
+ * tickets keep working. Checkout metadata carries only opaque internal ids (ticket, event,
+ * tier, holder account uuid) — never a DID or a name; the purchaser's email is passed only as
+ * the receipt address.
+ */
+export { formatPrice, calculatePlatformFee } from './format'
+
 const stripeSecretKey = process.env.STRIPE_SECRET_KEY
-
-if (!stripeSecretKey) {
-  console.warn('STRIPE_SECRET_KEY not set - payment features will be disabled')
-}
 
 export const stripe = stripeSecretKey
   ? new Stripe(stripeSecretKey, {
@@ -20,15 +25,6 @@ export function isStripeConfigured(): boolean {
 }
 
 /**
- * Platform application fee: 5% of the ticket price + 50 cents, in cents.
- * Used as `application_fee_amount` on destination charges to connected accounts.
- */
-export function calculatePlatformFee(amountCents: number): number {
-  if (!Number.isFinite(amountCents) || amountCents <= 0) return 0
-  return Math.round(amountCents * 0.05) + 50
-}
-
-/**
  * Whether checkout may fall back to charging the platform account when an
  * event has no connected Stripe account. Opt-in via env so organizers are
  * nudged to connect their own account (Stripe Connect is the intended path).
@@ -38,105 +34,93 @@ export function isPlatformChargeFallbackAllowed(): boolean {
 }
 
 /**
- * Format price in cents to display string
- */
-export function formatPrice(cents: number, currency: string = 'usd'): string {
-  return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: currency.toUpperCase(),
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 2,
-  }).format(cents / 100)
-}
-
-/**
- * Create a Stripe Checkout session for ticket purchase
+ * Create a Stripe Checkout session for one capacity hold. `expiresAt` is the hold's expiry, so
+ * the session cannot be paid after the seat is released. The webhook finds the hold by
+ * `metadata.ticket_id`; `tier_id` and `holder_id` let it settle a payment whose hold row was
+ * already swept.
  */
 export async function createCheckoutSession({
+  ticketId,
   tierId,
+  holderId,
+  expiresAt,
   tierName,
   priceCents,
   currency,
   eventId,
-  eventSlug,
   eventName,
-  userId,
-  userEmail,
+  customerEmail,
   stripeAccountId,
   successUrl,
   cancelUrl,
 }: {
+  ticketId: string
   tierId: string
+  holderId: string
+  expiresAt: Date
   tierName: string
   priceCents: number
   currency: string
   eventId: string
-  eventSlug: string
   eventName: string
-  userId: string
-  userEmail: string
+  customerEmail?: string | null
   stripeAccountId?: string | null
   successUrl: string
   cancelUrl: string
-}): Promise<Stripe.Checkout.Session | null> {
+}): Promise<Stripe.Checkout.Session> {
   if (!stripe) {
     throw new Error('Stripe is not configured')
   }
 
-  // Build line items
-  const lineItems: Stripe.Checkout.SessionCreateParams.LineItem[] = [
-    {
-      price_data: {
-        currency: currency,
-        product_data: {
-          name: tierName,
-          description: `Ticket for ${eventName}`,
-        },
-        unit_amount: priceCents,
-      },
-      quantity: 1,
-    },
-  ]
+  const metadata = { ticket_id: ticketId, event_id: eventId, tier_id: tierId, holder_id: holderId }
 
-  // Session parameters
   const sessionParams: Stripe.Checkout.SessionCreateParams = {
     payment_method_types: ['card'],
     mode: 'payment',
-    line_items: lineItems,
+    line_items: [
+      {
+        price_data: {
+          currency,
+          product_data: { name: tierName, description: `Ticket for ${eventName}` },
+          unit_amount: priceCents,
+        },
+        quantity: 1,
+      },
+    ],
     success_url: successUrl,
     cancel_url: cancelUrl,
-    customer_email: userEmail,
-    metadata: {
-      tier_id: tierId,
-      event_id: eventId,
-      event_slug: eventSlug,
-      user_id: userId,
-    },
-    payment_intent_data: {
-      metadata: {
-        tier_id: tierId,
-        event_id: eventId,
-        event_slug: eventSlug,
-        user_id: userId,
-      },
-    },
+    client_reference_id: ticketId,
+    ...(customerEmail ? { customer_email: customerEmail } : {}),
+    metadata,
+    payment_intent_data: { metadata },
+    // Equal to the capacity hold's expiry (src/lib/tickets CHECKOUT_HOLD_SECONDS).
+    expires_at: Math.floor(expiresAt.getTime() / 1000),
   }
 
-  // If event has connected Stripe account, use it with application fee
+  // If event has connected Stripe account, use it with application fee (5% + $0.50)
   if (stripeAccountId) {
-    // Platform takes 5% + $0.50 fee
-    const applicationFee = calculatePlatformFee(priceCents)
     sessionParams.payment_intent_data = {
       ...sessionParams.payment_intent_data,
-      application_fee_amount: applicationFee,
-      transfer_data: {
-        destination: stripeAccountId,
-      },
+      application_fee_amount: calculatePlatformFee(priceCents),
+      transfer_data: { destination: stripeAccountId },
     }
   }
 
-  const session = await stripe.checkout.sessions.create(sessionParams)
-  return session
+  return stripe.checkout.sessions.create(sessionParams)
+}
+
+/**
+ * Close an open Checkout session so it can no longer be paid (a holder restarting checkout).
+ * Returns the session's resulting status; `complete` means it was already paid.
+ */
+export async function expireCheckoutSession(sessionId: string): Promise<'expired' | 'complete' | 'open'> {
+  if (!stripe) throw new Error('Stripe is not configured')
+  const session = await stripe.checkout.sessions.retrieve(sessionId)
+  if (session.status === 'open') {
+    const closed = await stripe.checkout.sessions.expire(sessionId)
+    return closed.status === 'expired' ? 'expired' : closed.status === 'complete' ? 'complete' : 'open'
+  }
+  return session.status === 'complete' ? 'complete' : 'expired'
 }
 
 /**

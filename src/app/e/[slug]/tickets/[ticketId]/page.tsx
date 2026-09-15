@@ -10,9 +10,7 @@ import { Badge } from '@/components/ui/badge'
 import { TicketQR } from '@/components/TicketQR'
 import { useAuth } from '@/hooks/useAuth'
 import { useEvent } from '@/contexts/EventContext'
-
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+import { apiFetch, ApiError } from '@/lib/api/client'
 
 interface TicketData {
   id: string
@@ -23,20 +21,6 @@ interface TicketData {
     name: string
     description: string | null
   }
-}
-
-function getAccessToken(): string | null {
-  const storageKey = `sb-${new URL(SUPABASE_URL).hostname.split('.')[0]}-auth-token`
-  const stored = localStorage.getItem(storageKey)
-  if (stored) {
-    try {
-      const session = JSON.parse(stored)
-      return session?.access_token || null
-    } catch {
-      return null
-    }
-  }
-  return null
 }
 
 const STATUS_CONFIG = {
@@ -58,6 +42,12 @@ const STATUS_CONFIG = {
     color: 'bg-blue-600',
     description: 'You have checked in to the event',
   },
+  refund_needed: {
+    label: 'Refund due',
+    icon: XCircle,
+    color: 'bg-amber-600',
+    description: 'Your payment arrived after the last seat was taken. The organizer will refund it.',
+  },
   cancelled: {
     label: 'Cancelled',
     icon: XCircle,
@@ -70,7 +60,7 @@ export default function TicketDetailPage() {
   const router = useRouter()
   const params = useParams()
   const ticketId = params.ticketId as string
-  const { user } = useAuth()
+  const { user, isLoading: authLoading } = useAuth()
   const event = useEvent()
 
   const [ticket, setTicket] = React.useState<TicketData | null>(null)
@@ -78,52 +68,29 @@ export default function TicketDetailPage() {
   const [error, setError] = React.useState<string | null>(null)
 
   React.useEffect(() => {
+    let cancelled = false
+    if (authLoading) return
     async function fetchTicket() {
       if (!user) {
         setLoading(false)
         return
       }
-
       try {
-        const token = getAccessToken()
-        if (!token) {
-          router.push(`/login?redirect=${encodeURIComponent(`/e/${event.slug}/tickets/${ticketId}`)}`)
-          return
-        }
-
-        const response = await fetch(
-          `${SUPABASE_URL}/rest/v1/tickets?id=eq.${ticketId}&select=id,status,created_at,checked_in_at,tier:ticket_tiers(name,description)`,
-          {
-            headers: {
-              'apikey': SUPABASE_KEY,
-              'Authorization': `Bearer ${token}`,
-            },
-          }
+        const data = await apiFetch<{ ticket: TicketData }>(
+          `/api/v1/events/${encodeURIComponent(event.slug)}/tickets/${encodeURIComponent(ticketId)}`,
         )
-
-        const data = await response.json()
-
-        if (data && data.length > 0) {
-          setTicket({
-            id: data[0].id,
-            status: data[0].status,
-            created_at: data[0].created_at,
-            checked_in_at: data[0].checked_in_at,
-            tier: data[0].tier,
-          })
-        } else {
-          setError('Ticket not found')
-        }
+        if (!cancelled) setTicket(data.ticket)
       } catch (err) {
-        console.error('Error fetching ticket:', err)
-        setError('Failed to load ticket')
+        if (!cancelled) setError(err instanceof ApiError && err.status === 404 ? 'Ticket not found' : 'Failed to load ticket')
       } finally {
-        setLoading(false)
+        if (!cancelled) setLoading(false)
       }
     }
-
     fetchTicket()
-  }, [ticketId, user, router])
+    return () => {
+      cancelled = true
+    }
+  }, [ticketId, user, event.slug, authLoading])
 
   if (loading) {
     return (
@@ -219,6 +186,7 @@ export default function TicketDetailPage() {
                   })}
                   {event.endDate.getTime() !== event.startDate.getTime() && (
                     <> - {new Date(event.endDate).toLocaleDateString('en-US', {
+                      timeZone: 'UTC',
                       weekday: 'long',
                       month: 'long',
                       day: 'numeric',

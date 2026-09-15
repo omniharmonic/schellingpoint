@@ -1,66 +1,24 @@
 import type { Metadata } from 'next'
-import { createAdminClient } from '@/lib/supabase/server'
+import { previewInvite } from '@/app/api/v1/sessions/_lib/invite'
 import { InviteClient } from './InviteClient'
 
 interface InvitePageProps {
   params: Promise<{ token: string }>
 }
 
-async function getInviteData(token: string) {
-  try {
-    const admin = await createAdminClient()
-    const { data: invite } = await admin
-      .from('cohost_invites')
-      .select(`
-        id,
-        status,
-        expires_at,
-        session:sessions(
-          id,
-          title,
-          description,
-          format,
-          duration,
-          host_name,
-          host:profiles!host_id(id, display_name, avatar_url),
-          event:events(slug)
-        )
-      `)
-      .eq('token', token)
-      .single()
-
-    if (!invite) return null
-
-    const isExpired = new Date(invite.expires_at) < new Date()
-    const effectiveStatus = invite.status === 'pending' && isExpired ? 'expired' : invite.status
-
-    // Supabase returns nested joins with inferred array types; cast to expected shape
-    return { ...invite, status: effectiveStatus } as any
-  } catch {
-    return null
-  }
-}
-
 export async function generateMetadata({ params }: InvitePageProps): Promise<Metadata> {
   const { token } = await params
-  const invite = await getInviteData(token)
-  const session = invite?.session as any
-
-  if (!session) {
-    return {
-      title: 'Invite Not Found - Schelling Point',
-    }
-  }
-
+  const invite = await previewInvite(token)
+  if (!invite) return { title: 'Invite Not Found' }
   return {
-    title: `Co-Host Invite: ${session.title} - Schelling Point`,
-    description: `You've been invited to co-host "${session.title}"`,
+    title: `Co-host invite: ${invite.session.title}`,
+    description: `You've been invited to co-host "${invite.session.title}" at ${invite.event_name}`,
+    robots: { index: false, follow: false },
   }
 }
 
 export default async function InvitePage({ params }: InvitePageProps) {
   const { token } = await params
-  const invite = await getInviteData(token)
-
+  const invite = await previewInvite(token)
   return <InviteClient token={token} invite={invite} />
 }

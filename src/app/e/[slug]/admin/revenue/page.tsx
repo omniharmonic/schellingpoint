@@ -1,7 +1,6 @@
 'use client'
 
 import * as React from 'react'
-import { useRouter } from 'next/navigation'
 import {
   DollarSign,
   Ticket,
@@ -12,6 +11,7 @@ import {
   Loader2,
   BarChart3,
   Download,
+  AlertTriangle,
 } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -19,37 +19,8 @@ import { Badge } from '@/components/ui/badge'
 
 import { useAuth } from '@/hooks/useAuth'
 import { useEvent, useEventRole } from '@/contexts/EventContext'
-import { formatPrice } from '@/lib/payments/stripe'
-import { getAccessToken } from '@/lib/supabase/client'
-
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-
-interface TicketTier {
-  id: string
-  name: string
-  price_cents: number
-  currency: string
-  quantity_total: number | null
-  quantity_sold: number
-}
-
-interface Ticket {
-  id: string
-  tier_id: string
-  status: string
-  amount_paid_cents: number | null
-  created_at: string
-  payment_confirmed_at: string | null
-}
-
-// Mirrors the platform fee applied at checkout in src/lib/payments/stripe.ts
-// (5% + $0.50 per paid ticket). Duplicated here rather than imported so the
-// client bundle does not pull in the Stripe server module.
-function platformFeeCents(amountCents: number): number {
-  if (amountCents <= 0) return 0
-  return Math.round(amountCents * 0.05) + 50
-}
+import { formatPrice } from '@/lib/payments/format'
+import { apiFetch } from '@/lib/api/client'
 
 interface RevenueStats {
   totalRevenue: number
@@ -59,6 +30,7 @@ interface RevenueStats {
   confirmedTickets: number
   pendingTickets: number
   checkedIn: number
+  refundNeeded: { count: number; amountCents: number }
   currency: string
   tierBreakdown: {
     tierId: string
@@ -75,7 +47,6 @@ interface RevenueStats {
 }
 
 export default function RevenueDashboardPage() {
-  const router = useRouter()
   const { user } = useAuth()
   const event = useEvent()
   const { isAdmin, isOwner } = useEventRole()
@@ -88,118 +59,25 @@ export default function RevenueDashboardPage() {
   const canViewRevenue = isOwner || isAdmin
 
   React.useEffect(() => {
-    async function fetchData() {
-      if (!canViewRevenue || !user) {
-        setLoading(false)
-        return
-      }
-
-      try {
-        const token = getAccessToken()
-        if (!token) {
-          router.push('/login')
-          return
-        }
-
-        // Fetch tiers
-        const tiersRes = await fetch(
-          `${SUPABASE_URL}/rest/v1/ticket_tiers?event_id=eq.${event.id}&order=display_order.asc`,
-          {
-            headers: {
-              'apikey': SUPABASE_KEY,
-              'Authorization': `Bearer ${token}`,
-            },
-          }
-        )
-        const tiers: TicketTier[] = await tiersRes.json()
-
-        // Fetch tickets
-        const ticketsRes = await fetch(
-          `${SUPABASE_URL}/rest/v1/tickets?event_id=eq.${event.id}&order=created_at.asc`,
-          {
-            headers: {
-              'apikey': SUPABASE_KEY,
-              'Authorization': `Bearer ${token}`,
-            },
-          }
-        )
-        const tickets: Ticket[] = await ticketsRes.json()
-
-        // Calculate stats
-        const confirmedTickets = tickets.filter(t => t.status === 'confirmed' || t.status === 'checked_in')
-        const pendingTickets = tickets.filter(t => t.status === 'pending')
-        const checkedInTickets = tickets.filter(t => t.status === 'checked_in')
-
-        const totalRevenue = confirmedTickets.reduce((sum, t) => sum + (t.amount_paid_cents || 0), 0)
-        const platformFees = confirmedTickets.reduce((sum, t) => sum + platformFeeCents(t.amount_paid_cents || 0), 0)
-        const netRevenue = totalRevenue - platformFees
-
-        // Tier breakdown
-        const tierBreakdown = tiers.map(tier => {
-          const tierTickets = confirmedTickets.filter(t => t.tier_id === tier.id)
-          return {
-            tierId: tier.id,
-            tierName: tier.name,
-            sold: tierTickets.length,
-            revenue: tierTickets.reduce((sum, t) => sum + (t.amount_paid_cents || 0), 0),
-            capacity: tier.quantity_total,
-          }
-        })
-
-        // Daily sales (last 30 days)
-        const dailySalesMap = new Map<string, { tickets: number; revenue: number }>()
-        const thirtyDaysAgo = new Date()
-        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
-
-        confirmedTickets.forEach(ticket => {
-          const date = ticket.payment_confirmed_at || ticket.created_at
-          if (new Date(date) >= thirtyDaysAgo) {
-            const dateKey = new Date(date).toISOString().split('T')[0]
-            const existing = dailySalesMap.get(dateKey) || { tickets: 0, revenue: 0 }
-            dailySalesMap.set(dateKey, {
-              tickets: existing.tickets + 1,
-              revenue: existing.revenue + (ticket.amount_paid_cents || 0),
-            })
-          }
-        })
-
-        // Fill in missing days
-        const dailySales: { date: string; tickets: number; revenue: number }[] = []
-        const current = new Date(thirtyDaysAgo)
-        const today = new Date()
-        while (current <= today) {
-          const dateKey = current.toISOString().split('T')[0]
-          const data = dailySalesMap.get(dateKey) || { tickets: 0, revenue: 0 }
-          dailySales.push({
-            date: dateKey,
-            tickets: data.tickets,
-            revenue: data.revenue,
-          })
-          current.setDate(current.getDate() + 1)
-        }
-
-        setStats({
-          totalRevenue,
-          platformFees,
-          netRevenue,
-          totalTickets: tickets.length,
-          confirmedTickets: confirmedTickets.length,
-          pendingTickets: pendingTickets.length,
-          checkedIn: checkedInTickets.length,
-          currency: tiers[0]?.currency || 'usd',
-          tierBreakdown,
-          dailySales,
-        })
-      } catch (err) {
-        console.error('Error fetching revenue data:', err)
-        setError('Failed to load revenue data')
-      } finally {
-        setLoading(false)
-      }
+    if (!canViewRevenue || !user) {
+      setLoading(false)
+      return
     }
-
-    fetchData()
-  }, [canViewRevenue, event.id, user, router])
+    let cancelled = false
+    apiFetch<RevenueStats>(`/api/v1/events/${encodeURIComponent(event.slug)}/admin/ticketing-settings/revenue`)
+      .then((data) => {
+        if (!cancelled) setStats(data)
+      })
+      .catch(() => {
+        if (!cancelled) setError('Failed to load revenue data')
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [canViewRevenue, event.slug, user])
 
   if (!canViewRevenue) {
     return (
@@ -258,6 +136,24 @@ export default function RevenueDashboardPage() {
             Export Report
           </Button>
         </div>
+
+        {stats.refundNeeded.count > 0 && (
+          <Card className="border-destructive">
+            <CardContent className="py-4 flex items-start gap-3">
+              <AlertTriangle className="h-5 w-5 text-destructive mt-0.5" />
+              <div>
+                <p className="font-medium">
+                  {stats.refundNeeded.count} payment{stats.refundNeeded.count === 1 ? '' : 's'} need
+                  {stats.refundNeeded.count === 1 ? 's' : ''} a refund ({formatPrice(stats.refundNeeded.amountCents, stats.currency)})
+                </p>
+                <p className="text-sm text-muted-foreground">
+                  These buyers paid after their checkout hold lapsed and the tier had filled, or paid twice. They have no
+                  ticket. Refund them from your Stripe dashboard; each is cleared here once Stripe reports the refund.
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+        )}
 
         {/* Summary Cards */}
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
@@ -371,7 +267,7 @@ export default function RevenueDashboardPage() {
               {stats.tierBreakdown.map((tier) => {
                 const percentage = tier.capacity
                   ? (tier.sold / tier.capacity) * 100
-                  : 100
+                  : tier.sold > 0 ? 100 : 0
 
                 return (
                   <div key={tier.tierId} className="space-y-2">
@@ -427,7 +323,7 @@ export default function RevenueDashboardPage() {
                     {/* Tooltip on hover */}
                     <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block z-10">
                       <div className="bg-popover text-popover-foreground text-xs p-2 rounded shadow-lg whitespace-nowrap">
-                        <p className="font-medium">{new Date(day.date).toLocaleDateString()}</p>
+                        <p className="font-medium">{new Date(`${day.date}T00:00:00Z`).toLocaleDateString(undefined, { timeZone: 'UTC' })}</p>
                         <p>{day.tickets} tickets</p>
                         <p>{formatPrice(day.revenue, stats.currency)}</p>
                       </div>

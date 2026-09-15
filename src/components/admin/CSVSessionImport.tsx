@@ -5,10 +5,12 @@ import { Upload, FileText, AlertCircle, CheckCircle, Download, Loader2 } from 'l
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
+import { apiFetch, ApiError } from '@/lib/api/client'
 
 interface CSVSessionImportProps {
   eventSlug: string
   tracks: { id: string; name: string }[]
+  allowedFormats?: string[]
   onImportComplete: (count: number) => void
 }
 
@@ -28,28 +30,15 @@ interface ImportResult {
   error?: string
 }
 
-const VALID_FORMATS = ['talk', 'workshop', 'discussion', 'panel', 'demo']
-const VALID_DURATIONS = [15, 30, 60, 90]
+const DEFAULT_FORMATS = ['talk', 'workshop', 'discussion', 'panel', 'demo']
+const MIN_DURATION = 5
+const MAX_DURATION = 480
+const MAX_ROWS = 500
 
 const EXAMPLE_CSV = `title,description,host_name,format,duration,track
 "Introduction to Web3","Learn the basics of blockchain technology","Alice Smith","talk",60,"Technical"
 "Building DApps Workshop","Hands-on workshop for building decentralized apps","Bob Johnson","workshop",90,"Technical"
 "Community Governance Discussion","Open discussion about DAO governance","Carol Williams","discussion",60,"Governance"`
-
-function getAccessToken(): string | null {
-  const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!
-  const storageKey = `sb-${new URL(SUPABASE_URL).hostname.split('.')[0]}-auth-token`
-  const stored = localStorage.getItem(storageKey)
-  if (stored) {
-    try {
-      const session = JSON.parse(stored)
-      return session?.access_token || null
-    } catch {
-      return null
-    }
-  }
-  return null
-}
 
 function parseCSV(csvText: string): string[][] {
   const rows: string[][] = []
@@ -95,7 +84,7 @@ function parseCSV(csvText: string): string[][] {
   return rows
 }
 
-export function CSVSessionImport({ eventSlug, tracks, onImportComplete }: CSVSessionImportProps) {
+export function CSVSessionImport({ eventSlug, tracks, allowedFormats = DEFAULT_FORMATS, onImportComplete }: CSVSessionImportProps) {
   const [isDragging, setIsDragging] = React.useState(false)
   const [parsedRows, setParsedRows] = React.useState<ParsedRow[]>([])
   const [importResults, setImportResults] = React.useState<ImportResult[]>([])
@@ -126,7 +115,7 @@ export function CSVSessionImport({ eventSlug, tracks, onImportComplete }: CSVSes
         }
 
         const headers = rows[0].map(h => h.toLowerCase())
-        const requiredHeaders = ['title', 'host_name']
+        const requiredHeaders = ['title']
         const missingHeaders = requiredHeaders.filter(h => !headers.includes(h))
 
         if (missingHeaders.length > 0) {
@@ -141,23 +130,29 @@ export function CSVSessionImport({ eventSlug, tracks, onImportComplete }: CSVSes
         const durationIdx = headers.indexOf('duration')
         const trackIdx = headers.indexOf('track')
 
-        const parsed: ParsedRow[] = rows.slice(1).map((row, idx) => {
+        if (rows.length - 1 > MAX_ROWS) {
+          setParseError(`At most ${MAX_ROWS} sessions can be imported at once`)
+          return
+        }
+
+        const parsed: ParsedRow[] = rows.slice(1).map((row) => {
           const errors: string[] = []
           const title = row[titleIdx] || ''
           const description = descIdx >= 0 ? (row[descIdx] || '') : ''
           const host_name = row[hostIdx] || ''
           const format = formatIdx >= 0 ? (row[formatIdx] || 'talk').toLowerCase() : 'talk'
           const durationStr = durationIdx >= 0 ? row[durationIdx] : '60'
-          const duration = parseInt(durationStr, 10) || 60
+          const duration = Number.parseInt(durationStr, 10) || 60
           const track = trackIdx >= 0 ? (row[trackIdx] || '') : ''
 
           if (!title) errors.push('Title is required')
-          if (!host_name) errors.push('Host name is required')
-          if (format && !VALID_FORMATS.includes(format)) {
-            errors.push(`Invalid format "${format}". Valid: ${VALID_FORMATS.join(', ')}`)
+          if (title.length > 200) errors.push('Title must be at most 200 characters')
+          if (host_name.length > 200) errors.push('Speaker name must be at most 200 characters')
+          if (format && !allowedFormats.includes(format)) {
+            errors.push(`Invalid format "${format}". Valid: ${allowedFormats.join(', ')}`)
           }
-          if (duration && !VALID_DURATIONS.includes(duration)) {
-            errors.push(`Invalid duration ${duration}. Valid: ${VALID_DURATIONS.join(', ')}`)
+          if (duration < MIN_DURATION || duration > MAX_DURATION) {
+            errors.push(`Duration must be between ${MIN_DURATION} and ${MAX_DURATION} minutes`)
           }
           if (track && !trackNameToId.has(track.toLowerCase())) {
             errors.push(`Unknown track "${track}"`)
@@ -167,7 +162,7 @@ export function CSVSessionImport({ eventSlug, tracks, onImportComplete }: CSVSes
         })
 
         setParsedRows(parsed)
-      } catch (err) {
+      } catch {
         setParseError('Failed to parse CSV file')
       }
     }
@@ -194,51 +189,32 @@ export function CSVSessionImport({ eventSlug, tracks, onImportComplete }: CSVSes
     const validRows = parsedRows.filter(r => r.errors.length === 0)
     if (validRows.length === 0) return
 
-    const token = getAccessToken()
-    if (!token) {
-      setParseError('Session expired. Please log in again.')
-      return
-    }
-
     setIsImporting(true)
-    const results: ImportResult[] = []
-
-    for (const row of validRows) {
-      try {
-        const response = await fetch(`/api/v1/events/${eventSlug}/admin/sessions`, {
+    setParseError(null)
+    try {
+      const data = await apiFetch<{ created: number; results: Array<{ row: number; title: string; ok: boolean; error?: string }> }>(
+        `/api/v1/events/${eventSlug}/admin/sessions/import`,
+        {
           method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json',
+          json: {
+            rows: validRows.map((row) => ({
+              title: row.title,
+              description: row.description || null,
+              host_name: row.host_name || null,
+              format: row.format || 'talk',
+              duration: row.duration || 60,
+              track: row.track || null,
+              status: 'approved',
+            })),
           },
-          body: JSON.stringify({
-            title: row.title,
-            description: row.description || null,
-            host_name: row.host_name,
-            format: row.format || 'talk',
-            duration: row.duration || 60,
-            track_id: row.track ? trackNameToId.get(row.track.toLowerCase()) : null,
-            status: 'approved',
-          }),
-        })
-
-        if (!response.ok) {
-          const data = await response.json()
-          results.push({ success: false, title: row.title, error: data.error || 'Failed to create' })
-        } else {
-          results.push({ success: true, title: row.title })
-        }
-      } catch {
-        results.push({ success: false, title: row.title, error: 'Network error' })
-      }
-    }
-
-    setImportResults(results)
-    setIsImporting(false)
-
-    const successCount = results.filter(r => r.success).length
-    if (successCount > 0) {
-      onImportComplete(successCount)
+        },
+      )
+      setImportResults(data.results.map((r) => ({ success: r.ok, title: r.title || validRows[r.row - 1]?.title || `Row ${r.row}`, error: r.error })))
+      if (data.created > 0) onImportComplete(data.created)
+    } catch (err) {
+      setParseError(err instanceof ApiError ? err.message : 'The import could not be completed. Please try again.')
+    } finally {
+      setIsImporting(false)
     }
   }
 
@@ -285,13 +261,13 @@ export function CSVSessionImport({ eventSlug, tracks, onImportComplete }: CSVSes
           <p className="font-medium mb-2">Required columns:</p>
           <ul className="list-disc list-inside text-muted-foreground space-y-1">
             <li><code className="bg-muted px-1 rounded">title</code> - Session title</li>
-            <li><code className="bg-muted px-1 rounded">host_name</code> - Speaker name</li>
           </ul>
           <p className="font-medium mt-3 mb-2">Optional columns:</p>
           <ul className="list-disc list-inside text-muted-foreground space-y-1">
             <li><code className="bg-muted px-1 rounded">description</code> - Session description</li>
-            <li><code className="bg-muted px-1 rounded">format</code> - talk, workshop, discussion, panel, demo</li>
-            <li><code className="bg-muted px-1 rounded">duration</code> - 15, 30, 60, or 90 minutes</li>
+            <li><code className="bg-muted px-1 rounded">host_name</code> - Speaker name, kept for organizers as &ldquo;listed as&rdquo;. It is never shown publicly or published; the speaker can claim the session by signing in.</li>
+            <li><code className="bg-muted px-1 rounded">format</code> - {allowedFormats.join(', ')}</li>
+            <li><code className="bg-muted px-1 rounded">duration</code> - minutes ({MIN_DURATION}–{MAX_DURATION})</li>
             <li><code className="bg-muted px-1 rounded">track</code> - Track name (must match existing track)</li>
           </ul>
         </div>
@@ -311,6 +287,10 @@ export function CSVSessionImport({ eventSlug, tracks, onImportComplete }: CSVSes
             onDragLeave={() => setIsDragging(false)}
             onDrop={handleDrop}
             onClick={() => fileInputRef.current?.click()}
+            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInputRef.current?.click() } }}
+            role="button"
+            tabIndex={0}
+            aria-label="Choose a CSV file to import"
           >
             <input
               ref={fileInputRef}
@@ -367,7 +347,7 @@ export function CSVSessionImport({ eventSlug, tracks, onImportComplete }: CSVSes
                     <div className="flex-1 min-w-0">
                       <p className="font-medium truncate">{row.title || '(no title)'}</p>
                       <p className="text-muted-foreground text-xs truncate">
-                        {row.host_name || '(no host)'} · {row.format} · {row.duration}min
+                        {row.host_name ? `Listed as ${row.host_name}` : 'No listed speaker'} · {row.format} · {row.duration}min
                         {row.track && ` · ${row.track}`}
                       </p>
                     </div>
