@@ -6,7 +6,7 @@ Scope: the `atproto` application deployed at unconference.events on frontrange-t
 
 The baseline passed all 223 existing local regression tests, typecheck, 25 lexicons, production build and transactional SQL tests. Nine additional regressions cover the defects below. The final 232-test release run and deployment are recorded in the release verification section below.
 
-Production app/Postgres/PDS containers were healthy; the indexer was connected and advancing its Jetstream cursor. Scheduler logs contained no recent failures. Production's privacy audit passed, but checked **zero gathering actors / zero public records**. This is not evidence of a complete live publishing flow. Local tests use a reference PDS and mock PLC, exercise actual repository writes and indexed records, and clean up their own fixtures without changing seeded gatherings.
+Production app/Postgres/PDS containers were healthy; the indexer was connected and advancing its Jetstream cursor. Scheduler logs contained no recent failures. Production's privacy audit passed, but checked **zero gathering actors / zero gathering-owned records**. This is not evidence of a complete live publishing flow. Local tests use a reference PDS and mock PLC, exercise actual repository writes and indexed records, and clean up their own fixtures without changing seeded gatherings.
 
 Production has an email delivery key. Stripe key and webhook secret were missing at audit time. The operator selected their Stripe account; secure pairing is pending. Paid checkout fails closed until both secrets and an organizer's payout-ready connected account are available. Free tickets remain supported.
 
@@ -66,9 +66,25 @@ Final code, including refund fingerprints:
 - `python3 tests/backup-failure.py`: both one-shot and loop failure cases passed.
 - `git diff --check`: passed.
 
-The release is ready for deployment to the existing ATProto stack. Production activation and final
-HTTP checks are recorded after deployment. The external account/recovery checks above remain
-outstanding and must not be inferred from these local results.
+Deployed release: **`1c277dd`**, pushed to `origin/atproto` and released on Hetzner at approximately
+2026-09-15 09:35 UTC. Six migrations applied (0012–0017). App and indexer containers run
+`unconference-app:1c277dd`; Postgres and PDS are healthy. The indexer reconnected to Jetstream.
+
+The corrected backup image produced and uploaded `20260915T093030Z` (144 KB) before migration.
+Production privacy audit passed with zero gathering actors/owned records. Post-release checks:
+
+- Public `/api/health`: 200, database and PDS both OK.
+- OAuth metadata: 200, `client_name: unconference`, correct HTTPS callback, `private_key_jwt`.
+- Public PDS health: 200, version 0.4.5034.
+- `www.unconference.events`: 301 to the canonical apex.
+- Anonymous `/api/atproto/me`: configured, unlinked, no DID.
+- Unauthenticated event creation: 401; cross-origin creation: 403.
+- Stripe webhook without production payment configuration: 503, intentionally unavailable.
+- Fresh production login shows the Bluesky form and consent gate without client errors.
+- Live landing example accepts an idea and carries it into the voting chapter; no fresh client errors.
+
+No real ticket sale or live external identity/publishing cycle is claimed. The external
+account/recovery checks above remain outstanding. `main` was not changed.
 
 ## Reference contracts
 
