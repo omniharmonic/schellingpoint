@@ -83,7 +83,13 @@ age -d -i ~/.config/unconference/backup-age.key pds-blocks.tar.gz.age | tar -xz 
 
 ## Payments activation
 
-The application uses Stripe Connect destination charges. Configure `STRIPE_SECRET_KEY` and
+**Activation hold:** the deployed implementation uses destination charges, which charge Stripe's
+processing fees to the platform. A 1% contribution can therefore produce a loss. Before enabling
+live sales, complete and verify the organizer-paid processing model in
+[`docs/STRIPE_ACTIVATION.md`](../../docs/STRIPE_ACTIVATION.md). The steps below describe the current
+integration, not a completed payment launch.
+
+Configure `STRIPE_SECRET_KEY` and
 `STRIPE_WEBHOOK_SECRET` securely in the server environment, then recreate the app. Keep test and
 live keys/endpoints separate. Do not place secrets in chat, source control or browser JavaScript.
 The webhook destination is `https://unconference.events/api/webhooks/stripe`, listening for:

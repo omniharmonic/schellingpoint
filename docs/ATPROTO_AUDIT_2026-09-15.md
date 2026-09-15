@@ -8,7 +8,7 @@ The baseline passed all 223 existing local regression tests, typecheck, 25 lexic
 
 Production app/Postgres/PDS containers were healthy; the indexer was connected and advancing its Jetstream cursor. Scheduler logs contained no recent failures. Production's privacy audit passed, but checked **zero gathering actors / zero gathering-owned records**. This is not evidence of a complete live publishing flow. Local tests use a reference PDS and mock PLC, exercise actual repository writes and indexed records, and clean up their own fixtures without changing seeded gatherings.
 
-Production has an email delivery key. Stripe key and webhook secret were missing at audit time. The operator selected their Stripe account; secure pairing is pending. Paid checkout fails closed until both secrets and an organizer's payout-ready connected account are available. Free tickets remain supported.
+Production has an email delivery key. Stripe key and webhook secret were missing at audit time. The operator selected their Stripe account; secure pairing is pending. Paid checkout fails closed until both secrets and an organizer's payout-ready connected account are available. Free tickets remain supported. A subsequent activation review identified a fee-economics blocker: destination charges deduct Stripe processing fees from the platform, so a 1% contribution can lose money. See [the payment activation requirements](STRIPE_ACTIVATION.md); live sales must wait for that work and provider verification.
 
 ## Confirmed defects and fixes
 
@@ -39,6 +39,8 @@ Migrations 0012–0017 introduce the entitlement guards, private refund ledger, 
 - Onboarding preserves imported and edited profile details; its final action says “Save profile,” accurately separating profile setup from event admission.
 
 Browser review used a separate local gathering and account. Creation with a 3% contribution succeeded, a room saved, eight time slots saved atomically, and a duplicate overlapping batch was disabled with a clear explanation. The calendar displayed all eight slots at the expected event-local times. Ticket settings showed the original 3% contribution; changing it to 4% displayed a saved confirmation. The landing example accepted an idea and carried it into the voting chapter; no client errors were reported. The onboarding walkthrough preserved a seeded QA name, bio and two interests through Save profile; SQL confirmed all original values and completion. The isolated UX gathering and account were then removed, including their local PDS identities. Desktop layouts were inspected visually. A separate mobile browser pass is still outstanding.
+
+Follow-up live mobile review: at 390px, the landing page fits without horizontal overflow. Adding an idea carries it into voting and the example program; adding a vote reduces the available credits and updates the program. The Create an event action redirects a signed-out visitor to login with `/create` preserved. Login fits at both 390px and 320px and includes the Bluesky form and consent gate. No browser errors occurred in this fresh review tab. Authenticated organizer and calendar mobile flows remain outstanding. The temporary viewport override was reset after inspection.
 
 ## Public interests and unfinished features
 
