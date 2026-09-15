@@ -221,3 +221,75 @@ schedule writes calendar events visible on the relay/Jetstream; the tally is k-s
 | 29 | 12 | Backups: nightly Postgres dump + PDS volume tarball, retention-capped; PLC rotation key stored off-box | deploy | restore drill documented |
 | 30 | 12 | Health endpoint and release gate (typecheck, build, lexicons, tests, audit) | deploy | release script |
 | 31 | 4.1 | Recurring gatherings via `freeschool.draft.series`/`occurrence` | F (last) | test |
+
+## 7. Wave 1 — ownership and cross-package contracts
+
+### 7.1 File ownership (a file belongs to exactly one package; ask before touching another's)
+
+| Pkg | Owns |
+|---|---|
+| **A** events core | `src/app/page.tsx`, `src/app/MyEventsSection.tsx`, `src/app/events/**`, `src/app/create/**`, `src/app/api/events/**`, `src/app/e/[slug]/page.tsx`, `src/app/e/[slug]/layout.tsx`, `src/app/e/[slug]/admin/settings/**`, `src/contexts/EventContext.tsx`, `src/lib/events/**`, `src/lib/storage/**`, NEW `src/app/api/uploads/**`, NEW `src/app/uploads/**`, NEW `src/app/api/health/route.ts`, NEW `src/middleware.ts` (gathering subdomain routing), `src/components/EventAccessGate.tsx`, `src/components/{SiteHeader,WorkspaceHeader,EventUtilityLayout,Footer}.tsx`, `tests/event-api.spec.ts`, `tests/creation-database.spec.ts`, migration `0007_*` |
+| **B** sessions & participation | `src/app/e/[slug]/{sessions,propose,my-schedule,schedule}/**`, `src/components/{SessionCard,EditSessionModal,ManageCohostsSection,RSVPButton,SessionResources,AddToCalendar}.tsx`, `src/hooks/useTracks.tsx`, `src/app/invite/[token]/**`, `src/app/api/invite/**`, `src/app/api/sessions/[id]/{cohosts,invites}/**`, `src/app/api/v1/sessions/**`, `src/app/api/v1/events/[slug]/sessions/[id]/{calendar,resources}/**`, `src/app/api/v1/events/[slug]/calendar/**`, NEW `src/app/api/v1/events/[slug]/{sessions,favorites,rsvps,tracks}/**` (app read/write APIs, not partner), `src/lib/calendar/**`, migration `0005_*`, NEW `tests/sessions-api.spec.ts` |
+| **C** voting & feedback ballots | `src/app/e/[slug]/{my-votes,dashboard}/**`, `src/components/DashboardLayout.tsx`, `src/components/SessionFeedback.tsx`, `src/app/api/v1/events/[slug]/sessions/[id]/feedback/**`, NEW `src/app/api/v1/events/[slug]/{rounds,votes}/**`, NEW `src/app/api/jobs/close-rounds/route.ts`, NEW `src/lib/voting/**`, NEW `src/hooks/useVoting.tsx`, NEW `src/components/VoteControl.tsx`, `src/lib/atproto/tally.ts`, migration `0002_*`, NEW `tests/voting.spec.ts` |
+| **D** organizer admin | `src/app/e/[slug]/admin/{page.tsx,layout.tsx,schedule,setup,tracks,sessions,members,analytics,communications}/**`, `src/components/admin/**`, `src/app/api/v1/events/[slug]/admin/{auto-schedule,broadcast,publish-schedule,seed-sessions,session-emails,sessions}/**`, `src/app/api/v1/events/[slug]/sessions/batch/**`, `src/app/api/v1/events/[slug]/{invitations,members}/**`, `src/app/api/v1/invitations/**`, `src/app/invite/e/[token]/**`, `src/app/api/sessions/[id]/notify-host/**`, `src/lib/scheduling/**`, NEW `src/app/api/v1/events/[slug]/admin/{venues,time-slots,tracks,overview}/**`, migration `0006_*`, `tests/members-api.spec.ts` |
+| **E** notifications, mail, tickets, retention | `src/hooks/{useNotifications,useNotificationPreferences}.ts`, `src/components/{NotificationBell,TicketQR,QRScanner}.tsx`, `src/app/e/[slug]/{notifications,settings,tickets,checkin}/**`, `src/app/e/[slug]/admin/{tickets,revenue}/**`, `src/app/api/notifications/**`, NEW `src/app/api/me/notifications/**`, NEW `src/app/api/jobs/retention/route.ts`, `src/app/api/v1/events/[slug]/{checkout,checkin,tickets}/**`, `src/app/api/v1/events/[slug]/admin/{ticketing-settings,stripe-connect}/**`, `src/app/api/webhooks/**`, `src/lib/{email,payments,tickets,notifications}/**`, migration `0003_*`, NEW `tests/notifications.spec.ts` |
+| **F** ATProto layer | `src/lib/atproto/**` except `tally.ts` and the Wave-0 identity files (`session,oauth,agent,config,bridge,bsky-profile,crypto`), `src/app/api/atproto/{records,sync,skills}/**`, `src/app/api/v1/events/[slug]/admin/atproto/**`, `src/app/api/v1/events/[slug]/sessions/[id]/atproto/**`, NEW `src/app/api/v1/events/[slug]/approvals/**`, `src/app/e/[slug]/admin/atproto/**`, `src/components/AtprotoSessionActions.tsx`, NEW `src/components/{SkillPicker,TimePreferences}.tsx`, NEW `src/app/internal/tls-check/route.ts`, `scripts/atproto-*`, `lexicons/**`, migration `0004_*`, `tests/atproto-*.spec.ts` |
+| **G** people & partner API | `src/app/e/[slug]/participants/**`, `src/components/auth/OnboardingModal.tsx`, `src/components/SettingsModal.tsx`, `src/app/api/v1/{profiles,tracks,venues,timeslots,schedule}/**`, `src/lib/api/auth.ts`, NEW `src/app/api/me/profile/**`, NEW `src/app/api/v1/events/[slug]/participants/**`, NEW `src/app/api/v1/members/[did]/**`, migration `0008_*`, NEW `tests/people-api.spec.ts` |
+
+Shared and read-only for everyone: `src/lib/db`, `src/lib/auth/**`, `src/lib/api/{client,getUser,response,saved-rows}.ts`, `src/lib/permissions.ts`, `src/hooks/useAuth.tsx`, `src/types/**`, `src/components/ui/**`, `db/migrations/0001_baseline.sql`. Changes to these go through the coordinator.
+
+### 7.2 Cross-package contracts
+
+**Notifications (E owns, everyone calls)** — `import { notify } from '@/lib/notifications'`;
+`notify(sql, { eventId, userIds, type, title, body?, actionUrl?, data? })` inside the transaction of the
+action. E's `0003` drops every notification trigger (`trigger_new_proposal`, `trigger_session_status_change`,
+`trigger_cohost_response`, `trigger_vote_milestone`) and extends the type CHECK with `proposal_changed`,
+`approval_requested`, `event_invitation`, `ticket_confirmed`. Each package emits what its actions used to
+trigger: B `new_proposal` (to organizers), `cohost_accepted`; D `session_approved/rejected/scheduled`,
+`schedule_published`, `admin_announcement`, `event_invitation`; A `voting_opened`, `voting_closed`; F
+`proposal_changed`, `approval_requested`, `session_rescheduled/cancelled`; E `ticket_confirmed`.
+
+**Voting (C owns)** — spec §5 exactly. `0002` creates `vote_rounds(id, event_id, phase, mechanism, credits,
+opens_at, closes_at, ballot_key bytea, finalized_at)`, `vote_ballots(round_id, token bytea, cast_at)`,
+`vote_entries(id, round_id, session_id, votes, credits, day date, ballot_token bytea)` (no account column),
+`credit_ledger(round_id, account_id, allocated jsonb, spent, updated_at)`, `vote_round_results(round_id,
+session_id, voters, votes, credits)` computed at close; drops `votes`, its triggers, `update_session_vote_counts`,
+`notify_vote_milestone`, and the columns `sessions.total_votes, total_credits, voter_count` and
+`profiles.vote_credits`. Votes are keyed by `session_id` (a proposal URI may not exist until publish; the tally
+record resolves strongRefs at write time).
+- Browser: `useVoting(eventSlug)` from `@/hooks/useVoting` → `{ round, allocation: Record<sessionId, number>, spent, remaining, loading, error, setVotes(sessionId, votes): Promise<void>, refresh() }` and `<VoteControl eventSlug sessionId compact? />` from `@/components/VoteControl`. B and D render these; nobody else writes votes.
+- Server: `import { roundState, organizerResults, schedulingInputs } from '@/lib/voting'` —
+  `roundState(eventId) → { round | null, status: 'none'|'upcoming'|'open'|'closed' }`;
+  `organizerResults(eventId) → Array<{ sessionId, voters, votes, credits }>` (throws `RoundOpenError` while open);
+  `schedulingInputs(eventId) → { bySession: Map<string, { votes: number; tokens: Set<string> }> }` (throws `RoundOpenError` while open).
+- Nobody shows vote counts while a round is open — not attendees, not organizers (§5.3). Session lists sort by
+  recency/title/track while open; "most voted" sort only appears after close, for organizers.
+
+**ATProto (F owns)** — keep these call signatures stable:
+- `publishGathering({eventId, callerUserId})`, `publishPolicy`, `publishVenues`, `publishTracks`, `publishSlotGrids`, `publishSchedule({eventId, callerUserId, sessionIds?})`, `requestSessionMove/requestSessionCancel({eventId, sessionId, callerUserId, reason})` → `{ status: 'applied' | 'awaiting_approval', approvalsNeeded }`, from `@/lib/atproto/publish` and `@/lib/atproto/approvals`.
+- `publishProposal({sessionId, userId})`, `withdrawProposal`, `publishCohost`, `endorse`, `unendorse`, `publicRsvp`, `retractPublicRsvp`, `publishTimePreference` from `@/lib/atproto/participant`.
+- `mintGatheringActor(eventId, callerUserId)` wraps `mintGatheringAccount` and stores `events.actor_did/actor_handle`.
+- A calls `mintGatheringActor` in the creation transaction's aftermath (DID minted at creation; no records yet) and `publishGathering` when status leaves `draft`. D calls `publishSchedule` from publish-schedule and routes moves/cancels of **published** sessions through `requestSession*`. B calls `publishProposal` after a proposal is created by a custodial author or an OAuth author who has confirmed public linkage (`profiles.publish_proposals`).
+
+**Uploads (A owns)** — `POST /api/uploads` (multipart, organizer of `event`), stored under `UPLOADS_DIR`
+(`/data/uploads`, local default `.uploads/`), served at `/uploads/<path>`. Returns `{ url }`.
+
+**Jobs** — `/api/jobs/close-rounds` (C), `/api/jobs/retention` (E), `/api/notifications/dispatch` (E),
+`/api/atproto/sync` (F): `GET`, `Authorization: Bearer $CRON_SECRET`, 401 otherwise (in development without
+`CRON_SECRET`, allowed). `/api/health` (A): 200 `{status:'ok', checks:{db, pds}}`, 503 when a check fails.
+`/internal/tls-check?domain=` (F): 200/403 per `deploy/unconference/Caddyfile` rules; answers yes for `PDS_HOST`
+and `www.<web host>` without I/O, for existing gathering slugs, and for handles the PDS vouches for.
+
+### 7.3 Local test recipe (every package)
+
+- Stack: `npm run stack:up` (Postgres :55432, PLC :2582, PDS :2583) — already running; do not `down` it.
+- Dev server: already running on http://localhost:3001 with mail disabled; do not restart it (hot reload).
+- Sign in: `node scripts/dev-login.mjs you+pkgX@example.test` prints `sp_at_session=…`; send it as `Cookie`
+  and send `Origin: http://localhost:3001` on mutations. Make an organizer with the SQL in that script's header
+  (`DATABASE_MIGRATION_URL` from `.env.local`). Seeded events: `demo-gathering` (proposals_open),
+  `draft-gathering`, `past-gathering` (completed, 3 scheduled sessions).
+- DB for tests: `DATABASE_URL` (app role) / `DATABASE_MIGRATION_URL` (owner) from `.env.local`. New migration:
+  add `db/migrations/000N_name.sql` (your number only) and run `npm run db:migrate`.
+- Type check only your files: `npx tsc --noEmit 2>&1 | grep -E '<your path prefixes>'` — others are mid-edit.
+- Clean up every account you create: `delete from accounts where email like 'you+pkgX%'` and the PDS account
+  (`com.atproto.admin.deleteAccount`, admin password `local-admin-password`).
