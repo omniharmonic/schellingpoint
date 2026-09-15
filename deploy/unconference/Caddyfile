@@ -13,7 +13,6 @@
 # handles the PDS vouches for) and never from a pattern: Let's Encrypt allows 50 certificates per
 # registered domain per week and a pattern-based gate spends that on the first bot scan.
 {
-	email {$ACME_EMAIL}
 	on_demand_tls {
 		ask http://app:3000/internal/tls-check
 	}

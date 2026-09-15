@@ -1,6 +1,6 @@
 /**
  * Pure record builders: plain inputs in, `{ $type, ... }` objects out. No I/O,
- * no Supabase types, so every builder is unit-testable and usable from client
+ * no database types, so every builder is unit-testable and usable from client
  * code that wants to preview what will be written.
  *
  * Two rules every builder obeys (spec §3, §4.3):

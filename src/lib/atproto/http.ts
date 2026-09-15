@@ -34,6 +34,13 @@ export function atprotoErrorResponse(e: unknown, context = 'atproto'): Response 
     case 'ForeignDidError':
     case 'RecordValidationError':
       return json(409, err.message ?? 'The record failed validation.', 'invalid_record')
+    case 'RateLimitBudgetExceededError': {
+      const retryAfter = Math.max(1, Math.ceil(((err as { retryAfterMs?: number }).retryAfterMs ?? 60_000) / 1000))
+      return Response.json(
+        { error: 'The network is rate-limiting this repository. Try again shortly.', code: 'RateLimitExceeded' },
+        { status: 503, headers: { ...NO_STORE, 'Retry-After': String(retryAfter) } },
+      )
+    }
     case 'GatheringIdentityError':
       return json(err.status ?? 502, err.message ?? 'Identity error', err.code)
   }

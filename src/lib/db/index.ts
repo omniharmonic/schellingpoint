@@ -117,6 +117,15 @@ export const sql: postgres.Sql = new Proxy((() => {}) as unknown as postgres.Sql
   },
   get(_target, prop) {
     const c = client() as unknown as Record<PropertyKey, unknown>
+    if (prop === 'end') {
+      // Ending the pool forgets it, so the next query opens a fresh one instead of failing with
+      // CONNECTION_ENDED. Matters for long-lived processes (tests sharing a worker, scripts).
+      return async (options?: { timeout?: number }) => {
+        const g = globalThis as GlobalWithSql
+        if (g.__unconferenceSql === (c as unknown as postgres.Sql)) g.__unconferenceSql = undefined
+        await (c.end as (o?: { timeout?: number }) => Promise<void>)(options)
+      }
+    }
     const value = c[prop]
     return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(c) : value
   },

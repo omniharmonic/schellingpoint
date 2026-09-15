@@ -4,16 +4,18 @@ import { execFileSync } from 'node:child_process'
 import Module from 'node:module'
 import path from 'node:path'
 import postgres from 'postgres'
+import { createTestAccount, createTestGathering, type TestAccount, type TestGathering } from './helpers/gathering'
 
 // The ATProto layer end to end against the REAL local stack — no fakes on the happy path:
 //   dev server :3001 (RESEND_API_KEY unset), Postgres :55432, PLC :2582, PDS :2583 (handles *.test).
 //
-// Three custodial accounts sign in through the real email door (scripts/dev-login.mjs): an owner and
-// an admin of `demo-gathering`, and a proposer. The test mints the gathering's DID, publishes the
+// Three custodial accounts sign in through the real email door (tests/helpers): an owner and an
+// admin of a gathering this file creates (never a seeded one), and a proposer. The test mints the
+// gathering's DID through the admin API, publishes the
 // gathering, proposes a session into the proposer's own repo, schedules and publishes it, moves it
 // through a two-organiser approval, drifts the proposal, publishes a tally, and checks the TLS gate,
-// reconciliation and the privacy audit. Everything it created is removed afterwards — PDS accounts
-// included — and a gathering identity it minted is torn down again.
+// reconciliation and the privacy audit. Everything it created is removed afterwards — the gathering,
+// its minted identity and every PDS account included.
 loadEnvConfig(process.cwd(), true)
 
 const base = 'http://localhost:3001'
@@ -23,7 +25,6 @@ const adminPassword = process.env.PDS_ADMIN_PASSWORD || ''
 const handleDomain = (process.env.PDS_HANDLE_DOMAIN || '').replace(/^\./, '')
 const configured = Boolean(pds && migrationUrl && adminPassword && handleDomain && process.env.DATABASE_URL)
 
-const SLUG = 'demo-gathering'
 const RUN = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`
 
 // `src/lib/**` starts with `import 'server-only'`; resolve it to Next's empty stub in this process.
@@ -35,13 +36,7 @@ moduleWithResolver._resolveFilename = function (request: string, ...rest: unknow
   return request === 'server-only' ? stub : originalResolve.call(this, request, ...rest)
 }
 
-interface Person {
-  email: string
-  cookie: string
-  id: string
-  did: string
-  handle: string
-}
+type Person = TestAccount
 
 async function xrpcGet<T = { uri: string; cid: string; value: Record<string, unknown> }>(nsid: string, params: Record<string, string>): Promise<{ status: number; body: T }> {
   const url = new URL(`${pds}/xrpc/${nsid}`)
@@ -90,9 +85,10 @@ test.describe('ATProto layer against the local PDS', () => {
     db: typeof import('../src/lib/db')
   }
   const people: Record<'owner' | 'admin' | 'proposer', Person> = {} as never
+  let gathering: TestGathering | null = null
+  let SLUG = ''
   let eventId = ''
   let eventName = ''
-  let preexistingActor: string | null = null
   let actorDid = ''
   let sessionId = ''
   let slotA: { id: string; start_time: string; venue_id: string }
@@ -113,24 +109,18 @@ test.describe('ATProto layer against the local PDS', () => {
     /* eslint-enable @typescript-eslint/no-require-imports */
     raw = postgres(migrationUrl, { max: 2, onnotice: () => {} })
 
-    const [event] = await raw<{ id: string; name: string; actor_did: string | null }[]>`select id, name, actor_did from events where slug = ${SLUG}`
-    expect(event, 'seeded demo-gathering').toBeTruthy()
-    eventId = event!.id
-    eventName = event!.name
-    preexistingActor = event!.actor_did
+    // No identity yet: the first test mints it through the admin API.
+    gathering = await createTestGathering(raw, { tag: 'e2e', status: 'proposals_open', withProgram: true, policyThresholds: { destructiveActionStewards: 2 } })
+    eventId = gathering.id
+    eventName = gathering.name
+    SLUG = gathering.slug
 
     for (const role of ['owner', 'admin', 'proposer'] as const) {
-      const email = `f-e2e-${role}-${RUN}@example.test`
-      const cookie = execFileSync('node', ['scripts/dev-login.mjs', email, base], { encoding: 'utf8' }).trim()
-      expect(cookie).toMatch(/^sp_at_session=/)
-      const [account] = await raw<{ id: string; did: string; handle: string }[]>`select id, did, handle from accounts where email = ${email}`
-      people[role] = { email, cookie, id: account!.id, did: account!.did, handle: account!.handle }
+      people[role] = await createTestAccount(`e2e-${role}`, { sql: raw, base })
       await raw`
-        insert into event_members (event_id, user_id, role) values (${eventId}, ${account!.id}, ${role === 'proposer' ? 'attendee' : role})
-        on conflict (event_id, user_id) do update set role = excluded.role
+        insert into event_members (event_id, user_id, role) values (${eventId}, ${people[role].id}, ${role === 'proposer' ? 'attendee' : role})
       `
     }
-    await raw`update events set policy_thresholds = jsonb_set(policy_thresholds, '{destructiveActionStewards}', '2') where id = ${eventId}`
     const slots = await raw<{ id: string; start_time: Date; venue_id: string }[]>`
       select id, start_time, venue_id from time_slots
       where event_id = ${eventId} and venue_id is not null and coalesce(is_break, false) = false
@@ -143,53 +133,10 @@ test.describe('ATProto layer against the local PDS', () => {
   test.afterAll(async () => {
     if (!raw) return
     try {
-      // Records this test put in the gathering's repo for its session.
-      if (actorDid) {
-        const agent = await lib.agent.agentForDid(actorDid, { fresh: true })
-        const rows = await raw<{ uri: string }[]>`
-          select uri from at_records where did = ${actorDid}
-            and (record::text like ${`%${sessionId || 'none'}%`} or uri = any(${[...gatheringUrisToRemove]}::text[]))
-        `
-        const uris = new Set([...gatheringUrisToRemove, ...rows.map((r) => r.uri)])
-        for (const uri of uris) {
-          const m = /^at:\/\/([^/]+)\/([^/]+)\/([^/]+)$/.exec(uri)
-          if (!m || m[1] !== actorDid) continue
-          await agent.com.atproto.repo.deleteRecord({ repo: actorDid, collection: m[2]!, rkey: m[3]! }).catch(() => undefined)
-          await raw`delete from at_records where uri = ${uri}`
-        }
-      }
-      if (sessionId) await raw`delete from sessions where id = ${sessionId}`
-      const ids = Object.values(people).map((p) => p.id)
-      if (ids.length) await raw`delete from at_series where event_id = ${eventId} and created_by = any(${ids}::uuid[])`
-      await raw`update events set atproto_tags = '{}' where id = ${eventId}`
-      const dids = Object.values(people).map((p) => p.did)
-      if (ids.length) {
-        await raw`delete from notifications where user_id = any(${ids}::uuid[])`
-        await raw`delete from at_records where did = any(${dids}::text[])`
-      }
-      // A gathering identity this test minted is torn down again; one that existed stays.
-      if (!preexistingActor && actorDid) {
-        await raw`delete from listings where event_id = ${eventId}`
-        await raw`delete from at_slot_grids where event_id = ${eventId}`
-        await raw`update venues set at_uri = null, at_cid = null where event_id = ${eventId}`
-        await raw`update tracks set at_uri = null, at_cid = null where event_id = ${eventId}`
-        await raw`
-          update events set actor_did = null, actor_handle = null, gathering_uri = null, gathering_cid = null,
-            calendar_event_uri = null, calendar_event_cid = null, policy_uri = null, atproto_published_at = null
-          where id = ${eventId}
-        `
-        await raw`delete from at_records where did = ${actorDid}`
-        await raw`delete from at_credentials where did = ${actorDid}`
-        dids.push(actorDid)
-      }
-      for (const did of dids) {
-        await fetch(`${pds}/xrpc/com.atproto.admin.deleteAccount`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', authorization: `Basic ${Buffer.from(`admin:${adminPassword}`).toString('base64')}` },
-          body: JSON.stringify({ did }),
-        })
-      }
-      if (ids.length) await raw`delete from accounts where id = any(${ids}::uuid[])`
+      // The gathering (sessions, series, listings, grids, approvals, audit rows) and the identity
+      // minted for it — its PDS repo with every record this run wrote — go first; then the people.
+      await gathering?.cleanup()
+      for (const p of Object.values(people)) await p.cleanup()
     } finally {
       moduleWithResolver._resolveFilename = originalResolve
       await raw.end({ timeout: 5 })
@@ -202,7 +149,7 @@ test.describe('ATProto layer against the local PDS', () => {
     expect(minted.status, JSON.stringify(minted.body)).toBe(200)
     expect(minted.body.actorDid).toMatch(/^did:plc:/)
     actorDid = minted.body.actorDid
-    if (preexistingActor) expect(actorDid).toBe(preexistingActor)
+    expect(minted.body.actorHandle).toBe(`${SLUG}.${handleDomain}`)
     const again = await api<{ minted: boolean; actorDid: string }>(people.owner, 'POST', `/api/v1/events/${SLUG}/admin/atproto`, { action: 'mint' })
     expect(again.body).toMatchObject({ minted: false, actorDid })
 

@@ -5,15 +5,18 @@
  *
  * Subscribes to the Jetstream v1 `/subscribe` endpoint (`ATPROTO_JETSTREAM_URL`)
  * with `wantedCollections` = JETSTREAM_COLLECTIONS (ours + borrowed), resumes from the persisted
- * `at_sync_cursor('jetstream')` (unix microseconds), ingests every commit through
- * `ingestFromJetstreamFrame` (relevance-filtered, per-record error boundary), advances the cursor
- * MONOTONICALLY every ~2s and on shutdown, reconnects with 1s→30s backoff, logs a heartbeat every
- * 60s. Log lines carry collections and outcomes only — never a DID, handle or AT-URI (R9).
+ * `at_sync_cursor('jetstream')` (unix microseconds), hands EVERY frame to `processJetstreamFrame`
+ * (commits relevance-filtered and, where they change app state, verified against the author's PDS;
+ * `account` frames hide/restore repos; `identity` frames evict caches and re-verify handles), drains
+ * targeted reconcile requests every 30s, advances the cursor MONOTONICALLY every ~2s and on
+ * shutdown (a frame that fails never holds it back), reconnects with 1s→30s backoff, logs a
+ * heartbeat every 60s. Log lines carry collections and outcomes only — never a DID, handle or AT-URI (R9).
  *
- * Frame shape (validated live against jetstream2.us-east and the Jetstream RFD §5.1):
- *   {did, time_us, kind:'commit'|'identity'|'account',
- *    commit?: {rev, operation:'create'|'update'|'delete', collection, rkey, cid?, record?}}
- *   `record`/`cid` are absent on delete; `identity`/`account` frames have no `commit`.
+ * Frame shapes (Jetstream v1 `/subscribe`, README + RFD §5.1; see `JetstreamFrame` in ingest.ts):
+ *   commit    {did, time_us, kind:'commit', commit:{rev, operation, collection, rkey, cid?, record?}}
+ *   identity  {did, time_us, kind:'identity', identity:{did, handle?, seq, time}}
+ *   account   {did, time_us, kind:'account', account:{active, did, seq, time, status?}}
+ *   v1 sends identity/account frames for every DID on the network, whatever `wantedCollections` says.
  *
  * Runs outside Next.js: `src/lib/atproto/*` is bundled on the fly with esbuild
  * (a tsx dependency) so `server-only`, `@/` paths and ESM-only packages all
@@ -34,6 +37,7 @@ type IndexStore = typeof import('../src/lib/atproto/index-store')
 
 const CURSOR_FLUSH_MS = 2_000
 const HEARTBEAT_MS = 60_000
+const RECONCILE_DRAIN_MS = 30_000
 const BACKOFF_MIN_MS = 1_000
 const BACKOFF_MAX_MS = 30_000
 /** Re-subscribe slightly behind the last frame: Jetstream replay is inclusive and ingest is idempotent. */
@@ -76,7 +80,7 @@ async function loadServerModules(): Promise<{ ingest: Ingest; store: IndexStore 
 
 async function main(): Promise<void> {
   const { ingest, store } = await loadServerModules()
-  const { ingestFromJetstreamFrame, jetstreamSubscribeUrl, indexStats, JETSTREAM_CURSOR_SOURCE } = ingest
+  const { processJetstreamFrame, drainReconcileRequests, jetstreamSubscribeUrl, indexStats, JETSTREAM_CURSOR_SOURCE } = ingest
 
   try {
     const stats = await indexStats()
@@ -125,7 +129,7 @@ async function main(): Promise<void> {
     }
     socket.onmessage = (event: MessageEvent) => {
       frames++
-      let frame: Parameters<typeof ingestFromJetstreamFrame>[0]
+      let frame: Parameters<typeof processJetstreamFrame>[0]
       try {
         frame = JSON.parse(typeof event.data === 'string' ? event.data : String(event.data))
       } catch {
@@ -134,20 +138,31 @@ async function main(): Promise<void> {
       if (typeof frame?.time_us === 'number' && (lastTimeUs === null || frame.time_us > lastTimeUs)) {
         lastTimeUs = frame.time_us // monotonic
       }
-      if (frame?.kind !== 'commit' || !frame.commit) return
-      // Serialise ingestion so create/update/delete for one URI apply in stream order.
+      if (frame?.kind !== 'commit' && frame?.kind !== 'account' && frame?.kind !== 'identity') return
+      // Serialise handling so create/update/delete for one URI (and account changes) apply in stream order.
       queue = queue
         .then(async () => {
-          const res = await ingestFromJetstreamFrame(frame)
+          const res = await processJetstreamFrame(frame)
           if (!res) return
-          if (res.outcome === 'skipped:irrelevant' || res.outcome === 'skipped:collection') return
+          if (res.kind === 'commit') {
+            const r = res.result
+            if (r.outcome === 'skipped:irrelevant' || r.outcome === 'skipped:collection') return
+            ingested++
+            log(`${r.operation} ${r.outcome} ${r.collection}`, {
+              ...(r.sideEffects.length ? { effects: r.sideEffects.map((e) => e.split(':')[0]) } : {}),
+              ...(r.warnings.length ? { warnings: r.warnings.length } : {}),
+            })
+            return
+          }
+          if (res.outcome !== 'applied') return
           ingested++
-          log(`${res.operation} ${res.outcome} ${res.collection}`, {
-            ...(res.sideEffects.length ? { effects: res.sideEffects.map((e) => e.split(':')[0]) } : {}),
-            ...(res.warnings.length ? { warnings: res.warnings.length } : {}),
-          })
+          if (res.kind === 'account') {
+            log(`account ${res.status?.changed ?? 'applied'}`, { hidden: res.status?.hidden, sessionsFlagged: res.status?.sessionsFlagged, purged: res.purged })
+          } else {
+            log(`identity ${res.identity?.state ?? 'applied'}`)
+          }
         })
-        .catch((e) => log('ingest failed', { collection: frame.commit?.collection, error: e instanceof Error ? e.name : 'error' }))
+        .catch((e) => log('frame failed', { kind: frame.kind, error: e instanceof Error ? e.name : 'error' }))
     }
     socket.onerror = (event: Event) => {
       log('socket error', { message: (event as ErrorEvent).message ?? 'unknown' })
@@ -162,6 +177,14 @@ async function main(): Promise<void> {
   }
 
   const flushTimer = setInterval(() => void flushCursor(), CURSOR_FLUSH_MS)
+  const drainTimer = setInterval(() => {
+    queue = queue
+      .then(async () => {
+        const r = await drainReconcileRequests(5)
+        if (r.repos) log('targeted reconcile', r)
+      })
+      .catch((e) => log('reconcile drain failed', { error: e instanceof Error ? e.name : 'error' }))
+  }, RECONCILE_DRAIN_MS)
   const heartbeatTimer = setInterval(() => {
     log('heartbeat', { connected: ws?.readyState === WebSocket.OPEN, frames, ingested, cursor: lastTimeUs, cursorAt: lastTimeUs ? new Date(lastTimeUs / 1000).toISOString() : null })
   }, HEARTBEAT_MS)
@@ -171,6 +194,7 @@ async function main(): Promise<void> {
     stopping = true
     log(`received ${signal}; shutting down`)
     clearInterval(flushTimer)
+    clearInterval(drainTimer)
     clearInterval(heartbeatTimer)
     if (reconnectTimer) clearTimeout(reconnectTimer)
     try {

@@ -5,6 +5,8 @@ import { ArrowLeft } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Footer } from '@/components/Footer'
 
+const contactEmail = process.env.NEXT_PUBLIC_CONTACT_EMAIL?.trim() || null
+
 export default function TermsPage() {
   return (
     <div className="min-h-screen bg-background">
@@ -71,29 +73,31 @@ export default function TermsPage() {
           </section>
 
           <section>
-            <h2 className="text-xl font-semibold mb-3">Quadratic Voting</h2>
+            <h2 className="text-xl font-semibold mb-3">Voting</h2>
             <p className="text-muted-foreground leading-relaxed">
-              The Service uses quadratic voting to allocate session votes. Each user receives 100 credits to distribute
-              among sessions. The cost increases quadratically (1 vote = 1 credit, 2 votes = 4 credits, etc.).
-              Attempting to game the system through multiple accounts or other means will result in account suspension.
+              Each gathering sets its own voting rules: how many credits participants receive and whether votes are
+              quadratic (2 votes cost 4 credits), linear, or simple approval. Votes are private and results are sealed
+              until a round closes. Attempting to game a vote through multiple accounts or other means may lead to your
+              participation being removed by the gathering&apos;s organizers.
             </p>
           </section>
 
           <section>
             <h2 className="text-xl font-semibold mb-3">Content Ownership</h2>
             <p className="text-muted-foreground leading-relaxed">
-              You retain ownership of content you submit (session proposals, profile information). By submitting content,
-              you grant Schelling Point and event organizers a non-exclusive license to display and use that content in connection
-              with the event and platform promotion.
+              You own what you write. Session proposals, co-host confirmations and endorsements are published as records
+              in your own AT Protocol repository, where they remain yours to edit or delete. By publishing them you let
+              gatherings and other applications on the network display them, including in schedules and listings.
             </p>
           </section>
 
           <section>
             <h2 className="text-xl font-semibold mb-3">Moderation</h2>
             <p className="text-muted-foreground leading-relaxed">
-              Session proposals are subject to review by event organizers. We reserve the right to reject, modify,
-              or remove content that violates these terms or is deemed inappropriate for the event. Final scheduling
-              decisions are made by event organizers based on votes and logistical considerations.
+              Organizers decide what is programmed at their gathering. They can decline a proposal, remove it from the
+              gathering&apos;s own listings and schedule, or ask its author to update it, but they cannot edit or delete a
+              record in your repository. Moving or cancelling a session that is already on a published schedule requires
+              the approval of as many organizers as the gathering&apos;s policy sets.
             </p>
           </section>
 
@@ -125,10 +129,15 @@ export default function TermsPage() {
           <section>
             <h2 className="text-xl font-semibold mb-3">Contact</h2>
             <p className="text-muted-foreground leading-relaxed">
-              For questions about these Terms of Service, please contact us at{' '}
-              <a href="mailto:support@schellingpoint.xyz" className="text-primary hover:underline">
-                support@schellingpoint.xyz
-              </a>.
+              For questions about these terms, contact{' '}
+              {contactEmail ? (
+                <a href={`mailto:${contactEmail}`} className="text-primary hover:underline">
+                  {contactEmail}
+                </a>
+              ) : (
+                'the operator of this instance'
+              )}
+              .
             </p>
           </section>
         </div>

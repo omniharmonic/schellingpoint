@@ -24,10 +24,12 @@ Three rules bind everything here:
 | `validate.ts` | Loads `lexicons/**` into `@atproto/lexicon`; `assertValidRecord`, `assertNoUnknownFields`. |
 | `identity.ts` | Handle/DID resolution. A DID hosted on OUR PDS is answered by `describeOwnRepo` (internal URL); foreign DIDs via PLC (`ATPROTO_PLC_URL` optional). |
 | `write.ts` | Repo I/O: `putRecord`/`deleteRecord` (local validation, `swapRecord` only when passed), unauthenticated `getRecord`/`listRecords`/`listAllRecords` (100-row pages, cursor-followed), `isInvalidSwap`. |
+| `rate-limit.ts` | 429 / `RateLimit-Reset` / `Retry-After` backoff with a 60 s wait budget (`RateLimitBudgetExceededError`), 5xx retries, and `RepoWritePacer` (one write per repo, points budget under the PDS's 5 000/h and 35 000/day; create 3, put 2, delete 1). |
 | `index-store.ts` | `at_records` on `sql`; cursors in `at_sync_cursor`, `advanceCursor` is monotonic. |
 | `actor.ts` | `GatheringActorPort` + `AppCustodyGatheringActor` (dependency-injected): MIN_ROLE per action, destructive threshold, role-claim gates, audit, read-your-writes. |
 | `actors.ts` | The registry: `actorForEvent` (LRU 64 + TTL, lazy credential), `CredentialGatheringSession` (one re-login, persistent auth failure → evict + `disabled_at` after 3), `putRecordAsGathering`/`deleteRecordAsGathering`, `mintGatheringActor`, `gatheringActorHealth` (organiser banner), `resetGatheringCredential`, `deriveGatheringRole`, `configureGatheringActors` (test seam). |
-| `publish.ts` | Gathering publishing: `publishGathering`, `publishPolicy`, `setPolicyThresholds`, `publishVenues`, `publishTracks`, `publishSlotGrids`, `publishSchedule`, `republishSession`, and the destructive `moveSession`/`cancelSession`. CAS with one re-read retry. |
+| `publish.ts` | Gathering publishing: `publishGathering`, `publishPolicy`, `setPolicyThresholds`, `publishVenues`, `publishTracks`, `publishSlotGrids`, `publishSchedule`, `republishSession`, and the destructive `moveSession`/`cancelSession`. CAS with one re-read retry; new independent records share `applyWrites` commits (creates only, ≤ 100 ops), schedule writes in phases (events, then configs + slots). |
+| `publish-jobs.ts` | `publish_jobs`: schedules of > 25 sessions publish as a resumable job (`enqueueSchedulePublish`, `runDuePublishJobs`, `getPublishJob`), re-queued at the PDS's reset when rate-limited. |
 | `approvals.ts` | `requestSessionMove`, `requestSessionCancel`, `requestListingRemoval`, `approveRequest`, `withdrawApproval`, `listApprovalRequests`. Approvals are `freeschool.draft.approval` records in each organiser's own repo. |
 | `participant.ts` | Records in a person's own repo: proposal, co-host, endorsement, opt-in RSVP, opt-in time preference; `publishingIdentity` (OAuth linkage gate). |
 | `drift.ts` | cid drift and withdrawal flags + `proposal_changed` notifications; `flaggedSessions`. |
@@ -35,7 +37,8 @@ Three rules bind everything here:
 | `role-claims.ts` | Triple-gated `coop.lexicon.membership`: `syncRoleClaim`, `setRoleClaimOptIn`, `syncRoleClaimsForEvent`. |
 | `skills.ts` | The Free School skills authority's taxonomy cached in `at_records` (24 h): `ensureSkillsFresh`, `searchSkills`, `getSkills`, `validateSkillUris`. |
 | `series.ts` | Recurring gatherings: `createGatheringSeries`, `materializeSeries`, `materializeAllSeries`. |
-| `ingest.ts` | `ingestRecord` (relevance filter, validation, per-record error boundary), Jetstream frames, `reconcileRepo`/`reconcileAll` (our PDS via `listRepos`, OAuth accounts, actors, peers; deletion diff), `persistJetstreamCursor`. |
+| `repo-status.ts` | `at_repo_status`: account status (`applyRepoStatus` — hide/restore, `sessions.author_inactive_at`, `session_cohosts.cohost_inactive_at`, `proposal_changed`), identity changes (`applyIdentityChange` — cache eviction, bidirectional handle verification, NULL when invalid). |
+| `ingest.ts` | `ingestRecord` (relevance filter, validation, per-record error boundary), `processJetstreamFrame` (commits with side effects verified against the author's PDS; `#account` / `#identity` frames), targeted reconcile requests, `reconcileRepo`/`reconcileAll` (our PDS via `listRepos`, OAuth accounts, actors, peers; deletion diff), `persistJetstreamCursor`. |
 | `hosts.ts` | `resolveGatheringHost(host)` for middleware; `allowCertificateFor(domain)` — the on-demand TLS gate. |
 | `http.ts` | `atprotoErrorResponse(e)` — one error → JSON mapping for every route. |
 | `config.ts`, `crypto.ts`, `agent.ts`, `oauth.ts`, `session.ts`, `bridge.ts`, `bsky-profile.ts` | Wave-0 identity (shared, read-only for this package). |
@@ -62,6 +65,8 @@ Three rules bind everything here:
 | `GET /api/atproto/records?event=` | public (private/draft gatherings: members only) |
 | `GET /api/atproto/skills?q=` / `?uris=` | public |
 | `GET /api/atproto/sync` | `Bearer $CRON_SECRET` |
+| `GET /api/jobs/publish` | `Bearer $CRON_SECRET` (scheduler, every minute) |
+| `GET /api/v1/events/[slug]/admin/atproto/publish?jobId=` | owner/admin (job progress) |
 | `GET /internal/tls-check?domain=` | container-local (Caddy `ask`) |
 
 ## Environment
@@ -71,6 +76,8 @@ Three rules bind everything here:
 | `PDS_URL` / `PDS_INTERNAL_URL` / `PDS_ADMIN_PASSWORD` / `PDS_HANDLE_DOMAIN` | Our PDS (public URL named by DID documents; internal URL for all I/O). |
 | `ATPROTO_SESSION_SECRET`, `ATPROTO_CUSTODY_KEY` | Session cookie HMAC; AES-256-GCM custody key. |
 | `ATPROTO_PLC_URL` | Optional PLC directory for foreign DIDs (default plc.directory). |
+| `PDS_PLC_URL` | The PLC directory our PDS writes to; identity events re-read our accounts' DID documents from it (default plc.directory; local `http://localhost:2582`). |
+| `ATPROTO_REPO_WRITE_HOUR_POINTS` / `ATPROTO_REPO_WRITE_DAY_POINTS` | Per-repo pacing budget (default 4 000 / 28 000). |
 | `ATPROTO_JETSTREAM_URL` | Jetstream for `scripts/atproto-indexer.ts`. |
 | `SKILLS_AUTHORITY_DID` | Default `did:plc:yekh7akcatgn7o7foedjpgj4` (Free School skills). |
 | `GATHERING_ACTOR_CACHE_TTL_MS` | Port cache TTL (default 30 min). |

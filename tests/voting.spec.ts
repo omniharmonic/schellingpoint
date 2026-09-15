@@ -4,13 +4,14 @@ import Module from 'node:module'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import postgres from 'postgres'
+import { createTestGathering, signInWithEmail, type TestGathering } from './helpers/gathering'
 
 // Ballot-key voting and feedback ballots (spec §5, plan §7.2 "Voting (C owns)") against the
 // local stack (Postgres :55432, dev PDS) and the running dev server (:3001, mail disabled).
 //
-// Uses the seeded `demo-gathering`: its voting fields are saved first and restored in
-// afterAll, and every row this file creates (sessions, rounds, accounts, PDS accounts) is
-// deleted there.
+// Runs on a gathering of its own (tests/helpers/gathering.ts), never a seeded one; every row this
+// file creates (the gathering with its sessions and rounds, accounts, PDS accounts) is deleted in
+// afterAll.
 loadEnvConfig(process.cwd(), true)
 
 const base = process.env.VOTING_TEST_BASE_URL || 'http://localhost:3001'
@@ -25,7 +26,6 @@ const isLocal = (() => {
   }
 })()
 
-const SLUG = 'demo-gathering'
 const RUN = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`
 const emailFor = (who: string) => `pkgc+${RUN}-${who}@example.test`
 
@@ -43,7 +43,8 @@ test.describe('ballot-key voting', () => {
   let raw: postgres.Sql
   let voting: Voting
   let eventId = ''
-  let savedEvent: Record<string, unknown> | null = null
+  let SLUG = ''
+  let gathering: TestGathering | null = null
   const createdDids = new Set<string>()
   const sessionIds: string[] = []
   const roundIds = new Set<string>()
@@ -55,22 +56,7 @@ test.describe('ballot-key voting', () => {
   let S: string[] = []
   let quadraticRoundId = ''
 
-  async function devLogin(email: string): Promise<string> {
-    const res = await fetch(`${base}/api/auth/email`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', origin: base },
-      body: JSON.stringify({ email, next: '/' }),
-    })
-    const body = (await res.json().catch(() => ({}))) as { devVerifyUrl?: string }
-    expect(res.status, JSON.stringify(body)).toBe(200)
-    expect(typeof body.devVerifyUrl, 'run the dev server without RESEND_API_KEY').toBe('string')
-    const verify = await fetch(body.devVerifyUrl!, { redirect: 'manual' })
-    const cookie = (verify.headers.getSetCookie?.() ?? [verify.headers.get('set-cookie') ?? ''])
-      .map((c) => c.split(';')[0])
-      .find((c) => c.startsWith('sp_at_session='))
-    expect(cookie, 'verify must set the session cookie').toBeTruthy()
-    return cookie!
-  }
+  const devLogin = (email: string) => signInWithEmail(email, base)
 
   async function accountId(email: string): Promise<string> {
     const [row] = await raw<{ id: string; did: string }[]>`select id, did from accounts where email = ${email}`
@@ -96,16 +82,14 @@ test.describe('ballot-key voting', () => {
     voting = require('../src/lib/voting') as Voting
     raw = postgres(databaseUrl, { max: 4, onnotice: () => {} })
 
-    const [event] = await raw<Record<string, unknown>[]>`
-      select id, status, voting_mechanism, vote_credits_per_user, voting_opens_at, voting_closes_at, policy_thresholds, ticketing_enabled
-      from events where slug = ${SLUG}
-    `
-    expect(event, `seeded ${SLUG}`).toBeTruthy()
-    savedEvent = event
-    eventId = event.id as string
-
-    // A crashed earlier run may have left an unfinalized round; one open round per phase.
-    await raw`delete from vote_rounds where event_id = ${eventId} and finalized_at is null`
+    gathering = await createTestGathering(raw, {
+      tag: 'voting',
+      status: 'voting_open',
+      voting: { mechanism: 'quadratic', credits: 100, opensAt: null, closesAt: null },
+      policyThresholds: { feedbackK: 3 },
+    })
+    eventId = gathering.id
+    SLUG = gathering.slug
 
     cookies.org = await devLogin(emailFor('org'))
     cookies.voterA = await devLogin(emailFor('votera'))
@@ -131,12 +115,6 @@ test.describe('ballot-key voting', () => {
         (${eventId}, ${ids.D}, 'attendee')
       on conflict (event_id, user_id) do update set role = excluded.role, vote_credits = null
     `
-    await raw`
-      update events set status = 'voting_open', voting_mechanism = 'quadratic', vote_credits_per_user = 100,
-        voting_opens_at = null, voting_closes_at = null, ticketing_enabled = false,
-        policy_thresholds = policy_thresholds || '{"feedbackK": 3}'::jsonb
-      where id = ${eventId}
-    `
 
     const specs = [
       { title: 'S1', status: 'approved', votable: true },
@@ -161,16 +139,8 @@ test.describe('ballot-key voting', () => {
     moduleWithResolver._resolveFilename = originalResolve
     if (raw) {
       if (roundIds.size) await raw`delete from vote_rounds where id in ${raw([...roundIds])}`
-      if (sessionIds.length) await raw`delete from sessions where id in ${raw(sessionIds)}`
-      if (savedEvent) {
-        await raw`
-          update events set status = ${savedEvent.status as string}, voting_mechanism = ${savedEvent.voting_mechanism as string},
-            vote_credits_per_user = ${savedEvent.vote_credits_per_user as number},
-            voting_opens_at = ${savedEvent.voting_opens_at as string | null}, voting_closes_at = ${savedEvent.voting_closes_at as string | null},
-            policy_thresholds = ${raw.json(savedEvent.policy_thresholds as postgres.JSONValue)}, ticketing_enabled = ${savedEvent.ticketing_enabled as boolean}
-          where id = ${eventId}
-        `
-      }
+      // The gathering's own rows (sessions, rounds, ballots, members) go with it.
+      await gathering?.cleanup()
       const rows = await raw<{ did: string }[]>`select did from accounts where email like ${`pkgc+${RUN}-%`}`
       for (const r of rows) if (!r.did.startsWith(`did:plc:pkgc${RUN}`)) createdDids.add(r.did)
       for (const did of createdDids) {
@@ -412,11 +382,12 @@ test.describe('ballot-key voting', () => {
   })
 
   test('closing: ledger gone, key destroyed, entries unlinkable to accounts but linked to each other, results = sums, k-suppression', async ({ request }) => {
-    // Shape a known distribution: S1 has 3 voters (A, B, C); S4 has 1 (A only).
-    await voting.setAllocation(eventId, ids.B, S[0], 1)
-    await voting.setAllocation(eventId, ids.B, S[3], 0)
-    await voting.setAllocation(eventId, ids.C, S[3], 0)
-    await voting.setAllocation(eventId, ids.C, S[0], 1)
+    // Shape a known distribution: S1 has 3 voters (A, B, C); S2..S4 have 1 (A only). B and C still
+    // hold whichever sessions won the concurrent-write races above, so all of theirs are reset.
+    for (const who of [ids.B, ids.C]) {
+      await voting.setAllocation(eventId, who, S[0], 1)
+      for (const sid of [S[1], S[2], S[3]]) await voting.setAllocation(eventId, who, sid, 0)
+    }
     // An empty ledger row casts no ballot.
     await voting.setAllocation(eventId, ids.D, S[0], 1)
     await voting.setAllocation(eventId, ids.D, S[0], 0)
@@ -442,7 +413,7 @@ test.describe('ballot-key voting', () => {
       }
     }
     expect(expected.get(S[0])?.voters).toBe(3)
-    expect(expected.get(S[3])?.voters).toBe(1)
+    for (const sid of [S[1], S[2], S[3]]) expect(expected.get(sid)?.voters, sid).toBe(1)
 
     // Due now; the job closes it.
     await raw`update vote_rounds set opens_at = now() - interval '2 hours', closes_at = now() - interval '1 second' where id = ${quadraticRoundId}`

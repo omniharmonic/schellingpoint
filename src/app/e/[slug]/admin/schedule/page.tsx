@@ -31,6 +31,7 @@ import { apiFetch, ApiError } from '@/lib/api/client'
 import { getEventDayLabel, getEventDays } from '@/lib/events/dates'
 import { formatInEventTimezone } from '@/lib/events/timezone'
 import { cn } from '@/lib/utils'
+import { PublishJobProgress } from '@/components/PublishJobProgress'
 import { hostLabel, type AdminSession, type AdminSessionsResponse, type AdminTimeSlot, type AdminVenue } from '@/components/admin/types'
 
 interface ApprovalRequest {
@@ -61,7 +62,7 @@ interface PublishResponse {
   message: string
   changes: { added: number; moved: number; removed: number }
   notified: { members: number }
-  network: { attempted: false } | { attempted: true; published: number; failed: number; results: Array<{ kind: string; id: string; uri?: string; error?: string }>; error?: string }
+  network: { attempted: false } | { attempted: true; published: number; failed: number; results: Array<{ kind: string; id: string; uri?: string; error?: string }>; error?: string; queued?: boolean; jobId?: string; total?: number }
 }
 
 interface AutoScheduleResult {
@@ -970,6 +971,11 @@ export default function AdminSchedulePage() {
                       <p className="font-medium flex items-center gap-2"><Globe className="h-4 w-4" />Network calendar</p>
                       {publishResult.network.error ? (
                         <p role="alert" className="text-destructive">{publishResult.network.error}</p>
+                      ) : publishResult.network.queued && publishResult.network.jobId ? (
+                        <PublishJobProgress
+                          statusUrl={`${base}/admin/publish-schedule?jobId=${encodeURIComponent(publishResult.network.jobId)}`}
+                          onDone={() => void refreshAfterChange()}
+                        />
                       ) : (
                         <p className="text-muted-foreground">{publishResult.network.published} session{publishResult.network.published === 1 ? '' : 's'} written; {publishResult.network.failed} failed.</p>
                       )}

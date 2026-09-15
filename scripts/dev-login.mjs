@@ -24,7 +24,14 @@ if (!res.ok || !body.devVerifyUrl) {
   console.error(`sign-in request failed (${res.status}):`, body)
   process.exit(1)
 }
-const verify = await fetch(body.devVerifyUrl, { redirect: 'manual' })
+// The link's GET only renders a confirmation page; the form POST consumes the token (303 + cookie).
+const token = new URL(body.devVerifyUrl).searchParams.get('token') ?? ''
+const verify = await fetch(`${base}/auth/verify`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/x-www-form-urlencoded', origin: base },
+  body: new URLSearchParams({ token }).toString(),
+  redirect: 'manual',
+})
 const cookie = (verify.headers.getSetCookie?.() ?? [verify.headers.get('set-cookie') ?? ''])
   .map((c) => c.split(';')[0])
   .find((c) => c.startsWith('sp_at_session='))

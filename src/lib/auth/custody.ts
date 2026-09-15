@@ -33,6 +33,7 @@ import { generateHandle, handleDomain, isReservedLabel, isStaticReservedLabel, i
 import { createAccount, createInviteCode, PdsError, searchAccountByEmail, updateAccountPassword } from './pds'
 import { sendMail } from './mail'
 import { hashToken, newToken, randomPassword } from './tokens'
+import { hashIp } from './client-ip'
 
 type Tx = Parameters<Parameters<typeof tx>[0]>[0]
 
@@ -40,6 +41,39 @@ export const SIGNIN_TTL_MS = 15 * 60 * 1000
 export const REVEAL_TTL_MS = 24 * 60 * 60 * 1000
 export const MAX_SIGNIN_LINKS_PER_HOUR = 5
 const MINT_ATTEMPTS = 5
+
+/**
+ * Abuse limits for the email door, per rolling hour. Each is overridable by env (read per call,
+ * so a test or an operator can change one without a restart of anything but this process).
+ */
+export const SIGNIN_LIMIT_DEFAULTS = {
+  /** Sign-in link requests from one client IP (bucket). `AUTH_MAX_LINKS_PER_IP_HOUR` */
+  linksPerIp: 10,
+  /** Brand-new identities requested from one client IP. `AUTH_MAX_MINTS_PER_IP_HOUR` */
+  mintsPerIp: 3,
+  /** Brand-new custodial identities site-wide. `AUTH_MAX_MINTS_GLOBAL_HOUR` */
+  mintsGlobal: 60,
+  /** Sign-in links for one email address. `AUTH_MAX_LINKS_PER_EMAIL_HOUR` */
+  linksPerEmail: MAX_SIGNIN_LINKS_PER_HOUR,
+} as const
+
+export type SignInLimits = { -readonly [K in keyof typeof SIGNIN_LIMIT_DEFAULTS]: number }
+
+function envLimit(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim()
+  if (!raw) return fallback
+  const n = Number(raw)
+  return Number.isInteger(n) && n >= 0 ? n : fallback
+}
+
+export function signInLimits(): SignInLimits {
+  return {
+    linksPerIp: envLimit('AUTH_MAX_LINKS_PER_IP_HOUR', SIGNIN_LIMIT_DEFAULTS.linksPerIp),
+    mintsPerIp: envLimit('AUTH_MAX_MINTS_PER_IP_HOUR', SIGNIN_LIMIT_DEFAULTS.mintsPerIp),
+    mintsGlobal: envLimit('AUTH_MAX_MINTS_GLOBAL_HOUR', SIGNIN_LIMIT_DEFAULTS.mintsGlobal),
+    linksPerEmail: envLimit('AUTH_MAX_LINKS_PER_EMAIL_HOUR', SIGNIN_LIMIT_DEFAULTS.linksPerEmail),
+  }
+}
 
 /**
  * The PDS's phrasings of "this email already belongs to an account" (pds 0.4:
@@ -68,6 +102,21 @@ export class AuthError extends Error {
     super(message)
     this.name = 'AuthError'
   }
+}
+
+/** One of the email door's abuse limits was hit. Same body whichever limit it was. */
+export class RateLimitedError extends AuthError {
+  constructor(readonly retryAfterSeconds: number) {
+    super('Too many requests; try again later', 429, 'rate_limited')
+    this.name = 'RateLimitedError'
+  }
+}
+
+/** Seconds until the oldest row counted in a one-hour window leaves it (at least 1). */
+function retryAfter(oldest: Date | string | null | undefined): number {
+  if (!oldest) return 3600
+  const s = Math.ceil((new Date(oldest).getTime() + 60 * 60 * 1000 - Date.now()) / 1000)
+  return Math.min(Math.max(s, 1), 3600)
 }
 
 /** A take-ownership link is already live; rotating again would orphan its password. */
@@ -210,45 +259,148 @@ export async function mintCustodialAccount(emailInput: string): Promise<{ accoun
 
 /* ───────────────────────────── sign-in ───────────────────────────── */
 
+export interface StartEmailSignInOptions {
+  /** The client IP (`clientIp(request)`); null when unknown/untrusted — per-IP limits are skipped. */
+  ip?: string | null
+  /**
+   * Run work after the response (Next's `after`). Used whenever mail is really delivered, so the
+   * slow part — minting on the PDS, sending mail — happens after the response and a new email
+   * answers in the same time class as an existing one. Defaults to awaiting the task inline.
+   */
+  defer?: (task: () => Promise<void>) => void
+}
+
 /**
  * Sign in OR sign up: one door. An existing account (custodial, or custodial-then-owned)
  * gets a link; a new email gets an identity minted first. An owned account can still use
  * email to open a session here — it just can no longer publish through custody.
+ *
+ * ENUMERATION. The response is `{ ok: true }` for an existing and a new address alike. When mail
+ * is delivered (production), minting and sending run in `defer`, after the response, so the two
+ * cases take the same time too. Only without mail outside production (`devVerifyUrl`) does the
+ * mint happen inline, because the returned link must work immediately.
+ *
+ * LIMITS (rolling hour, `signInLimits()`), all answered with `RateLimitedError` (429):
+ *   per email links · per IP links · per IP new identities · global new custodial identities.
+ * The IP and mint limits are checked under advisory locks so concurrent requests cannot overshoot.
  */
-export async function startEmailSignIn(emailInput: string, nextPath: string | null | undefined): Promise<{ ok: true; devVerifyUrl?: string }> {
+export async function startEmailSignIn(
+  emailInput: string,
+  nextPath: string | null | undefined,
+  opts: StartEmailSignInOptions = {},
+): Promise<{ ok: true; devVerifyUrl?: string }> {
   const email = normalizeEmail(emailInput)
   const next = safeReturnPath(nextPath)
   const token = newToken()
+  const tokenHash = hashToken(token)
+  const ipHash = opts.ip ? hashIp(opts.ip) : null
+  const limits = signInLimits()
+  const deliversMail = Boolean(process.env.RESEND_API_KEY?.trim()) || isProduction()
+  const defer = deliversMail && opts.defer ? opts.defer : null
 
-  await tx(async (t) => {
+  const { existing } = await tx(async (t) => {
+    // Lock order is fixed (email → ip → global) so these never deadlock.
     await lockEmail(t, email)
-    const recent = await t<{ n: number }[]>`
-      select count(*)::int as n from auth_email_tokens
+    const perEmail = await t<{ n: number; oldest: Date | null }[]>`
+      select count(*)::int as n, min(created_at) as oldest from auth_email_tokens
       where email = ${email} and purpose = 'signin' and created_at > now() - interval '1 hour'
     `
-    if ((recent[0]?.n ?? 0) >= MAX_SIGNIN_LINKS_PER_HOUR) {
-      throw new AuthError('Too many sign-in links requested for this address. Try again in an hour.', 429, 'RateLimited')
+    if ((perEmail[0]?.n ?? 0) >= limits.linksPerEmail) throw new RateLimitedError(retryAfter(perEmail[0]?.oldest))
+
+    if (ipHash) {
+      await t`select pg_advisory_xact_lock(hashtext(${`signin-ip:${ipHash}`}))`
+      const perIp = await t<{ n: number; oldest: Date | null }[]>`
+        select count(*)::int as n, min(created_at) as oldest from auth_email_tokens
+        where ip_hash = ${ipHash} and purpose = 'signin' and created_at > now() - interval '1 hour'
+      `
+      if ((perIp[0]?.n ?? 0) >= limits.linksPerIp) throw new RateLimitedError(retryAfter(perIp[0]?.oldest))
     }
-    const existing = await findByEmail(t, email)
-    const accountId = existing ? existing.id : (await mintLocked(t, email)).accountId
+
+    const found = await findByEmail(t, email)
+    let accountId: string | null = found?.id ?? null
+    if (!found) {
+      // An earlier request for this same new address that has not minted yet is not a second mint.
+      const pending = await t<{ n: number }[]>`
+        select count(*)::int as n from auth_email_tokens
+        where email = ${email} and mints_account and account_id is null and created_at > now() - interval '1 hour'
+      `
+      const alreadyCounted = (pending[0]?.n ?? 0) > 0
+      if (ipHash && !alreadyCounted) {
+        const mintsFromIp = await t<{ n: number; oldest: Date | null }[]>`
+          select count(distinct email)::int as n, min(created_at) as oldest from auth_email_tokens
+          where ip_hash = ${ipHash} and mints_account and created_at > now() - interval '1 hour'
+        `
+        if ((mintsFromIp[0]?.n ?? 0) >= limits.mintsPerIp) throw new RateLimitedError(retryAfter(mintsFromIp[0]?.oldest))
+      }
+      if (!alreadyCounted) {
+        await t`select pg_advisory_xact_lock(hashtext('signin-mint-global'))`
+        const global = await t<{ n: number; oldest: Date | null }[]>`
+          select (
+            (select count(*) from accounts where kind = 'custodial' and created_at > now() - interval '1 hour') +
+            (select count(distinct email) from auth_email_tokens
+              where mints_account and account_id is null and created_at > now() - interval '1 hour')
+          )::int as n,
+          (select min(created_at) from accounts where kind = 'custodial' and created_at > now() - interval '1 hour') as oldest
+        `
+        if ((global[0]?.n ?? 0) >= limits.mintsGlobal) throw new RateLimitedError(retryAfter(global[0]?.oldest))
+      }
+      if (!defer) accountId = (await mintLocked(t, email)).accountId
+    }
     await t`
-      insert into auth_email_tokens (token_hash, email, account_id, purpose, next_path, expires_at)
-      values (${hashToken(token)}, ${email}, ${accountId}, 'signin', ${next}, ${new Date(Date.now() + SIGNIN_TTL_MS)})
+      insert into auth_email_tokens (token_hash, email, account_id, purpose, next_path, expires_at, ip_hash, mints_account)
+      values (${tokenHash}, ${email}, ${accountId}, 'signin', ${next}, ${new Date(Date.now() + SIGNIN_TTL_MS)}, ${ipHash}, ${!found})
     `
+    return { existing: found }
   })
 
   const url = `${publicUrl()}/auth/verify?token=${encodeURIComponent(token)}`
-  const { delivered } = await sendMail({
-    to: email,
-    subject: 'Your unconference sign-in link',
-    text: [
-      'Open this link to sign in:',
-      url,
-      '',
-      'It works once and expires in 15 minutes. If you did not ask for it, ignore this email.',
-    ].join('\n'),
-  })
+  const send = () =>
+    sendMail({
+      to: email,
+      subject: 'Your unconference sign-in link',
+      text: [
+        'Open this link to sign in:',
+        url,
+        '',
+        'It works once and expires in 15 minutes. If you did not ask for it, ignore this email.',
+      ].join('\n'),
+    })
+
+  if (defer) {
+    defer(async () => {
+      try {
+        if (!existing) {
+          const minted = await mintCustodialAccount(email)
+          await sql`update auth_email_tokens set account_id = ${minted.accountId} where token_hash = ${tokenHash} and account_id is null`
+        }
+        await send()
+      } catch (e) {
+        // Name only: never the address, the token or the PDS's message.
+        console.error('[auth] deferred sign-in work failed:', e instanceof Error ? e.name : 'error')
+      }
+    })
+    return { ok: true }
+  }
+
+  const { delivered } = await send()
   return { ok: true, ...(!delivered && !isProduction() ? { devVerifyUrl: url } : {}) }
+}
+
+/**
+ * Masked form of the address a sign-in link was sent to (`b•••@example.org`), for the confirmation
+ * page. Looks the token up WITHOUT consuming it and without regard to whether it is still valid, so
+ * the page does not reveal validity. Null for a token that never existed.
+ */
+export async function maskedEmailForToken(token: string): Promise<string | null> {
+  if (!token || typeof token !== 'string' || token.length > 256) return null
+  const rows = await sql<{ email: string }[]>`
+    select email from auth_email_tokens where token_hash = ${hashToken(token)} and purpose = 'signin'
+  `
+  const email = rows[0]?.email
+  if (!email) return null
+  const at = email.lastIndexOf('@')
+  if (at < 1) return null
+  return `${email[0]}\u2022\u2022\u2022${email.slice(at)}`
 }
 
 /** Consume a sign-in token. Atomic: a double click cannot open two sessions from one link. */
@@ -500,6 +652,9 @@ export async function mintGatheringAccount(input: { slug: string; name: string; 
 /** Map an `AuthError` (or a `PdsError`) to `{ error, code }` JSON; null for anything else. */
 export function authErrorResponse(e: unknown): Response | null {
   const headers = { 'Cache-Control': 'private, no-store' }
+  if (e instanceof RateLimitedError) {
+    return Response.json({ error: e.message, code: e.code }, { status: 429, headers: { ...headers, 'Retry-After': String(e.retryAfterSeconds) } })
+  }
   if (e instanceof AuthError) return Response.json({ error: e.message, code: e.code }, { status: e.status, headers })
   if (e instanceof PdsError) {
     return Response.json(

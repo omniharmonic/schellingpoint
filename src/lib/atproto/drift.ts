@@ -123,24 +123,27 @@ export async function flagProposalWithdrawn(input: { sessionId: string }): Promi
 export interface FlaggedSession {
   id: string
   title: string
-  kind: 'cid-drift' | 'withdrawn'
+  kind: 'cid-drift' | 'withdrawn' | 'author-inactive'
   since: string
   proposalUri: string | null
 }
 
 /** For the admin ATProto page: sessions needing an organiser's review. */
 export async function flaggedSessions(eventId: string): Promise<FlaggedSession[]> {
-  const rows = await sql<{ id: string; title: string; drift_at: string | null; withdrawn_at: string | null; proposal_uri: string | null }[]>`
-    select id, title, proposal_drift_at as drift_at, proposal_withdrawn_at as withdrawn_at, proposal_uri
+  const rows = await sql<{ id: string; title: string; drift_at: string | null; withdrawn_at: string | null; inactive_at: string | null; proposal_uri: string | null }[]>`
+    select id, title, proposal_drift_at as drift_at, proposal_withdrawn_at as withdrawn_at, author_inactive_at as inactive_at, proposal_uri
     from sessions
-    where event_id = ${eventId} and (proposal_drift_cid is not null or proposal_withdrawn_at is not null)
-    order by coalesce(proposal_withdrawn_at, proposal_drift_at) desc
+    where event_id = ${eventId}
+      and (proposal_drift_cid is not null or proposal_withdrawn_at is not null
+           -- an inactive author matters to organisers once the session is accepted
+           or (author_inactive_at is not null and (status in ('approved', 'scheduled') or slot_uri is not null)))
+    order by coalesce(proposal_withdrawn_at, author_inactive_at, proposal_drift_at) desc
   `
   return rows.map((r) => ({
     id: r.id,
     title: r.title,
-    kind: r.withdrawn_at ? 'withdrawn' : 'cid-drift',
-    since: (r.withdrawn_at ?? r.drift_at)!,
+    kind: r.withdrawn_at ? 'withdrawn' : r.inactive_at ? 'author-inactive' : 'cid-drift',
+    since: (r.withdrawn_at ?? r.inactive_at ?? r.drift_at)!,
     proposalUri: r.proposal_uri,
   }))
 }

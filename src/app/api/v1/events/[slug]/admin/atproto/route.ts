@@ -19,7 +19,6 @@
  *
  * The OAuth alternative to `link` starts at /api/atproto/auth/start?purpose=gathering.
  */
-import { AtpAgent } from '@atproto/api'
 import { sql } from '@/lib/db'
 import { assertSameOrigin, requireEventRole } from '@/lib/auth/viewer'
 import { readPolicyThresholds } from '@/lib/events/policy'
@@ -30,6 +29,7 @@ import { wrapSecret } from '@/lib/atproto/crypto'
 import { flaggedSessions } from '@/lib/atproto/drift'
 import { atprotoErrorResponse } from '@/lib/atproto/http'
 import { forgetOwnRepo, isHandle, resolveDidDoc, resolveHandle } from '@/lib/atproto/identity'
+import { atpAgentForService, serviceForDid } from '@/lib/atproto/service-url'
 import { listPeers, removePeer, restoreListing, upsertPeer } from '@/lib/atproto/listings'
 import { revokeOAuthSession } from '@/lib/atproto/oauth'
 import { setPolicyThresholds } from '@/lib/atproto/publish'
@@ -147,7 +147,8 @@ export async function POST(request: Request, { params }: Params) {
         const member = await sql`select 1 from accounts where did = ${did}`
         if (member.length) return bad(409, 'That account belongs to a person on this site. A gathering needs its own account.', 'handle')
         try {
-          await new AtpAgent({ service: pds }).login({ identifier: handle, password: appPassword })
+          // SSRF guard: our PDS via the internal URL, any other only through safeFetch.
+          await atpAgentForService(await serviceForDid(did)).login({ identifier: handle, password: appPassword })
         } catch {
           return bad(400, 'Sign-in failed. Create an app password in the account settings and paste it here.', 'appPassword')
         }

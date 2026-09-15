@@ -1,12 +1,5 @@
 {
-  "crons": [
-    {
-      "path": "/api/notifications/dispatch",
-      "schedule": "*/5 * * * *"
-    },
-    {
-      "path": "/api/atproto/sync",
-      "schedule": "0 * * * *"
-    }
-  ]
+  "git": {
+    "deploymentEnabled": false
+  }
 }

@@ -11,7 +11,8 @@ import 'server-only'
  * `host_name`, track leads (R9), vote counts (§5.3), RSVP-gated details (Telegram group, custom
  * location), organizer notes, or a venue's street address (coarsened to locality, §10). The only
  * DIDs in a response are the gathering's own and the DID of a proposer whose proposal record is
- * in their own repo (they wrote it; it is already public).
+ * in their own repo (they wrote it; it is already public) — and never while that repo is taken
+ * down, suspended, deactivated or deleted (`sessions.author_inactive_at`).
  */
 import { NextResponse } from 'next/server'
 import { sql } from '@/lib/db'
@@ -174,7 +175,7 @@ export async function publishedSessions(
     left join venues v on v.id = coalesce(s.venue_id, ts.venue_id) and v.event_id = s.event_id and v.at_uri is not null
     left join accounts a on a.did = s.host_did
     cross join lateral (
-      select coalesce(s.host_did is not null and starts_with(s.proposal_uri, 'at://' || s.host_did || '/'), false) as yes
+      select coalesce(s.author_inactive_at is null and s.host_did is not null and starts_with(s.proposal_uri, 'at://' || s.host_did || '/'), false) as yes
     ) own
     where s.event_id = ${eventId}
       and s.calendar_event_uri is not null

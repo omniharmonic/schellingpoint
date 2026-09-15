@@ -17,6 +17,7 @@ import { Badge } from '@/components/ui/badge'
 import { useAuth } from '@/hooks/useAuth'
 import { useEvent, useEventRole } from '@/contexts/EventContext'
 import { apiFetch, ApiError } from '@/lib/api/client'
+import { PublishJobProgress } from '@/components/PublishJobProgress'
 
 interface AuditRow {
   id: string
@@ -47,7 +48,7 @@ interface Status {
     sessionsCancelled: number
     approvalsPending: number
   }
-  flagged: Array<{ id: string; title: string; kind: 'cid-drift' | 'withdrawn'; since: string; proposalUri: string | null }>
+  flagged: Array<{ id: string; title: string; kind: 'cid-drift' | 'withdrawn' | 'author-inactive'; since: string; proposalUri: string | null }>
   peers: Array<{ peer_did: string; label: string | null; cross_listing_enabled: boolean; created_at: string }>
   listings: Array<{ id: string; session_id: string | null; subject_uri: string; record_uri: string | null; origin: 'own' | 'peer'; status: 'listed' | 'removed'; tags: string[]; updated_at: string }>
   recentAudit: AuditRow[]
@@ -123,7 +124,7 @@ export default function AdminAtprotoPage() {
   const [error, setError] = React.useState<string | null>(null)
   const [notice, setNotice] = React.useState<string | null>(null)
   const [busy, setBusy] = React.useState<string | null>(null)
-  const [results, setResults] = React.useState<{ what: What; published: number; skipped: number; failed: number; results: PublishResult[] } | null>(null)
+  const [results, setResults] = React.useState<{ what: What; published: number; skipped: number; failed: number; results: PublishResult[]; jobId?: string } | null>(null)
   const [confirmLinkage, setConfirmLinkage] = React.useState<null | (() => Promise<void>)>(null)
 
   const [oauthHandle, setOauthHandle] = React.useState('')
@@ -186,7 +187,7 @@ export default function AdminAtprotoPage() {
 
   const publish = (what: What) =>
     act(`publish:${what}`, async () => {
-      const out = await apiFetch<{ what: What; published: number; skipped: number; failed: number; results: PublishResult[] }>(`${apiBase}/publish`, { method: 'POST', json: { what } })
+      const out = await apiFetch<{ what: What; published: number; skipped: number; failed: number; results: PublishResult[]; jobId?: string }>(`${apiBase}/publish`, { method: 'POST', json: { what } })
       setResults(out)
     })
 
@@ -349,6 +350,9 @@ export default function AdminAtprotoPage() {
             {results ? (
               <div className="space-y-2 text-sm">
                 <p>{results.published} written · {results.skipped} skipped · {results.failed} failed</p>
+                {results.jobId ? (
+                  <PublishJobProgress statusUrl={`${apiBase}/publish?jobId=${encodeURIComponent(results.jobId)}`} onDone={() => void refresh()} />
+                ) : null}
                 <ul className="max-h-64 space-y-1 overflow-auto font-mono text-xs">
                   {results.results.filter((r) => r.error || r.skipped).map((r, i) => (
                     <li key={`${r.kind}-${r.id}-${i}`} className={r.error ? 'text-destructive' : 'text-muted-foreground'}>
@@ -426,7 +430,7 @@ export default function AdminAtprotoPage() {
           <CardContent className="space-y-2 text-sm">
             {status.flagged.map((f) => (
               <div key={f.id} className="flex flex-wrap items-center gap-2 rounded-md border p-3">
-                <Badge variant={f.kind === 'withdrawn' ? 'destructive' : 'secondary'}>{f.kind === 'withdrawn' ? 'Withdrawn' : 'Edited'}</Badge>
+                <Badge variant={f.kind === 'cid-drift' ? 'secondary' : 'destructive'}>{f.kind === 'withdrawn' ? 'Withdrawn' : f.kind === 'author-inactive' ? 'Proposer inactive' : 'Edited'}</Badge>
                 <Link className="font-medium underline-offset-2 hover:underline" href={`/e/${event.slug}/sessions/${f.id}`}>{f.title}</Link>
                 <span className="text-muted-foreground">{when(f.since)}</span>
                 {canManage ? (

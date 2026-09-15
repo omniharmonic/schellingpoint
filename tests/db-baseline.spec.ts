@@ -4,11 +4,13 @@ import Module from 'node:module'
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import postgres from 'postgres'
+import { createTestGathering } from './helpers/gathering'
 
 // Node-side checks of db/migrations/0001_baseline.sql against the local stack
 // (deploy/local/compose.yml, migrated + seeded). No dev server needed.
 //   DATABASE_URL=postgres://unconference_app:…@127.0.0.1:55432/unconference
-// Every write happens inside a transaction that is rolled back.
+// Every write happens inside a transaction that is rolled back, or on a gathering this file
+// creates and removes; the seeded gatherings are only read.
 loadEnvConfig(process.cwd(), true)
 
 const databaseUrl = process.env.DATABASE_URL || ''
@@ -83,7 +85,7 @@ test.describe('database baseline', () => {
   })
 
   test('core tables exist and no Supabase schema leaked in', async () => {
-    const expected = ['accounts', 'profiles', 'events', 'sessions', 'votes', 'at_records', 'auth_email_tokens', 'app_migrations']
+    const expected = ['accounts', 'profiles', 'events', 'sessions', 'vote_rounds', 'at_records', 'auth_email_tokens', 'app_migrations']
     const rows = await raw<{ table_name: string }[]>`
       SELECT table_name FROM information_schema.tables
       WHERE table_schema = 'public' AND table_name IN ${raw(expected)}`
@@ -132,7 +134,7 @@ test.describe('database baseline', () => {
     expect(reset.uid).toBeNull()
   })
 
-  test('participation rule fires for a signed-in account (vote on a completed gathering)', async () => {
+  test('participation rule fires for a signed-in account (proposal on a completed gathering)', async () => {
     const [session] = await raw`
       SELECT s.id, s.event_id FROM sessions s JOIN events e ON e.id = s.event_id
       WHERE e.slug = 'past-gathering' LIMIT 1`
@@ -143,14 +145,14 @@ test.describe('database baseline', () => {
       const error = await db
         .asAccount(accountId, async (t) => {
           await t`
-            INSERT INTO votes (user_id, session_id, event_id, vote_count, credits_spent)
-            VALUES (${accountId}, ${session.id}, ${session.event_id}, 1, 1)`
+            INSERT INTO sessions (event_id, host_id, title, format, duration)
+            VALUES (${session.event_id}, ${accountId}, 'Too late', 'talk', 30)`
         })
         .then(() => null, (e: unknown) => e)
       expect(db.pgErrorCode(error)).toBe('23514')
       const response = db.dbErrorResponse(error)
       expect(response?.status).toBe(403)
-      expect(await response?.json()).toEqual({ error: 'Voting is not open for this event', code: '23514' })
+      expect(await response?.json()).toEqual({ error: 'Proposals are not open for this event', code: '23514' })
     } finally {
       await raw`DELETE FROM accounts WHERE id = ${accountId}`
     }
@@ -208,9 +210,11 @@ test.describe('database baseline', () => {
       .then(() => null, (e: unknown) => e)
     expect(db.dbErrorResponse(fk)?.status).toBe(400)
 
+    const gathering = await createTestGathering(raw, { tag: 'baseline' })
     const dup = await db
-      .tx((t) => t`INSERT INTO events (slug, name, start_date, end_date) VALUES ('demo-gathering', 'x', '2026-01-01', '2026-01-01')`)
+      .tx((t) => t`INSERT INTO events (slug, name, start_date, end_date) VALUES (${gathering.slug}, 'x', '2026-01-01', '2026-01-01')`)
       .then(() => null, (e: unknown) => e)
+      .finally(() => gathering.cleanup())
     const response = db.dbErrorResponse(dup)
     expect(response?.status).toBe(409)
     expect(await response?.json()).toEqual({ error: 'Already exists', code: '23505' })

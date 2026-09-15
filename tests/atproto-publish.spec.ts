@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import Module from 'node:module'
 import path from 'node:path'
 import postgres from 'postgres'
+import { createTestGathering, type TestGathering } from './helpers/gathering'
 
 // Failure paths of the gathering actor and the publish pipeline. Fakes stand in for the PDS where
 // the point is the failure (CAS mismatch, authorisation, R9, sidecar); the revoked-credential test
@@ -152,6 +153,7 @@ test.describe('publish pipeline and registry', () => {
   const RUN = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`
   const tempEvents: string[] = []
   const tempDids: string[] = []
+  const gatherings: TestGathering[] = []
 
   test.beforeAll(() => {
     /* eslint-disable @typescript-eslint/no-require-imports */
@@ -173,11 +175,16 @@ test.describe('publish pipeline and registry', () => {
       }).catch(() => undefined)
     }
     if (raw) {
+      for (const g of gatherings) await g.cleanup()
       if (tempDids.length) {
         await raw`delete from at_records where did = any(${tempDids}::text[])`
         await raw`delete from at_credentials where did = any(${tempDids}::text[])`
+        await raw`delete from at_audit where actor_did = any(${tempDids}::text[])`
       }
-      if (tempEvents.length) await raw`delete from events where id = any(${tempEvents}::uuid[])`
+      if (tempEvents.length) {
+        await raw`delete from at_audit where event_id = any(${tempEvents}::uuid[])`
+        await raw`delete from events where id = any(${tempEvents}::uuid[])`
+      }
       await raw.end({ timeout: 5 })
     }
     await db?.sql.end({ timeout: 5 }).catch(() => undefined)
@@ -198,7 +205,9 @@ test.describe('publish pipeline and registry', () => {
   })
 
   test('a CAS mismatch re-reads the live record and retries once against its cid', async () => {
-    const [event] = await raw<{ id: string }[]>`select id from events where slug = 'demo-gathering'`
+    // A gathering of our own with venues that were never published (no stored cid).
+    const event = await createTestGathering(raw, { tag: 'cas', withProgram: true })
+    gatherings.push(event)
     const store = new Map<string, string>()
     const calls: Array<{ rkey: string; swapRecord: unknown; reason: string }> = []
     const deps: import('../src/lib/atproto/publish').PublishDeps = {

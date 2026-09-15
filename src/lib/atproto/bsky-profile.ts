@@ -12,6 +12,7 @@ import 'server-only'
  * swallowed. Callers fire-and-forget.
  */
 import { sql } from '@/lib/db'
+import { safeFetch } from '@/lib/net/safe-fetch'
 
 const PUBLIC_APPVIEW = 'https://public.api.bsky.app'
 const TIMEOUT_MS = 5000
@@ -28,10 +29,9 @@ export interface BskyProfile {
 export async function fetchBskyProfile(actor: string): Promise<BskyProfile | null> {
   const url = `${PUBLIC_APPVIEW}/xrpc/app.bsky.actor.getProfile?actor=${encodeURIComponent(actor)}`
   try {
-    const res = await fetch(url, {
+    const res = await safeFetch(url, {
       headers: { accept: 'application/json' },
       signal: AbortSignal.timeout(TIMEOUT_MS),
-      cache: 'no-store',
     })
     if (!res.ok) return null
     const data = (await res.json()) as Record<string, unknown>

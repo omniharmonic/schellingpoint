@@ -60,7 +60,12 @@ const RULES: ReadonlyArray<[RetentionRule, (db: Sql) => Promise<{ count: number 
   ],
   // Lapsed checkout holds occupy no capacity; a late payment is settled from Stripe metadata.
   ['ticket_holds_expired', (db) => db`delete from tickets where status = 'pending' and hold_expires_at < now()`],
-  ['auth_email_tokens_expired', (db) => db`delete from auth_email_tokens where expires_at < now()`],
+  // An expired token goes, with its ip_hash, once it is also out of the one-hour rate-limit window
+  // (sign-in links: 15 min TTL; reveal links: 24 h), so a run never resets a limit early.
+  [
+    'auth_email_tokens_expired',
+    (db) => db`delete from auth_email_tokens where expires_at < now() and created_at < now() - interval '1 hour'`,
+  ],
   ['at_sessions_expired', (db) => db`delete from at_sessions where expires_at < now()`],
   ['at_oauth_state_1h', (db) => db`delete from at_oauth_state where created_at < now() - interval '1 hour'`],
 ]

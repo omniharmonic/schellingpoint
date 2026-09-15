@@ -10,6 +10,8 @@
  *   - a private or draft gathering: members only; everyone else gets 404 (existence not disclosed)
  *   - a person's record is served only while it references this gathering; nothing app-side
  *     (RSVP rows, votes, rosters) is ever joined in
+ *   - nothing from a repo that is taken down, suspended, deactivated or deleted
+ *     (`at_repo_status.hidden`, migration 0011)
  * Everything returned is already on the network; this saves a client from crawling repos.
  */
 import { NextRequest, NextResponse } from 'next/server'
@@ -67,6 +69,9 @@ export async function GET(request: NextRequest) {
       union
       select uri from at_records where collection = ${NSID.proposal} and record ->> 'gathering' = ${gatheringUri ?? ''}
     ),
+    hidden as (
+      select did from at_repo_status where hidden
+    ),
     calendar as (
       select calendar_event_uri as uri from sessions where event_id = ${event.id} and calendar_event_uri is not null
       union
@@ -74,6 +79,7 @@ export async function GET(request: NextRequest) {
     )
     select uri, did, collection, rkey, cid, record, indexed_at from at_records
     where collection = any(${wanted}::text[])
+      and did not in (select did from hidden)
       and (
         did = ${event.actor_did ?? ''}
         or (collection = ${NSID.proposal} and uri in (select uri from proposals))

@@ -186,7 +186,7 @@ async function queryRows(access: EventAccess, filters: SessionListFilters, sessi
   )`
   const visibility = access.isOrganizer
     ? sql`true`
-    : sql`(s.status in ${sql([...PUBLIC_STATUSES])} or ${ownership})`
+    : sql`(((s.status in ${sql([...PUBLIC_STATUSES])}) and (s.author_inactive_at is null or s.status = 'scheduled')) or ${ownership})`
 
   let statuses: string[] | null
   if (sessionId || filters.statuses === 'all' || filters.mine) {
@@ -212,8 +212,12 @@ async function queryRows(access: EventAccess, filters: SessionListFilters, sessi
       s.telegram_group_url, s.expected_attendance, s.required_features, s.time_preferences,
       s.rsvp_count, s.waitlist_count, s.host_id, s.rejection_reason, s.proposal_uri, s.calendar_event_uri,
       s.proposal_withdrawn_at, s.created_at, s.updated_at,
-      hp.display_name as host_display_name, hp.avatar_url as host_avatar_url, hp.bio as host_bio,
-      hp.affiliation as host_affiliation, ha.handle as host_handle,
+      -- A proposer whose repo is taken down / deactivated is not shown (sessions.author_inactive_at).
+      case when s.author_inactive_at is null then hp.display_name end as host_display_name,
+      case when s.author_inactive_at is null then hp.avatar_url end as host_avatar_url,
+      case when s.author_inactive_at is null then hp.bio end as host_bio,
+      case when s.author_inactive_at is null then hp.affiliation end as host_affiliation,
+      case when s.author_inactive_at is null then ha.handle end as host_handle,
       hl.host_name as listed_as,
       s.track_id, t.name as track_name, t.slug as track_slug, t.color as track_color,
       s.venue_id, v.name as venue_name, v.capacity as venue_capacity, v.features as venue_features,
@@ -228,7 +232,7 @@ async function queryRows(access: EventAccess, filters: SessionListFilters, sessi
         from session_cohosts c
         left join profiles cp on cp.id = c.user_id
         left join accounts ca on ca.id = c.user_id
-        where c.session_id = s.id
+        where c.session_id = s.id and c.cohost_inactive_at is null
       ) as cohosts,
       (f.id is not null) as is_favorite,
       r.status as rsvp_status, r.waitlist_position as rsvp_waitlist_position, r.rsvp_uri,

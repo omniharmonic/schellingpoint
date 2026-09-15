@@ -22,6 +22,20 @@ import 'server-only'
  *
  * Nothing here invents a person: an imported session has `host_id` = the linked account or NULL,
  * `host_name` NULL, `host_did` = the author.
+ *
+ * THE JETSTREAM FEED (`processJetstreamFrame`, used by the indexer):
+ *   - `commit` frames whose collection has app-side side effects (`SIDE_EFFECT_COLLECTIONS`:
+ *     proposals → review queue, co-host pairings, endorsements, opt-in RSVPs, peer listings) are
+ *     VERIFIED before anything is applied: Jetstream relays records without the signed commit, so the
+ *     record is fetched from the author's own PDS (`getRecord`, via `service-url.ts`) and its cid
+ *     and value must match the frame (a delete must be gone there too). A mismatch or a failed fetch
+ *     indexes nothing and requests a targeted reconcile of that repo. Index-only collections are
+ *     indexed as `jetstream-unverified` until reconciliation (`backfill:<did>`) confirms them.
+ *   - `account` frames hide or restore a repo (`repo-status.ts`); `deleted` purges its index rows as
+ *     withdrawals; becoming active reconciles the repo.
+ *   - `identity` frames evict every cache for the DID and re-verify its handle both ways.
+ *   One frame's failure never stops the stream; the caller keeps advancing the cursor.
+ * `ingestFromJetstreamFrame` is the UNVERIFIED primitive underneath (trusted replays and tests).
  */
 import { sql } from '@/lib/db'
 import { notify } from '@/lib/notifications'
@@ -35,7 +49,9 @@ import { materializeAllSeries } from './series'
 import { ensureSkillsFresh, skillsAuthorityDid } from './skills'
 import type { CohostRecord, ProposalRecord } from './types'
 import { isValidRecord } from './validate'
-import { listAllRecords } from './write'
+import { applyIdentityChange, applyRepoStatus, hidesRepo, isTrackedDid, type ApplyStatusResult, type IdentityChangeResult } from './repo-status'
+import type { HandleVerifier } from './identity'
+import { getRecord, getRepoStatus, listAllRecords, ownPdsRepoStatus, type RepoHostingStatus } from './write'
 
 /* ───────────────────────────── types ───────────────────────────── */
 
@@ -63,6 +79,7 @@ export type IngestOutcome =
   | 'skipped:irrelevant'
   | 'skipped:invalid'
   | 'skipped:no-record'
+  | 'skipped:unverified'
   | 'error'
 
 export interface IngestResult {
@@ -74,11 +91,23 @@ export interface IngestResult {
   warnings: string[]
 }
 
-/** A Jetstream v1 frame: `record`/`cid` absent on delete; identity/account frames have no commit. */
+/**
+ * A Jetstream v1 (`/subscribe`) frame. Shapes verified against the Jetstream README
+ * (bluesky-social/jetstream-legacy) and the v2 RFD §5.1, which keeps the v1 wire frozen:
+ *   commit    {did, time_us, kind:'commit', commit:{rev, operation, collection, rkey, cid?, record?}}
+ *   identity  {did, time_us, kind:'identity', identity:{did, handle?, seq, time}}
+ *   account   {did, time_us, kind:'account', account:{active, did, seq, time, status?}}
+ * `status` ∈ takendown | suspended | deleted | deactivated | desynchronized | throttled (open set).
+ * v1 delivers identity/account frames for EVERY DID regardless of `wantedCollections`; v2 adds a
+ * numeric `cursor`. `record`/`cid` are absent on delete.
+ */
 export interface JetstreamFrame {
   did: string
   time_us: number
+  cursor?: number
   kind: 'commit' | 'identity' | 'account' | string
+  identity?: { did?: string; handle?: string; seq?: number; time?: string }
+  account?: { did?: string; active?: boolean; status?: string; seq?: number; time?: string }
   commit?: {
     rev: string
     operation: IngestOperation
@@ -94,6 +123,8 @@ export interface ReconcileRepoResult {
   records: number
   deleted: number
   errors: string[]
+  /** The host's `getRepoStatus` answer, when it gave one. */
+  status?: { active: boolean; status: string | null; hidden: boolean }
 }
 
 export interface ReconcileAllResult {
@@ -164,6 +195,28 @@ export async function knownDids(force = false): Promise<Set<string>> {
   return dids
 }
 
+const trackedCache = { at: 0, dids: new Set<string>() }
+
+/**
+ * Account/identity frames arrive for EVERY DID on the network: filter them against an in-memory
+ * set (refreshed every minute) of repos we hold anything from, so the stream never waits on a
+ * query per frame. A DID first seen inside the refresh window is caught by the hourly reconcile.
+ */
+export async function isTrackedDidCached(did: string, force = false): Promise<boolean> {
+  if (force || Date.now() - trackedCache.at >= KNOWN_TTL_MS) {
+    const rows = await sql<{ did: string }[]>`
+      select distinct did from at_records
+      union select did from at_repo_status
+      union select host_did from sessions where host_did is not null
+    `
+    const dids = new Set(rows.map((r) => r.did))
+    for (const d of await knownDids(force)) dids.add(d)
+    trackedCache.dids = dids
+    trackedCache.at = Date.now()
+  }
+  return trackedCache.dids.has(did) || (force ? false : (await knownDids()).has(did))
+}
+
 async function referencesOurs(input: IngestInput): Promise<boolean> {
   const r = input.record ?? {}
   if (input.collection === NSID.proposal && typeof r.gathering === 'string') {
@@ -182,6 +235,15 @@ async function referencesOurs(input: IngestInput): Promise<boolean> {
 }
 
 /* ───────────────────────────── main entry ───────────────────────────── */
+
+/** The relevance rule `ingestRecord` applies, without indexing anything (so a verifier can run first). */
+export async function isRelevantInput(input: IngestInput): Promise<boolean> {
+  if (input.trusted) return true
+  if (input.collection === NSID.skill) return input.did === skillsAuthorityDid()
+  if ((await knownDids()).has(input.did)) return true
+  if (input.operation === 'delete') return !!(await getIndexedRecord(input.uri))
+  return input.record ? referencesOurs(input) : false
+}
 
 export async function ingestRecord(input: IngestInput): Promise<IngestResult> {
   const result: IngestResult = { uri: input.uri, collection: input.collection, operation: input.operation, outcome: 'indexed', sideEffects: [], warnings: [] }
@@ -240,7 +302,10 @@ export async function ingestRecord(input: IngestInput): Promise<IngestResult> {
   }
 }
 
-/** Parse one Jetstream frame and ingest it. `null` when the frame is not a commit we index. */
+/**
+ * Parse one Jetstream commit frame and ingest it WITHOUT verifying the record against its author's
+ * PDS. `null` when the frame is not a commit we index. The live feed uses `processJetstreamFrame`.
+ */
 export async function ingestFromJetstreamFrame(frame: JetstreamFrame, source = JETSTREAM_CURSOR_SOURCE): Promise<IngestResult | null> {
   if (!frame || frame.kind !== 'commit' || !frame.commit) return null
   const { commit } = frame
@@ -257,6 +322,197 @@ export async function ingestFromJetstreamFrame(frame: JetstreamFrame, source = J
     source,
     operation: commit.operation,
   })
+}
+
+/* ───────────────────────────── verified Jetstream feed ───────────────────────────── */
+
+/** Collections whose ingestion changes app state: verified against the author's PDS first. */
+export const SIDE_EFFECT_COLLECTIONS: ReadonlySet<string> = new Set([NSID.proposal, NSID.cohost, NSID.endorsement, NSID.rsvp, NSID.eventListing])
+
+export const UNVERIFIED_SOURCE = 'jetstream-unverified'
+
+/** Reads a record from its author's own PDS. Injectable for tests. */
+export interface RecordVerifier {
+  fetch(did: string, collection: string, rkey: string): Promise<{ cid: string; value: Record<string, unknown> } | null>
+}
+
+export const pdsRecordVerifier: RecordVerifier = {
+  fetch: (did, collection, rkey) => getRecord(did, collection, rkey),
+}
+
+export interface ProcessFrameOptions {
+  verifier?: RecordVerifier
+  handleVerifier?: HandleVerifier
+  /** Our PDS's view of a repo (default `ownPdsRepoStatus`; `null` = not ours). */
+  ownRepoStatus?: (did: string) => Promise<RepoHostingStatus | null>
+  /** Reconcile a repo that became active again right away (default true; the request is recorded either way). */
+  reconcileOnActivate?: boolean
+  /** Check relevance against the database instead of the minute-old in-memory set (tests, replays). */
+  forceTracked?: boolean
+}
+
+export type FrameResult =
+  | { kind: 'commit'; result: IngestResult }
+  | { kind: 'account'; did: string; outcome: 'skipped:irrelevant' | 'skipped:malformed' | 'applied'; status?: ApplyStatusResult; purged?: number; reconciled?: ReconcileRepoResult | { error: string } }
+  | { kind: 'identity'; did: string; outcome: 'skipped:irrelevant' | 'skipped:malformed' | 'applied'; identity?: IdentityChangeResult }
+
+/** Canonical JSON (sorted keys) so a relay's rendering and a PDS's compare by content. */
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value as object).sort().map((k) => `${JSON.stringify(k)}:${canonical((value as Record<string, unknown>)[k])}`).join(',')}}`
+  }
+  return JSON.stringify(value) ?? 'null'
+}
+
+export type VerifyOutcome = 'match' | 'mismatch' | 'fetch-failed'
+
+/** Does the author's PDS hold exactly what the frame claims (or, for a delete, nothing)? */
+export async function verifyAgainstAuthorPds(input: IngestInput, verifier: RecordVerifier = pdsRecordVerifier): Promise<VerifyOutcome> {
+  let live: { cid: string; value: Record<string, unknown> } | null
+  try {
+    live = await verifier.fetch(input.did, input.collection, input.rkey)
+  } catch {
+    return 'fetch-failed'
+  }
+  if (input.operation === 'delete') return live ? 'mismatch' : 'match'
+  if (!live || !input.cid || live.cid !== input.cid) return 'mismatch'
+  return canonical(live.value) === canonical(input.record) ? 'match' : 'mismatch'
+}
+
+/** Ask for a targeted reconcile of one repo (drained by the indexer and `/api/atproto/sync`). */
+export async function requestReconcile(did: string): Promise<void> {
+  await sql`
+    insert into at_repo_state (did, source, reconcile_requested_at, updated_at)
+    values (${did}, 'own-pds', now(), now())
+    on conflict (did) do update set reconcile_requested_at = coalesce(at_repo_state.reconcile_requested_at, now()), updated_at = now()
+  `
+}
+
+/** Reconcile up to `limit` repos whose reconcile was requested. Never throws for one repo. */
+export async function drainReconcileRequests(limit = 10): Promise<{ repos: number; errors: number }> {
+  // The timestamp travels as text: a JS Date would truncate Postgres's microseconds.
+  const rows = await sql<{ did: string; reconcile_requested_at: string }[]>`
+    select did, reconcile_requested_at::text as reconcile_requested_at from at_repo_state
+    where reconcile_requested_at is not null order by reconcile_requested_at limit ${limit}
+  `
+  let errors = 0
+  for (const row of rows) {
+    try {
+      const r = await reconcileRepoForDid(row.did)
+      if (r.errors.length) errors++
+    } catch {
+      errors++
+    }
+    // Clear only the request we served; a newer one stays queued.
+    await sql`update at_repo_state set reconcile_requested_at = null where did = ${row.did} and reconcile_requested_at <= ${row.reconcile_requested_at}::timestamptz`
+  }
+  return { repos: rows.length, errors }
+}
+
+/** A verified commit: see the module doc. */
+async function ingestVerifiedCommit(frame: JetstreamFrame, opts: ProcessFrameOptions): Promise<IngestResult | null> {
+  const commit = frame.commit
+  if (!commit?.collection || !commit.rkey || !frame.did || !isIndexedCollection(commit.collection)) return null
+  if (commit.operation !== 'create' && commit.operation !== 'update' && commit.operation !== 'delete') return null
+  const input: IngestInput = {
+    uri: atUri(frame.did, commit.collection, commit.rkey),
+    did: frame.did,
+    collection: commit.collection,
+    rkey: commit.rkey,
+    cid: commit.cid ?? null,
+    record: commit.record ?? null,
+    source: UNVERIFIED_SOURCE,
+    operation: commit.operation,
+  }
+  if (!SIDE_EFFECT_COLLECTIONS.has(input.collection)) return ingestRecord(input)
+
+  const base: IngestResult = { uri: input.uri, collection: input.collection, operation: input.operation, outcome: 'skipped:irrelevant', sideEffects: [], warnings: [] }
+  try {
+    // Cheap checks first: never dial a PDS for a record we would not index anyway.
+    if (!(await isRelevantInput(input))) return base
+    if (input.operation !== 'delete') {
+      if (!input.record || typeof input.record !== 'object') return { ...base, outcome: 'skipped:no-record' }
+      if (!isValidRecord(input.collection, input.record)) return { ...base, outcome: 'skipped:invalid' }
+    }
+    const verdict = await verifyAgainstAuthorPds(input, opts.verifier)
+    if (verdict !== 'match') {
+      await requestReconcile(input.did).catch(() => undefined)
+      log('warn', 'jetstream record did not verify against its author PDS; not indexed, reconcile requested', { collection: input.collection, verdict })
+      return { ...base, outcome: 'skipped:unverified', warnings: [verdict], sideEffects: ['reconcile-requested'] }
+    }
+  } catch (e) {
+    await requestReconcile(input.did).catch(() => undefined)
+    return { ...base, outcome: 'error', warnings: [describe(e)] }
+  }
+  return ingestRecord({ ...input, source: JETSTREAM_CURSOR_SOURCE })
+}
+
+/** Every index row a deleted repo held, removed as withdrawals (side effects included). */
+export async function purgeRepo(did: string, source = 'account-deleted'): Promise<number> {
+  const rows = await sql<{ uri: string; collection: string; rkey: string }[]>`select uri, collection, rkey from at_records where did = ${did}`
+  let purged = 0
+  for (const r of rows) {
+    const res = await ingestRecord({ uri: r.uri, did, collection: r.collection, rkey: r.rkey, source, operation: 'delete', trusted: true })
+    if (res.outcome === 'deleted') purged++
+  }
+  return purged
+}
+
+/** A relay `#account` frame (see the module doc). Our PDS's own answer wins for repos it hosts. */
+export async function applyAccountFrame(frame: JetstreamFrame, opts: ProcessFrameOptions = {}): Promise<Extract<FrameResult, { kind: 'account' }>> {
+  const did = frame.account?.did ?? frame.did
+  if (!did || typeof frame.account?.active !== 'boolean') return { kind: 'account', did: did ?? '', outcome: 'skipped:malformed' }
+  if (!(await isTrackedDidCached(did)) && !(opts.forceTracked && (await isTrackedDid(did)))) return { kind: 'account', did, outcome: 'skipped:irrelevant' }
+  const own = await (opts.ownRepoStatus ?? ownPdsRepoStatus)(did).catch(() => null)
+  const out: Extract<FrameResult, { kind: 'account' }> = { kind: 'account', did, outcome: 'applied' }
+
+  if (own && hidesRepo(own.active, own.status)) {
+    // Our PDS hosts it and does not serve it, whatever the relay says.
+    out.status = await applyRepoStatus({ did, active: false, status: own.status, source: 'pds', authoritative: true })
+  } else if (!frame.account.active) {
+    out.status = await applyRepoStatus({ did, active: false, status: frame.account.status ?? null, source: 'relay' })
+  } else {
+    out.status = await applyRepoStatus({ did, active: true, source: own ? 'pds' : 'relay', authoritative: !!own })
+  }
+
+  if (!out.status.hidden) {
+    await requestReconcile(did).catch(() => undefined)
+    if (opts.reconcileOnActivate !== false) {
+      out.reconciled = await reconcileRepoForDid(did).catch((e) => ({ error: describe(e) }))
+    }
+  } else if ((own?.status ?? frame.account.status) === 'deleted') {
+    out.purged = await purgeRepo(did)
+  }
+  return out
+}
+
+/** A relay `#identity` frame: evict caches, re-verify the handle both ways, store it. */
+export async function applyIdentityFrame(frame: JetstreamFrame, opts: ProcessFrameOptions = {}): Promise<Extract<FrameResult, { kind: 'identity' }>> {
+  const did = frame.identity?.did ?? frame.did
+  if (!did) return { kind: 'identity', did: '', outcome: 'skipped:malformed' }
+  if (!(await isTrackedDidCached(did)) && !(opts.forceTracked && (await isTrackedDid(did)))) return { kind: 'identity', did, outcome: 'skipped:irrelevant' }
+  // The frame's `handle` is a hint only; never stored without verification.
+  return { kind: 'identity', did, outcome: 'applied', identity: await applyIdentityChange(did, opts.handleVerifier) }
+}
+
+/**
+ * The live feed's entry point: every Jetstream frame kind, verified where it changes app state.
+ * Never throws; `null` for frames we do not handle.
+ */
+export async function processJetstreamFrame(frame: JetstreamFrame, opts: ProcessFrameOptions = {}): Promise<FrameResult | null> {
+  if (!frame || typeof frame !== 'object') return null
+  try {
+    if (frame.kind === 'commit') {
+      const result = await ingestVerifiedCommit(frame, opts)
+      return result ? { kind: 'commit', result } : null
+    }
+    if (frame.kind === 'account') return await applyAccountFrame(frame, opts)
+    if (frame.kind === 'identity') return await applyIdentityFrame(frame, opts)
+  } catch (e) {
+    log('warn', 'frame handling failed', { kind: frame.kind, error: e instanceof Error ? e.name : 'error' })
+  }
+  return null
 }
 
 /** Persist the Jetstream position monotonically (a late batch never walks the cursor back). */
@@ -386,7 +642,8 @@ async function linkProposal(input: IngestInput, record: ProposalRecord, result: 
         insert into sessions (
           event_id, title, description, format, duration, topic_tags, skill_uris, expected_attendance, required_features,
           is_self_hosted, public_place, self_hosted_start_time, self_hosted_end_time,
-          host_id, host_name, host_did, imported_from, status, session_type, proposal_uri, proposal_cid, created_at
+          host_id, host_name, host_did, imported_from, status, session_type, proposal_uri, proposal_cid, created_at,
+          author_inactive_at
         ) values (
           ${event.id}, ${record.title}, ${record.description ?? null}, ${coerceFormat(record.format, event.allowed_formats)},
           ${coerceDuration(record.durationMinutes, event.allowed_durations)}, ${record.topics ?? []}, ${(record.skills ?? []).slice(0, 5)},
@@ -394,7 +651,8 @@ async function linkProposal(input: IngestInput, record: ProposalRecord, result: 
           ${record.selfHosted ? (record.place?.slice(0, 200) ?? null) : null}, ${record.selfHosted ? (record.startsAt ?? null) : null},
           ${record.selfHosted ? (record.endsAt ?? null) : null},
           ${account?.id ?? null}, null, ${input.did}, 'atproto', 'pending', 'proposed', ${input.uri}, ${input.cid ?? null},
-          ${record.createdAt ?? new Date().toISOString()}
+          ${record.createdAt ?? new Date().toISOString()},
+          case when exists (select 1 from at_repo_status where did = ${input.did} and hidden) then now() end
         )
         returning id
       `
@@ -483,8 +741,9 @@ async function linkCohost(input: IngestInput, record: CohostRecord, result: Inge
     return
   }
   await sql`
-    insert into session_cohosts (session_id, user_id, event_id, cohost_uri)
-    values (${session.id}, ${account.id}, ${session.event_id}, ${input.uri})
+    insert into session_cohosts (session_id, user_id, event_id, cohost_uri, cohost_inactive_at)
+    values (${session.id}, ${account.id}, ${session.event_id}, ${input.uri},
+            case when exists (select 1 from at_repo_status where did = ${input.did} and hidden) then now() end)
     on conflict do nothing
   `
   result.sideEffects.push('cohost-linked')
@@ -500,6 +759,24 @@ async function linkCohost(input: IngestInput, record: CohostRecord, result: Inge
  */
 export async function reconcileRepo(did: string, collections: readonly string[], source = `backfill:${did}`): Promise<ReconcileRepoResult> {
   const out: ReconcileRepoResult = { did, records: 0, deleted: 0, errors: [] }
+  // Hosting status first (catches account events missed while the indexer was down): a repo its
+  // host does not serve is hidden, not listed; a deleted one is purged.
+  let hosting: RepoHostingStatus | null = null
+  try {
+    hosting = await getRepoStatus(did)
+  } catch (e) {
+    // A host without getRepoStatus, or one we cannot reach: listing below reports its own errors.
+    log('warn', 'getRepoStatus failed; status left unchanged', { error: e instanceof Error ? e.name : 'error' })
+  }
+  if (hosting) {
+    const applied = await applyRepoStatus({ did, active: hosting.active, status: hosting.status, source: 'pds', authoritative: hosting.host === 'own' })
+    out.status = { active: hosting.active, status: hosting.status, hidden: applied.hidden }
+    if (applied.hidden) {
+      if (hosting.status === 'deleted') out.deleted += await purgeRepo(did, source)
+      await recordRepoState(did, source, out)
+      return out
+    }
+  }
   for (const collection of collections) {
     if (!isIndexedCollection(collection)) continue
     let fetched
@@ -536,6 +813,11 @@ export async function reconcileRepo(did: string, collections: readonly string[],
       out.errors.push(`${collection} (deletions): ${describe(e)}`)
     }
   }
+  await recordRepoState(did, source, out)
+  return out
+}
+
+async function recordRepoState(did: string, source: string, out: ReconcileRepoResult): Promise<void> {
   await sql`
     insert into at_repo_state (did, source, reconciled_at, last_error, last_error_at, updated_at)
     values (${did}, ${source.startsWith('peer') ? 'peer' : 'own-pds'}, ${out.errors.length ? null : new Date()},
@@ -545,10 +827,24 @@ export async function reconcileRepo(did: string, collections: readonly string[],
       last_error = excluded.last_error, last_error_at = coalesce(excluded.last_error_at, at_repo_state.last_error_at),
       updated_at = now()
   `.catch(() => undefined)
-  return out
 }
 
-/** Every active repo on OUR PDS (`com.atproto.sync.listRepos`, paginated). */
+const PEER_COLLECTIONS = [NSID.gathering, NSID.event, NSID.eventConfig, NSID.eventListing, NSID.series, NSID.occurrence]
+
+/** `reconcileRepo` for one DID with the collections its role implies (actor, peer, participant). */
+export async function reconcileRepoForDid(did: string): Promise<ReconcileRepoResult> {
+  const [row] = await sql<{ actor: boolean; peer: boolean }[]>`
+    select exists (select 1 from events where actor_did = ${did}) as actor, exists (select 1 from peers where peer_did = ${did}) as peer
+  `
+  if (row?.actor) return reconcileRepo(did, GATHERING_COLLECTIONS)
+  if (row?.peer) return reconcileRepo(did, PEER_COLLECTIONS, `peer:${did}`)
+  return reconcileRepo(did, PARTICIPANT_COLLECTIONS)
+}
+
+/**
+ * Every repo on OUR PDS (`com.atproto.sync.listRepos`, paginated) — inactive ones included, so the
+ * sweep applies their status (a takedown missed by the indexer still hides them).
+ */
 export async function listOwnPdsRepos(): Promise<string[]> {
   const dids: string[] = []
   let cursor: string | undefined
@@ -560,7 +856,7 @@ export async function listOwnPdsRepos(): Promise<string[]> {
     if (!res.ok) throw new Error(`listRepos failed (${res.status})`)
     const body = (await res.json()) as { repos?: Array<{ did?: string; active?: boolean }>; cursor?: string }
     const repos = body.repos ?? []
-    for (const r of repos) if (r.did && r.active !== false) dids.push(r.did)
+    for (const r of repos) if (r.did) dids.push(r.did)
     if (!body.cursor || repos.length === 0) break
     cursor = body.cursor
   }
@@ -586,8 +882,10 @@ export async function planRepos(): Promise<RepoPlan[]> {
   const oauth = await sql<{ did: string }[]>`select did from accounts where kind = 'oauth'`
   for (const { did } of oauth) if (!plans.has(did)) plans.set(did, { did, collections: PARTICIPANT_COLLECTIONS, source: `backfill:${did}` })
   const peers = await sql<{ peer_did: string }[]>`select distinct peer_did from peers`
-  const peerCollections = [NSID.gathering, NSID.event, NSID.eventConfig, NSID.eventListing, NSID.series, NSID.occurrence]
-  for (const { peer_did } of peers) if (!plans.has(peer_did)) plans.set(peer_did, { did: peer_did, collections: peerCollections, source: `peer:${peer_did}` })
+  for (const { peer_did } of peers) if (!plans.has(peer_did)) plans.set(peer_did, { did: peer_did, collections: PEER_COLLECTIONS, source: `peer:${peer_did}` })
+  // Hidden repos we no longer list anywhere else still get their status re-checked (and restored).
+  const hidden = await sql<{ did: string }[]>`select did from at_repo_status where hidden`
+  for (const { did } of hidden) if (!plans.has(did)) plans.set(did, { did, collections: PARTICIPANT_COLLECTIONS, source: `backfill:${did}` })
   return [...plans.values()]
 }
 
@@ -601,6 +899,7 @@ export async function reconcileAll(): Promise<ReconcileAllResult> {
   } catch (e) {
     out.errors.push({ did: 'discovery', error: describe(e) })
   }
+  const planned = new Set(plans.map((p) => p.did))
   for (const plan of plans) {
     out.repos++
     try {
@@ -612,6 +911,8 @@ export async function reconcileAll(): Promise<ReconcileAllResult> {
       out.errors.push({ did: plan.did, error: describe(e) })
     }
   }
+  // Every repo was just reconciled: requests for them are served.
+  await sql`update at_repo_state set reconcile_requested_at = null where reconcile_requested_at <= ${startedAt} and did = any(${[...planned]}::text[])`.catch(() => undefined)
   const withPeers = await sql<{ event_id: string }[]>`select distinct event_id from peers where cross_listing_enabled`
   for (const { event_id } of withPeers) {
     try {

@@ -26,9 +26,10 @@ import 'server-only'
 import { sql, type Sql } from '@/lib/db'
 import { parseTimeInTimezone } from '@/lib/events/timezone'
 import { readPolicyThresholds, validatePolicyThresholds, type GatheringPolicyThresholds } from '@/lib/events/policy'
-import type { Approval, DeleteAsGatheringInput, GatheringAction, PutAsGatheringInput } from './actor'
-import { GatheringNotLinkedError } from './actor'
-import { actorDidForEvent, deleteRecordAsGathering, putRecordAsGathering } from './actors'
+import type { Approval, CreateAsGatheringInput, DeleteAsGatheringInput, GatheringAction, PutAsGatheringInput } from './actor'
+import { APPLY_WRITES_MAX_OPS, GatheringNotLinkedError } from './actor'
+import { actorDidForEvent, applyCreatesAsGathering, deleteRecordAsGathering, putRecordAsGathering } from './actors'
+import { chunk, isRateLimitBudgetExceeded } from './rate-limit'
 import { getIndexedCid } from './index-store'
 import { getRecord } from './write'
 // A function-only import cycle (listings uses publish's writer, publish routes listings after a slot).
@@ -90,6 +91,8 @@ export interface PublishResult {
   error?: string
   /** A deliberate skip that is not a failure (e.g. a moved session awaiting approval). */
   skipped?: string
+  /** Set when the write failed only because the repo is rate-limited: retry after this many ms. */
+  retryAfterMs?: number
 }
 
 export interface PublishOutput {
@@ -109,6 +112,13 @@ export interface PublishDeps {
   indexedCid: (uri: string) => Promise<string | null>
   /** Write uris/cids back to app tables. Tests pass `false`. */
   persist: boolean
+  /**
+   * Optional: create independent records in one commit (`com.atproto.repo.applyWrites`, creates
+   * only). Absent → every write is a single CAS'd `putRecord`.
+   */
+  applyCreates?: (eventId: string, inputs: CreateAsGatheringInput[], opts: { maxOps: number }) => Promise<WriteResult[]>
+  /** Operations per `applyWrites` call (default `APPLY_WRITES_MAX_OPS`, never above it). */
+  applyWritesMaxOps?: number
 }
 
 /** The production writer: the gathering actor registry, unauthenticated reads, the index. */
@@ -116,6 +126,7 @@ export async function defaultDeps(): Promise<PublishDeps> {
   return {
     put: putRecordAsGathering,
     del: deleteRecordAsGathering,
+    applyCreates: (eventId, inputs, opts) => applyCreatesAsGathering(eventId, inputs, opts),
     getRecord,
     actorDidFor: actorDidForEvent,
     indexedCid: (uri) => getIndexedCid(uri),
@@ -239,6 +250,8 @@ export interface SessionRow {
   cancelled_at: string | null
   proposal_withdrawn_at: string | null
   proposal_drift_cid: string | null
+  /** The proposer's repo is not active (migration 0011): never newly pinned by a slot. */
+  author_inactive_at?: string | null
 }
 
 /* ─────────────────────────────── context ─────────────────────────────── */
@@ -343,9 +356,73 @@ export async function attempt(
     results.push({ kind, id, uri: r.uri, cid: r.cid })
     return { uri: r.uri, cid: r.cid }
   } catch (e) {
-    results.push({ kind, id, error: errorMessage(e) })
+    results.push({ kind, id, error: errorMessage(e), ...(isRateLimitBudgetExceeded(e) ? { retryAfterMs: e.retryAfterMs } : {}) })
     return null
   }
+}
+
+/** One write a batched phase plans: created in a batch when the record must not exist yet, else CAS'd alone. */
+interface PlannedWrite {
+  kind: PublishResult['kind']
+  id: string
+  input: CasWriteInput
+  /** The cid on the app row, when there is one (wins over the index). */
+  storedCid?: string | null
+}
+
+/**
+ * Write a phase of INDEPENDENT records. Those whose expected cid is `null` ("must not exist yet")
+ * go out as `applyWrites` creates in chunks of at most `applyWritesMaxOps` (a create of an existing
+ * key fails the chunk, which is the same CAS answer `swapRecord: null` gives); everything else keeps
+ * its per-record `putRecord` + `swapRecord`. A chunk that fails for any reason but rate limiting
+ * falls back to per-record CAS writes, which re-read on `InvalidSwap`. Refs come back in input order.
+ */
+async function writePlanned(ctx: PublishContext, planned: PlannedWrite[], results: PublishResult[]): Promise<Array<StrongRef | null>> {
+  const refs: Array<StrongRef | null> = planned.map(() => null)
+  const expected = await Promise.all(
+    planned.map(async (p) => p.storedCid ?? (await ctx.deps.indexedCid(`at://${ctx.actorDid}/${p.input.collection}/${p.input.rkey}`))),
+  )
+  const creates = planned.map((p, i) => ({ p, i })).filter(({ i }) => expected[i] == null)
+  const batched = new Set<number>()
+  if (ctx.deps.applyCreates && creates.length > 1) {
+    const maxOps = Math.max(1, Math.min(ctx.deps.applyWritesMaxOps ?? APPLY_WRITES_MAX_OPS, APPLY_WRITES_MAX_OPS))
+    for (const group of chunk(creates, maxOps)) {
+      try {
+        const written = await ctx.deps.applyCreates(
+          ctx.event.id,
+          group.map(({ p }) => ({
+            callerUserId: ctx.callerUserId,
+            action: p.input.action,
+            collection: p.input.collection,
+            rkey: p.input.rkey,
+            record: p.input.record as Record<string, unknown>,
+            reason: `${p.input.reason} (batched create)`,
+            ...(p.input.approvals ? { approvals: p.input.approvals } : {}),
+          })),
+          { maxOps },
+        )
+        group.forEach(({ p, i }, j) => {
+          const w = written[j]!
+          results.push({ kind: p.kind, id: p.id, uri: w.uri, cid: w.cid })
+          refs[i] = { uri: w.uri, cid: w.cid }
+          batched.add(i)
+        })
+      } catch (e) {
+        if (isRateLimitBudgetExceeded(e)) {
+          for (const { p, i } of group) {
+            results.push({ kind: p.kind, id: p.id, error: errorMessage(e), retryAfterMs: e.retryAfterMs })
+            batched.add(i)
+          }
+        }
+        // Otherwise leave the group to the per-record path below.
+      }
+    }
+  }
+  for (const [i, p] of planned.entries()) {
+    if (batched.has(i)) continue
+    refs[i] = await attempt(results, p.kind, p.id, () => putWithCas(ctx, p.input, expected[i] ?? p.storedCid))
+  }
+  return refs
 }
 
 /* ───────────────────────────── gathering ───────────────────────────── */
@@ -596,13 +673,17 @@ export async function publishVenues(input: PublishInput, deps?: PublishDeps): Pr
   const ctx = await loadPublishContext(input, deps)
   const results: PublishResult[] = []
   const venues = await ctx.sql<VenueRow[]>`select ${venueSelect(ctx.sql)} from venues where event_id = ${ctx.event.id} order by created_at, id`
-  for (const venue of venues) {
-    const location = locationOfVenue(venue)
-    const ref = await attempt(results, 'venue', venue.id, () =>
-      putWithCas(
-        ctx,
-        {
-          action: 'publish-venue',
+  // Independent records: new ones share `applyWrites` commits; existing ones stay CAS'd one by one.
+  const refs = await writePlanned(
+    ctx,
+    venues.map((venue) => {
+      const location = locationOfVenue(venue)
+      return {
+        kind: 'venue' as const,
+        id: venue.id,
+        storedCid: venue.at_cid,
+        input: {
+          action: 'publish-venue' as const,
           collection: NSID.venue,
           rkey: deterministicRkey('venue', venue.id),
           record: buildVenueRecord({
@@ -619,9 +700,12 @@ export async function publishVenues(input: PublishInput, deps?: PublishDeps): Pr
           }),
           reason: `publish venue "${venue.name}"${venue.is_private_residence ? ' (private residence: locality only)' : ''}`,
         },
-        venue.at_cid,
-      ),
-    )
+      }
+    }),
+    results,
+  )
+  for (const [i, venue] of venues.entries()) {
+    const ref = refs[i]
     if (ref && ctx.deps.persist) await ctx.sql`update venues set at_uri = ${ref.uri}, at_cid = ${ref.cid} where id = ${venue.id}`
   }
   return { results }
@@ -634,30 +718,34 @@ export async function publishTracks(input: PublishInput, deps?: PublishDeps): Pr
     select id, name, slug, description, color, is_active, max_sessions, display_order, skill_uris, created_at, at_uri, at_cid
     from tracks where event_id = ${ctx.event.id} order by display_order nulls last, created_at, id
   `
-  for (const track of tracks) {
-    const ref = await attempt(results, 'track', track.id, () =>
-      putWithCas(
-        ctx,
-        {
-          action: 'publish-track',
-          collection: NSID.track,
-          rkey: deterministicRkey('track', track.id),
-          record: buildTrackRecord({
-            name: track.name,
-            slug: track.slug,
-            description: track.description,
-            color: track.color,
-            skills: track.skill_uris,
-            maxSessions: track.max_sessions,
-            displayOrder: track.display_order,
-            active: track.is_active,
-            createdAt: track.created_at,
-          }),
-          reason: `publish track "${track.name}"`,
-        },
-        track.at_cid,
-      ),
-    )
+  const refs = await writePlanned(
+    ctx,
+    tracks.map((track) => ({
+      kind: 'track' as const,
+      id: track.id,
+      storedCid: track.at_cid,
+      input: {
+        action: 'publish-track' as const,
+        collection: NSID.track,
+        rkey: deterministicRkey('track', track.id),
+        record: buildTrackRecord({
+          name: track.name,
+          slug: track.slug,
+          description: track.description,
+          color: track.color,
+          skills: track.skill_uris,
+          maxSessions: track.max_sessions,
+          displayOrder: track.display_order,
+          active: track.is_active,
+          createdAt: track.created_at,
+        }),
+        reason: `publish track "${track.name}"`,
+      },
+    })),
+    results,
+  )
+  for (const [i, track] of tracks.entries()) {
+    const ref = refs[i]
     if (ref && ctx.deps.persist) await ctx.sql`update tracks set at_uri = ${ref.uri}, at_cid = ${ref.cid} where id = ${track.id}`
   }
   return { results }
@@ -696,28 +784,33 @@ export async function publishSlotGrids(input: PublishInput, deps?: PublishDeps):
     groups.set(key, group)
   }
 
-  for (const [key, group] of groups) {
+  const entries = [...groups.entries()]
+  const refs = await writePlanned(
+    ctx,
+    entries.map(([key, group]) => ({
+      kind: 'slot-grid' as const,
+      id: key,
+      storedCid: existing.get(key)?.cid,
+      input: {
+        action: 'publish-slot-grid' as const,
+        collection: NSID.slotGrid,
+        rkey: deterministicRkey('slotgrid', ctx.event.id, group.venueId ?? 'none', group.day),
+        record: buildSlotGridRecord({
+          gathering: gatheringUriFor(ctx.actorDid),
+          venue: group.venueId ? venueUri.get(group.venueId) : null,
+          day: group.day,
+          timezone: ctx.event.timezone,
+          slots: group.slots.map((s) => ({ startsAt: s.start_time, endsAt: s.end_time, label: s.label, kind: s.is_break ? 'break' : 'session' })),
+          createdAt: group.slots.reduce((min, s) => (s.created_at < min ? s.created_at : min), group.slots[0]!.created_at),
+        }),
+        reason: `publish slot grid for ${group.day}`,
+      },
+    })),
+    results,
+  )
+  for (const [i, [key, group]] of entries.entries()) {
+    const ref = refs[i]
     const prior = existing.get(key)
-    const ref = await attempt(results, 'slot-grid', key, () =>
-      putWithCas(
-        ctx,
-        {
-          action: 'publish-slot-grid',
-          collection: NSID.slotGrid,
-          rkey: deterministicRkey('slotgrid', ctx.event.id, group.venueId ?? 'none', group.day),
-          record: buildSlotGridRecord({
-            gathering: gatheringUriFor(ctx.actorDid),
-            venue: group.venueId ? venueUri.get(group.venueId) : null,
-            day: group.day,
-            timezone: ctx.event.timezone,
-            slots: group.slots.map((s) => ({ startsAt: s.start_time, endsAt: s.end_time, label: s.label, kind: s.is_break ? 'break' : 'session' })),
-            createdAt: group.slots.reduce((min, s) => (s.created_at < min ? s.created_at : min), group.slots[0]!.created_at),
-          }),
-          reason: `publish slot grid for ${group.day}`,
-        },
-        prior?.cid,
-      ),
-    )
     if (ref && ctx.deps.persist) {
       if (prior) await ctx.sql`update at_slot_grids set uri = ${ref.uri}, cid = ${ref.cid} where id = ${prior.id}`
       else {
@@ -744,7 +837,7 @@ const sessionSelect = (db: Sql) => db`
   id, event_id, title, description, format, duration, status, host_id, venue_id, time_slot_id, track_id, topic_tags,
   skill_uris, expected_attendance, required_features, is_self_hosted, self_hosted_start_time, self_hosted_end_time,
   custom_location, public_place, created_at, proposal_uri, proposal_cid, calendar_event_uri, calendar_event_cid, slot_uri, slot_cid,
-  cancelled_at, proposal_withdrawn_at, proposal_drift_cid
+  cancelled_at, proposal_withdrawn_at, proposal_drift_cid, author_inactive_at
 `
 
 export async function loadSessionBundles(
@@ -1019,37 +1112,165 @@ function differsFromPublished(live: SlotRecord, bundle: SessionBundle): boolean 
 export async function publishSchedule(input: PublishScheduleInput, deps?: PublishDeps): Promise<PublishOutput> {
   const ctx = await loadPublishContext(input, deps)
   const results: PublishResult[] = []
-  for (const bundle of await loadSessionBundles(ctx, input.sessionIds)) {
-    const { session } = bundle
-    let status: EventStatusWord = session.cancelled_at ? 'cancelled' : 'scheduled'
-    let supersedes: StrongRef | undefined
-    if (session.proposal_withdrawn_at && status !== 'cancelled') {
-      // We cannot resurrect someone else's record: the organisers cancel or re-fill the slot.
-      results.push({ kind: 'slot', id: session.id, skipped: 'proposal-withdrawn' })
-      continue
-    }
-    if (session.slot_uri) {
-      const live = await ctx.deps.getRecord<SlotRecord>(ctx.actorDid, NSID.slot, currentSlotRkey(session))
-      if (live && differsFromPublished(live.value, bundle)) {
-        results.push({ kind: 'slot', id: session.id, skipped: 'requires-approval' })
+  const bundles = await loadSessionBundles(ctx, input.sessionIds)
+  for (const group of chunk(bundles, SCHEDULE_BATCH_SESSIONS)) {
+    const ready: Array<{ bundle: SessionBundle; opts: SessionWriteOptions }> = []
+    for (const bundle of group) {
+      const { session } = bundle
+      let status: EventStatusWord = session.cancelled_at ? 'cancelled' : 'scheduled'
+      let supersedes: StrongRef | undefined
+      if (session.proposal_withdrawn_at && status !== 'cancelled') {
+        // We cannot resurrect someone else's record: the organisers cancel or re-fill the slot.
+        results.push({ kind: 'slot', id: session.id, skipped: 'proposal-withdrawn' })
         continue
       }
-      supersedes = live?.value.supersedes
-      if (supersedes && status === 'scheduled') status = 'rescheduled'
-      if (live?.value.status === 'cancelled') status = 'cancelled'
+      if (session.author_inactive_at && status !== 'cancelled') {
+        // The proposer's repo is taken down / deactivated: do not pin (or re-pin) their record.
+        results.push({ kind: 'slot', id: session.id, skipped: 'author-inactive' })
+        continue
+      }
+      if (session.slot_uri) {
+        const live = await ctx.deps.getRecord<SlotRecord>(ctx.actorDid, NSID.slot, currentSlotRkey(session))
+        if (live && differsFromPublished(live.value, bundle)) {
+          results.push({ kind: 'slot', id: session.id, skipped: 'requires-approval' })
+          continue
+        }
+        supersedes = live?.value.supersedes
+        if (supersedes && status === 'scheduled') status = 'rescheduled'
+        if (live?.value.status === 'cancelled') status = 'cancelled'
+      }
+      if (session.proposal_drift_cid) await adoptDriftedProposal(ctx, bundle)
+      ready.push({
+        bundle,
+        opts: {
+          eventStatus: status,
+          slotRkey: currentSlotRkey(session),
+          slotCid: session.slot_cid,
+          slotStatus: status === 'cancelled' ? 'cancelled' : 'scheduled',
+          supersedes,
+          action: 'publish-slot',
+          reasonPrefix: 'publish schedule',
+        },
+      })
     }
-    if (session.proposal_drift_cid) await adoptDriftedProposal(ctx, bundle)
-    await writeSession(ctx, bundle, results, {
-      eventStatus: status,
-      slotRkey: currentSlotRkey(session),
-      slotCid: session.slot_cid,
-      slotStatus: status === 'cancelled' ? 'cancelled' : 'scheduled',
-      supersedes,
-      action: 'publish-slot',
-      reasonPrefix: 'publish schedule',
-    })
+    if (ctx.deps.applyCreates) await writeSessionsBatched(ctx, ready, results)
+    else for (const { bundle, opts } of ready) await writeSession(ctx, bundle, results, opts)
   }
   return { results }
+}
+
+/** Sessions per batched round of `publishSchedule` (≤ 2 ops each per `applyWrites` phase). */
+export const SCHEDULE_BATCH_SESSIONS = 25
+
+/**
+ * `writeSession` for many sessions, in phases so independent creates share commits:
+ *   A  every calendar event (a slot strongRefs its cid, so these land first)
+ *   B  stub proposals where needed (one at a time — rare), then every config and slot
+ *   C  persist + listing routing per session
+ * Updates keep per-record CAS; results carry the same kinds and ids as `writeSession`.
+ */
+async function writeSessionsBatched(ctx: PublishContext, items: Array<{ bundle: SessionBundle; opts: SessionWriteOptions }>, results: PublishResult[]): Promise<void> {
+  const timed = items.filter(({ bundle }) => {
+    if (bundle.slot) return true
+    results.push({ kind: 'session-event', id: bundle.session.id, error: 'session has no time slot' })
+    return false
+  })
+  const times = new Map(timed.map(({ bundle }) => [bundle.session.id, { startsAt: new Date(bundle.slot!.start_time).toISOString(), endsAt: new Date(bundle.slot!.end_time).toISOString() }]))
+
+  // Phase A — calendar events.
+  const events = await writePlanned(
+    ctx,
+    timed.map(({ bundle, opts }) => ({
+      kind: 'session-event' as const,
+      id: bundle.session.id,
+      storedCid: bundle.session.calendar_event_cid,
+      input: {
+        action: opts.action,
+        collection: NSID.event,
+        rkey: sessionEventRkey(bundle.session),
+        record: sessionEventRecord(ctx, bundle, times.get(bundle.session.id)!, opts.eventStatus),
+        reason: `${opts.reasonPrefix}: calendar event for "${bundle.session.title}"`,
+        approvals: opts.approvals,
+      },
+    })),
+    results,
+  )
+
+  // Phase B — (stub) proposal refs, then configs and slots.
+  const withEvent: Array<{ bundle: SessionBundle; opts: SessionWriteOptions; calendar: StrongRef; proposal: StrongRef | null }> = []
+  for (const [i, item] of timed.entries()) {
+    const calendar = events[i]
+    if (!calendar) continue
+    withEvent.push({ ...item, calendar, proposal: await ensureProposalRef(ctx, item.bundle, results) })
+  }
+  const planned: PlannedWrite[] = []
+  const slotIndex = new Map<string, number>()
+  for (const { bundle, opts, calendar, proposal } of withEvent) {
+    const { session, venue, track } = bundle
+    const t = times.get(session.id)!
+    planned.push({
+      kind: 'session-config',
+      id: session.id,
+      input: {
+        action: opts.action === 'move-slot' || opts.action === 'cancel-slot' ? 'publish-event' : opts.action,
+        collection: NSID.eventConfig,
+        rkey: deterministicRkey('config', session.id),
+        record: buildEventConfig({ event: calendar, timezone: ctx.event.timezone, capacity: venue?.capacity, gatheringDid: ctx.actorDid, tags: sessionTags(bundle), createdAt: session.created_at }),
+        reason: `${opts.reasonPrefix}: event config for "${session.title}"`,
+      },
+    })
+    if (!proposal) continue
+    slotIndex.set(session.id, planned.length)
+    planned.push({
+      kind: 'slot',
+      id: session.id,
+      storedCid: opts.slotCid,
+      input: {
+        action: opts.action,
+        collection: NSID.slot,
+        rkey: opts.slotRkey,
+        record: buildSlotRecord({
+          gathering: gatheringUriFor(ctx.actorDid),
+          event: calendar,
+          proposal,
+          venue: venue?.at_uri,
+          track: track?.at_uri,
+          startsAt: t.startsAt,
+          endsAt: t.endsAt,
+          status: opts.slotStatus,
+          supersedes: opts.supersedes,
+          createdAt: session.created_at,
+        }),
+        reason: `${opts.reasonPrefix}: slot for "${session.title}"`,
+        approvals: opts.approvals,
+      },
+    })
+  }
+  const refs = await writePlanned(ctx, planned, results)
+
+  // Phase C — persist and route listings.
+  for (const { bundle, opts, calendar, proposal } of withEvent) {
+    const { session } = bundle
+    const at = slotIndex.get(session.id)
+    const slotRef = at === undefined ? null : refs[at]
+    if (ctx.deps.persist) {
+      const pinsCurrent = !!(proposal && session.proposal_cid && proposal.cid === session.proposal_cid)
+      await ctx.sql`
+        update sessions set
+          calendar_event_uri = ${calendar.uri},
+          calendar_event_cid = ${calendar.cid},
+          slot_uri = ${slotRef?.uri ?? session.slot_uri},
+          slot_cid = ${slotRef?.cid ?? session.slot_cid},
+          atproto_published_at = case when ${!!slotRef} then now() else atproto_published_at end,
+          proposal_drift_cid = case when ${!!slotRef && pinsCurrent} then null else proposal_drift_cid end,
+          proposal_drift_at = case when ${!!slotRef && pinsCurrent} then null else proposal_drift_at end
+        where id = ${session.id} and event_id = ${ctx.event.id}
+      `
+    }
+    if (slotRef && opts.eventStatus !== 'cancelled') {
+      await routeSessionListing(ctx, { sessionId: session.id, event: calendar, tags: sessionTags(bundle) }, results)
+    }
+  }
 }
 
 /**

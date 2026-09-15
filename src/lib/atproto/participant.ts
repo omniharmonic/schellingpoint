@@ -448,8 +448,10 @@ export async function findEndorsement(did: string, proposalUri: string): Promise
 
 export async function countEndorsements(proposalUri: string): Promise<number> {
   const [row] = await sql<{ n: number }[]>`
-    select count(distinct did)::int as n from at_records
+    select count(distinct did)::int as n from at_records r
     where collection = ${NSID.endorsement} and record -> 'proposal' ->> 'uri' = ${proposalUri}
+      -- an endorsement from a taken-down / deactivated / deleted repo does not count
+      and not exists (select 1 from at_repo_status rs where rs.did = r.did and rs.hidden)
   `
   return row?.n ?? 0
 }

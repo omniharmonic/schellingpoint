@@ -71,6 +71,7 @@ services:
       dockerfile: deploy/unconference/Dockerfile
       args:
         NEXT_PUBLIC_APP_URL: https://${WEB_HOST:?Set WEB_HOST}
+        NEXT_PUBLIC_CONTACT_EMAIL: ${CONTACT_EMAIL:-}
     image: unconference-app:${RELEASE:-current}
     restart: 'no'
     command: [node, scripts/db-migrate.mjs]
@@ -86,18 +87,35 @@ services:
     image: unconference-app:${RELEASE:-current}
     restart: unless-stopped
     init: true
-    env_file: .env
+    # Explicit, least-privilege environment: no PLC rotation key, no backup or database-owner credentials.
     environment: &app-env
       NODE_ENV: production
       PORT: '3000'
       HOSTNAME: 0.0.0.0
       NEXT_PUBLIC_APP_URL: https://${WEB_HOST}
+      NEXT_PUBLIC_CONTACT_EMAIL: ${CONTACT_EMAIL:-}
       DATABASE_URL: postgres://unconference_app:${APP_DB_PASSWORD}@postgres:5432/unconference
       # Clients (and DID documents) see the PDS through Caddy; the app talks to it directly.
       PDS_URL: https://${PDS_HOST}
       PDS_INTERNAL_URL: http://pds:3000
       PDS_HANDLE_DOMAIN: ${PDS_HANDLE_DOMAIN}
+      PDS_ADMIN_PASSWORD: ${PDS_ADMIN_PASSWORD}
+      PDS_PLC_URL: https://plc.directory
+      ATPROTO_SESSION_SECRET: ${ATPROTO_SESSION_SECRET:?Set ATPROTO_SESSION_SECRET}
+      ATPROTO_CUSTODY_KEY: ${ATPROTO_CUSTODY_KEY:?Set ATPROTO_CUSTODY_KEY}
+      ATPROTO_OAUTH_PRIVATE_JWK: ${ATPROTO_OAUTH_PRIVATE_JWK:-}
+      ATPROTO_JETSTREAM_URL: ${ATPROTO_JETSTREAM_URL:-wss://jetstream2.us-east.bsky.network/subscribe}
+      TICKET_QR_SECRET: ${TICKET_QR_SECRET:?Set TICKET_QR_SECRET}
+      CRON_SECRET: ${CRON_SECRET:?Set CRON_SECRET}
+      RESEND_API_KEY: ${RESEND_API_KEY:?Set RESEND_API_KEY}
+      MAIL_FROM: ${MAIL_FROM:-Unconference <hello@unconference.events>}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      ENS_RPC_URL: ${ENS_RPC_URL:-}
       UPLOADS_DIR: /data/uploads
+      # The app is reachable only through Caddy, which overwrites X-Forwarded-For with the real peer:
+      # trust its left-most entry for per-IP sign-in limits (src/lib/auth/client-ip.ts).
+      TRUST_PROXY: 'true'
     volumes:
       - uploads:/data/uploads
     depends_on:
@@ -118,7 +136,6 @@ services:
     image: unconference-app:${RELEASE:-current}
     restart: unless-stopped
     init: true
-    env_file: .env
     environment: *app-env
     command: [npm, run, atproto:indexer]
     depends_on:
@@ -138,6 +155,7 @@ services:
         n=0
         while true; do
           job /api/jobs/close-rounds
+          job /api/jobs/publish
           [ $$((n % 5)) -eq 0 ] && job /api/notifications/dispatch
           [ $$((n % 60)) -eq 0 ] && job /api/atproto/sync
           [ $$((n % 1440)) -eq 0 ] && job /api/jobs/retention
@@ -148,6 +166,32 @@ services:
       app:
         condition: service_healthy
 
+  # Nightly encrypted backups: Postgres dump + online SQLite copies of the PDS + its blobs,
+  # encrypted with age to a recipient whose private key is NOT on this server, uploaded to R2.
+  backup:
+    build:
+      context: .
+      dockerfile: backup.Dockerfile
+    restart: unless-stopped
+    environment:
+      PGHOST: postgres
+      PGUSER: unconference
+      PGDATABASE: unconference
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      BACKUP_AGE_RECIPIENT: ${BACKUP_AGE_RECIPIENT:?Set BACKUP_AGE_RECIPIENT}
+      BACKUP_S3_ENDPOINT: ${BACKUP_S3_ENDPOINT:-}
+      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:-}
+      AWS_ACCESS_KEY_ID: ${BACKUP_S3_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${BACKUP_S3_SECRET_ACCESS_KEY:-}
+      AWS_DEFAULT_REGION: auto
+      BACKUP_HOUR_UTC: ${BACKUP_HOUR_UTC:-3}
+    volumes:
+      - pds:/pds:ro
+      - backups:/backups
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
@@ -155,7 +199,6 @@ services:
       WEB_HOST: ${WEB_HOST}
       PDS_HOST: ${PDS_HOST}
       PDS_HANDLE_DOMAIN: ${PDS_HANDLE_DOMAIN}
-      ACME_EMAIL: ${ACME_EMAIL:-}
     ports:
       - '80:80'
       - '443:443'
@@ -172,5 +215,6 @@ volumes:
   postgres:
   pds:
   uploads:
+  backups:
   caddy_data:
   caddy_config:

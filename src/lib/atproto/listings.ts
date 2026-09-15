@@ -270,6 +270,7 @@ export async function routePeerListings(eventId: string, deps?: PublishDeps): Pr
     join at_records cfg on cfg.did = p.peer_did and cfg.collection = ${NSID.eventConfig}
                         and cfg.record -> 'event' ->> 'uri' = ev.uri
     where p.event_id = ${eventId} and p.cross_listing_enabled
+      and not exists (select 1 from at_repo_status rs where rs.did = p.peer_did and rs.hidden)
     order by ev.indexed_at desc
     limit 500
   `

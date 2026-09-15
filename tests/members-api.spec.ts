@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test'
 import { loadEnvConfig } from '@next/env'
 import postgres from 'postgres'
+import { signInWithEmail } from './helpers/gathering'
 
 /**
  * Members and invitations (work package D) against the running dev server (:3001), the local
@@ -30,19 +31,7 @@ interface Account { email: string; cookie: string; id: string; did: string }
 
 async function signIn(sql: postgres.Sql, who: string): Promise<Account> {
   const email = EMAIL(who)
-  const res = await fetch(`${base}/api/auth/email`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', origin: base },
-    body: JSON.stringify({ email, next: '/' }),
-  })
-  const body = await res.json()
-  expect(res.status, JSON.stringify(body)).toBe(200)
-  expect(typeof body.devVerifyUrl, 'run the dev server without RESEND_API_KEY').toBe('string')
-  const verify = await fetch(body.devVerifyUrl, { redirect: 'manual' })
-  const cookie = (verify.headers.getSetCookie?.() ?? [verify.headers.get('set-cookie') ?? ''])
-    .map((c) => c.split(';')[0])
-    .find((c) => c.startsWith('sp_at_session='))
-  expect(cookie, 'verify sets the session cookie').toBeTruthy()
+  const cookie = await signInWithEmail(email, base)
   const [row] = await sql<{ id: string; did: string }[]>`select id, did from accounts where email = ${email}`
   return { email, cookie: cookie!, id: row.id, did: row.did }
 }

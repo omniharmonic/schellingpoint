@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test'
 import { loadEnvConfig } from '@next/env'
 import postgres from 'postgres'
+import { signInWithEmail } from './helpers/gathering'
 import { randomBytes } from 'node:crypto'
 import { secp256k1 } from '@noble/curves/secp256k1'
 import {
@@ -38,19 +39,7 @@ interface Person {
 
 async function signIn(who: string): Promise<Person> {
   const email = emailFor(who)
-  const res = await fetch(`${base}/api/auth/email`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', origin },
-    body: JSON.stringify({ email, next: '/' }),
-  })
-  const body = await res.json()
-  expect(res.status, JSON.stringify(body)).toBe(200)
-  expect(typeof body.devVerifyUrl, 'run the dev server with mail disabled').toBe('string')
-  const verify = await fetch(body.devVerifyUrl, { redirect: 'manual' })
-  const cookie = (verify.headers.getSetCookie?.() ?? [verify.headers.get('set-cookie') ?? ''])
-    .map((c) => c.split(';')[0])
-    .find((c) => c.startsWith('sp_at_session='))
-  expect(cookie, 'verify sets the session cookie').toBeTruthy()
+  const cookie = await signInWithEmail(email, base)
   const me = await (await fetch(`${base}/api/auth/me`, { headers: { cookie: cookie! } })).json()
   return { email, cookie: cookie!, id: me.user.id, did: me.user.did }
 }

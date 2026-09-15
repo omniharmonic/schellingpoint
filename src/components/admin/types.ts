@@ -37,6 +37,7 @@ export interface AdminSession {
   network_published: boolean
   proposal_drift_at: string | null
   proposal_withdrawn_at: string | null
+  author_inactive_at?: string | null
   cancelled_at: string | null
   venue: { id: string; name: string } | null
   time_slot: { id: string; label: string | null; start_time: string; end_time: string; day_date: string | null } | null

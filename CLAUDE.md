@@ -1,124 +1,64 @@
-# Schelling Point MVP - Claude Code Instructions
+# unconference.events (Schelling Point on ATProto) — Claude Code Instructions
 
-## Project Overview
+This is the `atproto` branch: Schelling Point rebuilt to `docs/ATPROTO_MIGRATION_SPEC.md` as an
+AT Protocol application. **There is no Supabase on this branch.** The web2 product (Vercel +
+hosted Supabase, schellingpoint.app) lives on `main`; do not merge this branch into `main`.
 
-Multi-tenant unconference platform with quadratic voting for session selection. Users can create events, propose sessions, vote on proposals, and organizers can schedule the final program.
+## Start here
+1. `docs/ATPROTO_APPVIEW_PLAN.md` — architecture, contracts, file ownership, 31-item spec checklist.
+2. `docs/ATPROTO_MIGRATION_SPEC.md` — the spec. Its privacy rules are requirements, not suggestions.
+3. `deploy/unconference/README.md` — production runbook (Hetzner `frontrange-twin-1`).
 
-## Repository
+## Architecture in one screen
+- **Next.js 15 is the AppView**: route handlers under `src/app/api/**` are the only way the browser
+  reads or writes data. No browser database access, ever.
+- **Postgres 16** (`src/lib/db`, postgres.js tagged templates). Schema in `db/migrations/NNNN_*.sql`,
+  applied by `npm run db:migrate`. `asAccount(id, fn)` runs a transaction as the signed-in account so
+  RLS and participation triggers apply; `sql` is the service connection.
+- **Our own PDS** (`pds.unconference.events`): custodial accounts (email → DID, generated handle) and
+  every gathering's account. People can also sign in with an existing ATProto account (OAuth, hard
+  confirm). Identity code: `src/lib/auth/*`, `src/lib/atproto/{session,oauth,agent,bridge}.ts`.
+- **Records**: proposals, co-host confirmations, endorsements, opt-in RSVPs and time preferences are
+  written to the author's own repo; gatherings, policy, venues, tracks, slot grids, the published
+  schedule (canonical `community.lexicon.calendar.event` + sidecars), approvals and k-suppressed tallies
+  are written by the gathering actor through the audited port (`src/lib/atproto/{actor,publish}.ts`).
+- **Votes are never records**: ballot-key rounds (`src/lib/voting`). Nobody, organizers included, sees
+  counts while a round is open; at close the key is destroyed and entries are unlinkable.
+- **Indexing**: Jetstream consumer (`scripts/atproto-indexer.ts`) + hourly reconciliation.
 
-Canonical repo (owner: omniharmonic): `https://github.com/omniharmonic/schellingpoint`
-- `origin` → `omniharmonic/schellingpoint`, default branch `main` (the latest code).
-- Prior OpenCivics-Labs and RegenHub-Boulder remotes are no longer used.
+## Rules that are easy to break
+- Never put a DID, name or handle into a public record unless its holder wrote that record
+  (`assertNoForeignDid`). Never publish exact addresses, `host_name`/listed-as names, vote counts
+  outside the tally, or attendee-only details.
+- Never add fields to borrowed lexicons (`community.lexicon.*`, `coop.lexicon.*`, `freeschool.draft.*`);
+  use `schellingpoint.draft.*` sidecars. `npm run lexicons:validate`.
+- Every mutation route: `assertSameOrigin`, then `requireViewer`/`requireEventRole`, then validation,
+  then SQL filtered by the resolved `event_id`. Private/draft gatherings answer 404 to non-members.
+- Server-side fetches of URLs derived from DIDs/handles go through the SSRF-safe fetch (`src/lib/net`).
+- Notifications are emitted with `notify(sql, …)` inside the action's transaction; never from triggers.
+- New tables are private by default (migration 0009); grant `authenticated` explicitly only together
+  with RLS policies. Use `sql.json(value)` for jsonb parameters, never `JSON.stringify(...)::jsonb`.
+- postgres.js returns timestamps as ISO strings and `count(*)` as numbers (see `src/lib/db`).
 
-## Current Development Phase
-
-**Active Work**: Multi-tenant implementation (Phases 3-8)
-
-**Start Here**: Read `docs/IMPLEMENTATION_HANDOFF.md` for current state and next actions.
-
-**Master Plan**: `docs/MULTI_TENANT_IMPLEMENTATION_PLAN.md` contains all task breakdowns with IDs (P1.1.1, P4.2.3, etc.)
-
-## Tech Stack
-
-- **Framework**: Next.js 15 (App Router)
-- **Database**: Supabase (PostgreSQL + Auth + Storage)
-- **Styling**: Tailwind CSS + shadcn/ui
-- **Email**: Resend
-- **Payments**: Stripe Checkout + Connect Express
-
-## Key Architectural Decisions
-
-1. **Multi-tenant via event_id columns** - All tables scoped by event_id, not schema-per-tenant
-2. **Role-based access via event_members** - Roles: owner, admin, moderator, track_lead, volunteer, attendee
-3. **RLS for isolation** - Row-Level Security policies enforce event boundaries
-4. **Admin client bypasses RLS** - Use `createAdminClient()` for operations needing elevated access
-5. **CSS custom properties for theming** - Event themes inject via CSS variables
-
-## Important Patterns
-
-### Supabase Clients
-```typescript
-// For user-scoped operations (respects RLS)
-import { createClient } from '@/lib/supabase/server'
-
-// For admin operations (bypasses RLS) - use for APIs
-import { createAdminClient } from '@/lib/supabase/server'
-```
-
-### Event Context
-```typescript
-// Get current event
-const event = useEvent()
-
-// Get user's role in event
-const { role, isAdmin, isMember, can } = useEventRole()
-
-// Check specific permission
-if (can('approveProposals')) { ... }
-```
-
-### API Route Pattern
-```typescript
-export async function POST(request: Request) {
-  const user = await getUserFromRequest(request)
-  if (!user) return unauthorized()
-
-  const supabase = await createAdminClient()
-  // ... database operations
-}
-```
-
-## File Structure
-
-```
-src/
-├── app/
-│   ├── create/          # Event creation wizard
-│   ├── e/[slug]/        # Event pages (multi-tenant)
-│   │   ├── admin/       # Event admin pages
-│   │   ├── sessions/    # Session listing/detail
-│   │   └── propose/     # Session proposal
-│   └── api/             # API routes
-├── components/          # Shared components
-├── contexts/            # React contexts (EventContext)
-├── hooks/               # Custom hooks (useAuth)
-├── lib/                 # Utilities
-│   ├── supabase/        # Supabase clients
-│   ├── permissions.ts   # Role permissions
-│   └── events/          # Event helpers
-└── types/               # TypeScript types
-```
-
-## Common Tasks
-
-### Create a new migration
+## Local development
 ```bash
-npx supabase migration new <name>
-# Edit supabase/migrations/[timestamp]_<name>.sql
-npx supabase db push
+npm run stack:up                       # Postgres :55432, mock PLC :2582, dev PDS :2583
+set -a; source .env.local; set +a
+APP_DB_USER=unconference_app APP_DB_PASSWORD=unconference_app npm run db:migrate
+ALLOW_SEED=true npm run db:seed        # demo-gathering, draft-gathering, past-gathering
+RESEND_API_KEY= npm run dev            # :3001; mail disabled so sign-in returns a dev link
+node scripts/dev-login.mjs you@example.test   # prints a session cookie for curl/tests
 ```
+The mock PLC is in-memory: after restarting it, wipe the stack (`npm run stack:down -- -v`).
 
-### Add a new event-scoped table
-1. Add `event_id UUID REFERENCES events(id) NOT NULL`
-2. Add index on `event_id`
-3. Create RLS policies checking event_members
-4. Add to IMPLEMENTATION_HANDOFF.md
-
-### Test event creation flow
-1. Go to `/create`
-2. Complete wizard steps
-3. Verify redirect to `/e/[slug]/admin`
-4. Verify owner membership in event_members
-
-## Current Bugs/Limitations
-
-- Push notifications are not implemented (toggle disabled in notification settings)
-- `tests/e2e.spec.ts` and `tests/new-features.spec.ts` are stale; `npm test` runs the maintained suites
-- Notification emails depend on the Vercel cron in `vercel.json` and a `CRON_SECRET` env var
-- Paid ticketing needs `STRIPE_SECRET_KEY`; Stripe Connect onboarding degrades to 503 without it
+## Verification gate
+`npm run typecheck`, `npm run lexicons:validate`, `npm run build`, `npm test` (dev server + local
+stack running), `npm run test:sql`, `npm run atproto:audit`. Tests must never modify seeded events;
+use `tests/helpers` to create and clean up their own gatherings and accounts.
 
 ## Don't
-
-- Don't use `createServerClient` from `@supabase/ssr` for admin operations (doesn't bypass RLS)
-- Don't forget event_id when creating new tables
-- Don't hardcode event-specific values (EthBoulder, specific dates, etc.)
+- Don't reintroduce Supabase, bearer tokens in the browser, or client-side database calls.
+- Don't write into someone else's repo on their behalf (organizers curate app-side; they can ask the
+  author to update a proposal, never edit it).
+- Don't change `PDS_HOSTNAME`/`PDS_HANDLE_DOMAIN` in production: they are written into DID documents.
+- Don't create PDS accounts against the real `plc.directory` from local tests.

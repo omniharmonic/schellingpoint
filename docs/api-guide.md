@@ -1,435 +1,106 @@
-# Schelling Point API Guide
+# unconference.events public read API
 
-Read-only REST API for accessing Schelling Point event data.
+Everything a gathering publishes to the AT Protocol network is available two ways:
 
-**Base URL:** `https://schellingpoint.app/api/v1`
+1. **On the network, from the source.** Each gathering has its own account (for example
+   `ethboulder.unconference.events`). Its schedule is a set of `community.lexicon.calendar.event`
+   records plus `schellingpoint.draft.*` sidecars in that account's repository; proposals live in their
+   authors' repositories. Read them with any ATProto client (`com.atproto.repo.listRecords`), from a
+   relay, or from Jetstream. Lexicons are in `lexicons/`.
+2. **From this AppView, pre-joined.** The endpoints below serve the same published data for
+   convenience. They need no key, allow any origin, and are cached for 60 seconds.
 
-## Authentication
+This API only ever serves what is already public on the network. It never serves emails, Telegram,
+ENS, account ids, organizer-typed speaker names, track leads, vote counts (only the k-suppressed tally
+is public, as a record), RSVP-gated details, organizer notes, or street addresses (venues are
+coarsened to locality). The only DIDs in responses are the gathering's own and those of proposers whose
+proposal record is in their own repository.
 
-All requests require an API key passed via the `x-api-key` header.
+The previous shared-key partner API (`x-api-key`) was removed: it exposed private profile fields.
+`/api/v1/profiles` and `/api/v1/profiles/:id` answer `410 Gone`.
 
-```bash
-curl -H "x-api-key: YOUR_API_KEY" "https://schellingpoint.app/api/v1/sessions?event=EVENT_SLUG"
-```
+## Conventions
 
-Missing or invalid keys return `401 Unauthorized`.
-
-## Event Scoping
-
-Schelling Point hosts many events. Every list endpoint is scoped to a single event and **requires** the `event` query parameter (the event's slug, e.g. the `ethboulder-2026` in `https://schellingpoint.app/e/ethboulder-2026`).
-
-| Param | Example | Description |
-|-------|---------|-------------|
-| `event` | `ethboulder-2026` | **Required on list endpoints.** Slug of the event to read. |
-
-- Omitting `event` on a list endpoint returns `400` with the message `event query parameter (event slug) is required`.
-- An unknown slug returns `404`.
-- Only events that are **public or unlisted** and **not in draft** are available through this API. Private and draft events return `404` even with a valid key.
-- Detail endpoints (`/sessions/:id`, `/tracks/:id`, `/venues/:id`, `/profiles/:id`) do not require `event`, but return `404` if the resource belongs to an event that is not available. If you do pass `event` on a detail endpoint, it must match the resource's event.
-
-## Response Format
-
-**Success (list):**
-```json
-{
-  "data": [ ... ],
-  "count": 42
-}
-```
-
-**Success (single resource):**
-```json
-{
-  "data": { ... }
-}
-```
-
-**Error:**
-```json
-{
-  "error": {
-    "code": "NOT_FOUND",
-    "message": "Session not found"
-  }
-}
-```
-
-**Status codes:** `200` success, `400` bad request, `401` unauthorized, `404` not found, `405` method not allowed.
-
-All responses include `Cache-Control: public, max-age=60`.
-
----
+- Base URL: `https://unconference.events`
+- Every endpoint takes `event=<gathering slug>`. Public and unlisted gatherings are readable once
+  published; unknown, private and draft gatherings answer `404`.
+- Responses: `{ "data": ..., "count"?: number }`; errors: `{ "error": { "code", "message" } }`.
+- Times are ISO 8601 UTC; `day_date` is the gathering's calendar day (`YYYY-MM-DD`).
+- Only `GET` is supported.
 
 ## Endpoints
 
-### Sessions
+### `GET /api/v1/schedule?event=<slug>[&day=YYYY-MM-DD]`
 
-Sessions are proposals, talks, workshops, and other scheduled activities.
-
-**List sessions**
-```
-GET /api/v1/sessions?event=EVENT_SLUG
-```
-
-Returns the event's approved and scheduled sessions by default, ordered by vote count (descending).
-
-| Param | Example | Description |
-|-------|---------|-------------|
-| `event` | `ethboulder-2026` | **Required.** Event slug |
-| `include` | `host,track,venue,timeslot` | Embed related objects (comma-separated) |
-| `status` | `approved,scheduled` | Filter by status (comma-separated). Valid: `pending`, `approved`, `rejected`, `scheduled` |
-
-**Example — sessions with all relationships:**
-```bash
-curl -H "x-api-key: YOUR_API_KEY" \
-  "https://schellingpoint.app/api/v1/sessions?event=ethboulder-2026&include=host,track,venue,timeslot"
-```
-
-```json
-{
-  "data": [
-    {
-      "id": "550e8400-e29b-41d4-a716-446655440000",
-      "title": "Zero-Knowledge Proofs for Identity",
-      "description": "An exploration of ZK-based identity solutions...",
-      "format": "talk",
-      "duration": 30,
-      "host_name": "Alice Smith",
-      "topic_tags": ["privacy", "identity", "zk-proofs"],
-      "status": "scheduled",
-      "is_self_hosted": false,
-      "custom_location": null,
-      "session_type": "curated",
-      "is_votable": true,
-      "total_votes": 12,
-      "total_credits": 48,
-      "voter_count": 8,
-      "host_id": "...",
-      "venue_id": "...",
-      "time_slot_id": "...",
-      "track_id": "...",
-      "created_at": "2026-02-09T00:00:00+00:00",
-      "updated_at": "2026-02-09T00:00:00+00:00",
-      "host": {
-        "id": "...",
-        "display_name": "Alice Smith",
-        "bio": "Cryptography researcher...",
-
-        "affiliation": "EFF",
-        "building": "Privacy Tech",
-        "interests": ["privacy", "cryptography"]
-      },
-      "track": {
-        "id": "...",
-        "name": "Privacy & Security",
-        "slug": "privacy-security",
-        "color": "#8B5CF6"
-      },
-      "venue": {
-        "id": "...",
-        "name": "Main Hall",
-        "slug": "main-hall"
-      },
-      "time_slot": {
-        "id": "...",
-        "start_time": "2026-02-13T10:00:00-07:00",
-        "end_time": "2026-02-13T10:30:00-07:00",
-        "label": "Morning Session 1",
-        "is_break": false,
-        "day_date": "2026-02-13",
-        "slot_type": "session"
-      }
-    }
-  ],
-  "count": 1
-}
-```
-
-**Note:** `host` will be `null` for curated sessions that don't have a linked profile — check `host_name` on the session itself for the speaker name.
-
-Without `?include=`, the response contains only the flat session fields (no nested `host`, `track`, `venue`, or `time_slot` objects).
-
----
-
-**Get session by ID**
-```
-GET /api/v1/sessions/:id
-```
-
-Returns a single session with all relationships embedded (host, track, venue, time_slot). No `?include=` needed.
-
-```bash
-curl -H "x-api-key: YOUR_API_KEY" \
-  "https://schellingpoint.app/api/v1/sessions/550e8400-e29b-41d4-a716-446655440000"
-```
-
----
-
-### Profiles
-
-Participants and speakers.
-
-Contact and permission fields (`email`, `telegram`, `ens`, `is_admin`) are **not** exposed by the profile endpoints, nor by the `host`/`cohosts` embeds on session endpoints.
-
-**List profiles**
-```
-GET /api/v1/profiles?event=EVENT_SLUG
-```
-
-Returns the members of the given event, ordered by display name.
-
-| Param | Example | Description |
-|-------|---------|-------------|
-| `event` | `ethboulder-2026` | **Required.** Event slug — only members of this event are returned |
-
-**Fields returned:**
-`id`, `display_name`, `bio`, `avatar_url`, `affiliation`, `building`, `interests`, `created_at`
-
-```bash
-curl -H "x-api-key: YOUR_API_KEY" \
-  "https://schellingpoint.app/api/v1/profiles?event=ethboulder-2026"
-```
-
----
-
-**Get profile by ID**
-```
-GET /api/v1/profiles/:id
-```
-
-| Param | Example | Description |
-|-------|---------|-------------|
-| `include` | `sessions` | Embed the sessions this person is hosting (only sessions in available events) |
-| `event` | `ethboulder-2026` | Optional. Require membership in this event and limit embedded sessions to it |
-
-**Fields returned:**
-`id`, `display_name`, `bio`, `affiliation`, `building`, `interests`, `created_at`
-
-```bash
-curl -H "x-api-key: YOUR_API_KEY" \
-  "https://schellingpoint.app/api/v1/profiles/PROFILE_UUID?include=sessions"
-```
+The published schedule grouped by day.
 
 ```json
 {
   "data": {
-    "id": "...",
-    "display_name": "Alice Smith",
-    "bio": "Cryptography researcher...",
-    "affiliation": "EFF",
-    "interests": ["privacy", "cryptography"],
-    "sessions": [
+    "gathering": { "slug": "ethboulder", "name": "EthBoulder", "did": "did:plc:…", "uri": "at://did:plc:…/schellingpoint.draft.gathering/self" },
+    "days": [
       {
-        "id": "...",
-        "title": "Zero-Knowledge Proofs for Identity",
-        "format": "talk",
-        "status": "scheduled",
-        "total_votes": 12
+        "day": "2027-02-26",
+        "slots": [
+          {
+            "id": "…", "start_time": "2027-02-26T16:00:00.000Z", "end_time": "2027-02-26T17:00:00.000Z",
+            "label": "Morning", "is_break": false, "day_date": "2027-02-26", "slot_type": "session",
+            "venue_id": "…", "venue": { "id": "…", "name": "Main hall", "slug": "main-hall" },
+            "grid_uri": "at://did:plc:…/schellingpoint.draft.slotGrid/…",
+            "sessions": [ "PublicSession" ]
+          }
+        ]
       }
-    ]
+    ],
+    "unslotted": [ "PublicSession" ]
   }
 }
 ```
 
----
-
-### Tracks
-
-Thematic categories that group sessions (e.g., Privacy, DeSci, Public Goods Funding).
-
-**List tracks**
-```
-GET /api/v1/tracks?event=EVENT_SLUG
-```
-
-| Param | Example | Description |
-|-------|---------|-------------|
-| `event` | `ethboulder-2026` | **Required.** Event slug |
-
-**Fields returned:**
-`id`, `name`, `slug`, `description`, `color`, `lead_name`, `is_active`, `created_at`
-
----
-
-**Get track by ID**
-```
-GET /api/v1/tracks/:id
-```
-
-| Param | Example | Description |
-|-------|---------|-------------|
-| `include` | `sessions` | Embed the sessions in this track |
-
-```bash
-curl -H "x-api-key: YOUR_API_KEY" \
-  "https://schellingpoint.app/api/v1/tracks/TRACK_UUID?include=sessions"
-```
-
----
-
-### Venues
-
-Physical locations where sessions take place.
-
-**List venues**
-```
-GET /api/v1/venues?event=EVENT_SLUG
-```
-
-| Param | Example | Description |
-|-------|---------|-------------|
-| `event` | `ethboulder-2026` | **Required.** Event slug |
-
-**Fields returned:**
-`id`, `name`, `slug`, `capacity`, `features`, `style`, `address`, `notes`, `is_primary`, `created_at`
-
----
-
-**Get venue by ID**
-```
-GET /api/v1/venues/:id
-```
-
-| Param | Example | Description |
-|-------|---------|-------------|
-| `include` | `timeslots` | Embed the time slots assigned to this venue |
-
-```bash
-curl -H "x-api-key: YOUR_API_KEY" \
-  "https://schellingpoint.app/api/v1/venues/VENUE_UUID?include=timeslots"
-```
-
----
-
-### Time Slots
-
-Schedule blocks that sessions are assigned to. Each time slot belongs to a venue.
-
-**List time slots**
-```
-GET /api/v1/timeslots?event=EVENT_SLUG
-```
-
-| Param | Example | Description |
-|-------|---------|-------------|
-| `event` | `ethboulder-2026` | **Required.** Event slug |
-| `day` | `2026-02-13` | Filter to a specific day (YYYY-MM-DD) |
-| `include` | `venue` | Embed the venue object |
-
-**Fields returned:**
-`id`, `start_time`, `end_time`, `label`, `is_break`, `day_date`, `slot_type`, `venue_id`, `created_at`
-
-`slot_type` values: `session`, `break`, `checkin`, `unconference`, `track`
-
-```bash
-curl -H "x-api-key: YOUR_API_KEY" \
-  "https://schellingpoint.app/api/v1/timeslots?event=ethboulder-2026&day=2026-02-13&include=venue"
-```
-
----
-
-### Schedule
-
-Pre-joined composite view — time slots grouped by day with their venues and sessions. This is the most useful endpoint for building a complete event schedule.
-
-**Get schedule**
-```
-GET /api/v1/schedule?event=EVENT_SLUG
-```
-
-| Param | Example | Description |
-|-------|---------|-------------|
-| `event` | `ethboulder-2026` | **Required.** Event slug |
-| `day` | `2026-02-13` | Filter to a specific day (YYYY-MM-DD) |
-
-```bash
-curl -H "x-api-key: YOUR_API_KEY" \
-  "https://schellingpoint.app/api/v1/schedule?event=ethboulder-2026&day=2026-02-13"
-```
+`PublicSession`:
 
 ```json
 {
-  "data": [
-    {
-      "day": "2026-02-13",
-      "slots": [
-        {
-          "id": "...",
-          "start_time": "2026-02-13T09:00:00-07:00",
-          "end_time": "2026-02-13T09:30:00-07:00",
-          "label": "Check-in & Coffee",
-          "is_break": true,
-          "slot_type": "checkin",
-          "venue": { "id": "...", "name": "Main Hall", "slug": "main-hall" },
-          "sessions": []
-        },
-        {
-          "id": "...",
-          "start_time": "2026-02-13T10:00:00-07:00",
-          "end_time": "2026-02-13T10:30:00-07:00",
-          "label": "Morning Session 1",
-          "is_break": false,
-          "slot_type": "session",
-          "venue": { "id": "...", "name": "Main Hall", "slug": "main-hall" },
-          "sessions": [
-            {
-              "id": "...",
-              "title": "Zero-Knowledge Proofs for Identity",
-              "description": "An exploration of ZK-based identity solutions...",
-              "format": "talk",
-              "duration": 30,
-              "host_name": "Alice Smith",
-              "status": "scheduled",
-              "session_type": "curated",
-              "total_votes": 12,
-              "time_slot_id": "...",
-              "track": {
-                "id": "...",
-                "name": "Privacy & Security",
-                "color": "#8B5CF6"
-              }
-            }
-          ]
-        }
-      ]
-    }
-  ]
+  "id": "…", "title": "Soil and software", "description": "…", "format": "talk", "duration": 30,
+  "session_type": "proposed", "cancelled": false, "time_slot_id": "…",
+  "start_time": "…", "end_time": "…",
+  "track": { "id": "…", "name": "Commons", "color": "#2f855a" },
+  "venue": { "id": "…", "name": "Main hall", "slug": "main-hall" },
+  "host": { "did": "did:plc:…", "handle": "calmotter417.unconference.events" },
+  "uris": {
+    "calendar_event": "at://did:plc:<gathering>/community.lexicon.calendar.event/…",
+    "slot": "at://did:plc:<gathering>/schellingpoint.draft.slot/…",
+    "proposal": "at://did:plc:<author>/schellingpoint.draft.proposal/…"
+  }
 }
 ```
 
-Break slots are included with an empty `sessions` array so you have the full schedule structure.
+`host` is present only when the proposal record is in the host's own repository. Sessions proposed on
+someone's behalf or imported have `host: null`.
 
----
+### `GET /api/v1/tracks?event=<slug>` and `GET /api/v1/tracks/:id?event=<slug>`
 
-## Data Model Relationships
+Published tracks: `id, uri, name, slug, description, color, is_active, display_order, max_sessions`.
 
-```
-Profile --hosts--> Session
-Track   --groups-> Session
-Venue   --has----> Time Slot --assigned--> Session
-```
+### `GET /api/v1/venues?event=<slug>` and `GET /api/v1/venues/:id?event=<slug>`
 
-- A **session** belongs to one track, one venue, and one time slot
-- A **profile** can host multiple sessions
-- A **venue** has multiple time slots across multiple days
-- A **track** groups multiple sessions by theme
-- **Vote data** is aggregated on sessions: `total_votes`, `total_credits`, `voter_count`
+Published venues: `id, uri, name, slug, capacity, features, style, is_primary, locality, region, country`.
+No street address or notes.
 
-## Enum Values
+### `GET /api/v1/timeslots?event=<slug>[&day=YYYY-MM-DD][&include=venue]`
 
-| Field | Values |
-|-------|--------|
-| `session.format` | `talk`, `workshop`, `discussion`, `panel`, `demo`, `fireside`, `ceremony` |
-| `session.status` | `pending`, `approved`, `rejected`, `scheduled` |
-| `session.session_type` | `curated`, `proposed`, `workshop`, `track_reserved` |
-| `time_slot.slot_type` | `session`, `break`, `checkin`, `unconference`, `track` |
+Time slots of published slot grids: `id, start_time, end_time, label, is_break, day_date, slot_type,
+venue_id, grid_uri`, plus `venue: { id, name, slug }` with `include=venue`.
 
-## Suggested Sync Strategy
+### `GET /api/atproto/records?event=<slug>&collection=<nsid>[&limit=]`
 
-For building a knowledge graph, we recommend:
+Indexed public records for the gathering (its own repository, and proposals, co-host confirmations and
+endorsements that reference it), as `{ uri, cid, did, collection, rkey, record, indexed_at }`.
 
-1. **Initial sync:** Call each list endpoint once per event (`?event=<slug>`) to pull all data. Use `?include=` on sessions to get relationships in one pass.
-2. **Incremental refresh:** Poll the sessions endpoint periodically (e.g., every 5 minutes) to pick up new proposals, status changes, and vote count updates.
-3. **Schedule is read-only:** The schedule changes infrequently (only when organizers assign sessions to time slots), so polling less often is fine.
+## Sync strategy
 
-Responses are cached for 60 seconds, so polling more frequently than once per minute won't yield new data.
+For a mirror, prefer the network: subscribe to Jetstream with `wantedCollections` for
+`community.lexicon.calendar.event` and `schellingpoint.draft.*`, filter by the gathering's DID for
+gathering-written records and by the `gathering` field for proposals, and fall back to
+`com.atproto.repo.listRecords` on the gathering's PDS for backfill. Use these endpoints for simple
+polling integrations; respect the 60-second cache.

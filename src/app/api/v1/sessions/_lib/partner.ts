@@ -64,7 +64,7 @@ export async function partnerSessions(q: PartnerQuery): Promise<Record<string, u
              from session_cohosts c
              left join profiles cp on cp.id = c.user_id
              left join accounts ca on ca.id = c.user_id
-             where c.session_id = s.id
+             where c.session_id = s.id and c.cohost_inactive_at is null
            ) as cohosts
     from sessions s
     left join profiles hp on hp.id = s.host_id

@@ -4,6 +4,7 @@ import Module from 'node:module'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import postgres from 'postgres'
+import { signInWithEmail } from './helpers/gathering'
 
 /**
  * Work package E: notification outbox, feed API, retention, tickets bound to a DID.
@@ -135,7 +136,7 @@ test.describe('notifications and tickets (package E)', () => {
           values (${a.id}, null, 'session_updates', false), (${a.id}, null, 'event_announcements', false)
         `
         const emit = async (userId: string, type: import('../src/lib/notifications').NotificationType, title: string) => {
-          await notifications.notify(t, { eventId: null, userIds: [userId], type, title, actionUrl: '/e/demo-gathering' })
+          await notifications.notify(t, { eventId: null, userIds: [userId], type, title, actionUrl: '/e/some-gathering' })
           const [row] = await t<{ id: string }[]>`select id from notifications where user_id = ${userId} and title = ${title}`
           return row.id
         }
@@ -204,8 +205,11 @@ test.describe('notifications and tickets (package E)', () => {
   test('retention deletes 91-day-old notifications and nulls 31-day-old inviters', async () => {
     await rolledBack(async (t) => {
       const a = await insertAccount(t)
-      const [event] = await t<{ id: string }[]>`select id from events order by created_at limit 1`
-      test.skip(!event, 'no events seeded')
+      // A gathering of this transaction's own (rolled back with it), never a seeded one.
+      const [event] = await t<{ id: string }[]>`
+        insert into events (slug, name, start_date, end_date) values (${`pkge-retention-${randomUUID().slice(0, 8)}`}, 'Retention test', current_date, current_date)
+        returning id
+      `
       await t`
         insert into notifications (user_id, type, title, created_at) values
           (${a.id}, 'admin_announcement', 'old', now() - interval '91 days'),
@@ -495,17 +499,7 @@ test.describe('notifications and tickets (package E)', () => {
     let ticketId = ''
 
     async function signIn(email: string): Promise<string> {
-      const res = await fetch(`${base}/api/auth/email`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', origin: base },
-        body: JSON.stringify({ email, next: '/' }),
-      })
-      const body = await res.json()
-      expect(body.devVerifyUrl, 'the dev server must run with mail disabled').toBeTruthy()
-      const verify = await fetch(body.devVerifyUrl, { redirect: 'manual' })
-      const cookie = verify.headers.getSetCookie().map((c) => c.split(';')[0]).find((c) => c.startsWith('sp_at_session='))
-      expect(cookie).toBeTruthy()
-      return cookie!
+      return signInWithEmail(email, base)
     }
 
     test.beforeAll(async () => {

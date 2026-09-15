@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test'
 import { loadEnvConfig } from '@next/env'
 import postgres from 'postgres'
+import { signInWithEmail } from './helpers/gathering'
 
 // Sessions & participation (work package B) end to end against the running dev server (:3001),
 // the local Postgres and the local PDS. The dev server must run without a mail key so the
@@ -23,19 +24,7 @@ interface Account { email: string; cookie: string; id: string; did: string }
 
 async function signIn(sql: postgres.Sql, who: string): Promise<Account> {
   const email = EMAIL(who)
-  const res = await fetch(`${base}/api/auth/email`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', ...ORIGIN },
-    body: JSON.stringify({ email, next: '/' }),
-  })
-  const body = await res.json()
-  expect(res.status, JSON.stringify(body)).toBe(200)
-  expect(typeof body.devVerifyUrl, 'run the dev server without RESEND_API_KEY').toBe('string')
-  const verify = await fetch(body.devVerifyUrl, { redirect: 'manual' })
-  const cookie = (verify.headers.getSetCookie?.() ?? [verify.headers.get('set-cookie') ?? ''])
-    .map((c) => c.split(';')[0])
-    .find((c) => c.startsWith('sp_at_session='))
-  expect(cookie, 'verify sets the session cookie').toBeTruthy()
+  const cookie = await signInWithEmail(email, base)
   const [row] = await sql<{ id: string; did: string }[]>`select id, did from accounts where email = ${email}`
   return { email, cookie: cookie!, id: row.id, did: row.did }
 }
@@ -180,10 +169,16 @@ test.describe('sessions & participation API', () => {
   test.afterAll(async () => {
     if (!sql) return
     if (createdSessions.length) await sql`delete from sessions where id in ${sql(createdSessions)}`
-    if (privateEventId) await sql`delete from events where id = ${privateEventId}`
-    if (demo) await sql`delete from events where id = ${demo.id}`
     const dids = [proposer, cohost, stranger, organizer].filter(Boolean).map((a) => a.did)
     if (mintedGatheringDid) dids.push(mintedGatheringDid)
+    const eventIds = [privateEventId, demo?.id].filter(Boolean) as string[]
+    if (eventIds.length) await sql`delete from at_audit where event_id in ${sql(eventIds)}`
+    if (dids.length) {
+      await sql`delete from at_audit where actor_did in ${sql(dids)}`
+      await sql`delete from at_records where did in ${sql(dids)}`
+    }
+    if (privateEventId) await sql`delete from events where id = ${privateEventId}`
+    if (demo) await sql`delete from events where id = ${demo.id}`
     for (const did of dids) {
       await fetch(`${pdsUrl}/xrpc/com.atproto.admin.deleteAccount`, {
         method: 'POST',

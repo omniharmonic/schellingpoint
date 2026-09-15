@@ -4,6 +4,7 @@ import Module from 'node:module'
 import path from 'node:path'
 import { randomBytes } from 'node:crypto'
 import postgres from 'postgres'
+import { createTestGathering, signInWithEmail, type TestGathering } from './helpers/gathering'
 import { autoSchedule, tokenOverlap } from '../src/lib/scheduling/auto-scheduler'
 
 /**
@@ -12,7 +13,7 @@ import { autoSchedule, tokenOverlap } from '../src/lib/scheduling/auto-scheduler
  * a mail key so the email door hands back `devVerifyUrl`.
  *
  * Covers: organizer-only enforcement on every admin route; sealed results while a round is open
- * (demo-gathering) and results after close; the R9 rule that an organizer-listed speaker name is
+ * (on a second gathering of this file's own) and results after close; the R9 rule that an organizer-listed speaker name is
  * stored organizer-only and never reaches the sessions API or a published record; review
  * notifications; and the approval flow for moving a session that is already published.
  *
@@ -44,19 +45,7 @@ interface Account { email: string; cookie: string; id: string; did: string }
 
 async function signIn(sql: postgres.Sql, who: string): Promise<Account> {
   const email = EMAIL(who)
-  const res = await fetch(`${base}/api/auth/email`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', ...ORIGIN },
-    body: JSON.stringify({ email, next: '/' }),
-  })
-  const body = await res.json()
-  expect(res.status, JSON.stringify(body)).toBe(200)
-  expect(typeof body.devVerifyUrl, 'run the dev server without RESEND_API_KEY').toBe('string')
-  const verify = await fetch(body.devVerifyUrl, { redirect: 'manual' })
-  const cookie = (verify.headers.getSetCookie?.() ?? [verify.headers.get('set-cookie') ?? ''])
-    .map((c) => c.split(';')[0])
-    .find((c) => c.startsWith('sp_at_session='))
-  expect(cookie, 'verify sets the session cookie').toBeTruthy()
+  const cookie = await signInWithEmail(email, base)
   const [row] = await sql<{ id: string; did: string }[]>`select id, did from accounts where email = ${email}`
   return { email, cookie: cookie!, id: row.id, did: row.did }
 }
@@ -152,9 +141,7 @@ test.describe('organizer admin API (package D)', () => {
   let eventSlug = ''
   let privateSlug = ''
   let privateSessionId = ''
-  let demoId = ''
-  let insertedDemoRound: string | null = null
-  const addedDemoMembers: string[] = []
+  let voteGathering: TestGathering | null = null
   let trackName = ''
   let venueId = ''
   const slotIds: string[] = []
@@ -199,19 +186,16 @@ test.describe('organizer admin API (package D)', () => {
       privateSessionId = s.id
     })
 
-    const [demo] = await sql<{ id: string }[]>`select id from events where slug = 'demo-gathering'`
-    expect(demo, 'seeded demo-gathering').toBeTruthy()
-    demoId = demo.id
+    // A second public gathering, taking proposals, whose voting round this file opens.
+    voteGathering = await createTestGathering(sql, { tag: 'admin-vote', status: 'proposals_open', withProgram: true })
     for (const [account, role] of [[owner, 'owner'], [attendee, 'attendee']] as const) {
-      await sql`insert into event_members (event_id, user_id, role) values (${demoId}, ${account.id}, ${role})`
-      addedDemoMembers.push(account.id)
+      await sql`insert into event_members (event_id, user_id, role) values (${voteGathering.id}, ${account.id}, ${role})`
     }
   })
 
   test.afterAll(async () => {
     if (!sql) return
-    if (insertedDemoRound) await sql`delete from vote_rounds where id = ${insertedDemoRound}`
-    if (addedDemoMembers.length) await sql`delete from event_members where event_id = ${demoId} and user_id in ${sql(addedDemoMembers)}`
+    await voteGathering?.cleanup()
     await sql`delete from events where slug in ${sql([eventSlug, privateSlug])}`
     const accounts = await sql<{ did: string; id: string }[]>`select did, id from accounts where email like ${`pkgd+%-${RUN}@example.test`}`
     for (const a of accounts) {
@@ -227,6 +211,9 @@ test.describe('organizer admin API (package D)', () => {
   })
 
   test('every admin route is organizer-only: attendee 403, anonymous 401, stranger 404 on a private gathering', async () => {
+    // ~110 requests over ~20 route files; against `next dev` each file compiles on its first hit,
+    // which on a loaded machine can take tens of seconds per route.
+    test.setTimeout(600_000)
     const fake = '00000000-0000-4000-8000-000000000000'
     const routes: Array<{ method: string; path: (slug: string) => string; json?: unknown }> = [
       { method: 'GET', path: (s) => `/api/v1/events/${s}/admin/overview` },
@@ -343,36 +330,30 @@ test.describe('organizer admin API (package D)', () => {
     expect(outside.status).toBe(400)
   })
 
-  test("overview, analytics and the session list carry no vote numbers while demo-gathering's round is open", async () => {
-    const [open] = await sql<{ id: string }[]>`
-      select id from vote_rounds where event_id = ${demoId} and finalized_at is null and opens_at <= now() and closes_at > now()
+  test('overview, analytics and the session list carry no vote numbers while a round is open', async () => {
+    const vote = voteGathering!
+    await sql`
+      insert into vote_rounds (event_id, phase, mechanism, credits, opens_at, closes_at)
+      values (${vote.id}, 'pre-event', 'quadratic', 100, now() - interval '1 hour', now() + interval '2 days')
     `
-    if (!open) {
-      const [row] = await sql<{ id: string }[]>`
-        insert into vote_rounds (event_id, phase, mechanism, credits, opens_at, closes_at)
-        values (${demoId}, 'pre-event', 'quadratic', 100, now() - interval '1 hour', now() + interval '2 days')
-        returning id
-      `
-      insertedDemoRound = row.id
-    }
 
-    const overview = await api('/api/v1/events/demo-gathering/admin/overview', { cookie: owner.cookie })
+    const overview = await api(`/api/v1/events/${vote.slug}/admin/overview`, { cookie: owner.cookie })
     expect(overview.status, overview.text).toBe(200)
     expect(overview.body.voting.status).toBe('open')
     expectNoVoteNumbers(overview.body)
 
-    const analytics = await api('/api/v1/events/demo-gathering/admin/overview/analytics', { cookie: owner.cookie })
+    const analytics = await api(`/api/v1/events/${vote.slug}/admin/overview/analytics`, { cookie: owner.cookie })
     expect(analytics.status, analytics.text).toBe(200)
     expect(analytics.body.voting.sealed).toBe(true)
     expect(analytics.body.voting.message).toBe('Voting in progress — results are sealed until the round closes.')
     expectNoVoteNumbers(analytics.body)
 
-    const sessions = await api('/api/v1/events/demo-gathering/admin/sessions', { cookie: owner.cookie })
+    const sessions = await api(`/api/v1/events/${vote.slug}/admin/sessions`, { cookie: owner.cookie })
     expect(sessions.status, sessions.text).toBe(200)
     expect(sessions.body.results).toBeNull()
     expectNoVoteNumbers(sessions.body, true)
 
-    const auto = await api('/api/v1/events/demo-gathering/admin/auto-schedule', { cookie: owner.cookie })
+    const auto = await api(`/api/v1/events/${vote.slug}/admin/auto-schedule`, { cookie: owner.cookie })
     expect(auto.status).toBe(409)
     expect(auto.body.code).toBe('RoundOpen')
     expect(auto.body.error).toMatch(/Voting is still open/)

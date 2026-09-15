@@ -74,6 +74,8 @@ export interface AdminSessionRow {
   network_published: boolean
   proposal_drift_at: string | null
   proposal_withdrawn_at: string | null
+  /** The proposer's repo is taken down / suspended / deactivated (migration 0011). */
+  author_inactive_at: string | null
   cancelled_at: string | null
   venue: { id: string; name: string } | null
   time_slot: { id: string; label: string | null; start_time: string; end_time: string; day_date: string | null } | null
@@ -90,10 +92,10 @@ export async function listAdminSessions(eventId: string, db: Sql = sql, sessionI
            s.topic_tags, s.time_preferences, s.track_id, s.venue_id, s.time_slot_id, s.published_slot_id,
            s.session_type, s.is_votable, s.expected_attendance, s.required_features, s.rejection_reason,
            s.host_notified_at, s.imported_from, s.created_at,
-           (select count(*)::int from session_cohosts c where c.session_id = s.id) as cohost_count,
+           (select count(*)::int from session_cohosts c where c.session_id = s.id and c.cohost_inactive_at is null) as cohost_count,
            s.calendar_event_uri, s.proposal_uri,
            (s.calendar_event_uri is not null and s.slot_uri is not null and s.cancelled_at is null) as network_published,
-           s.proposal_drift_at, s.proposal_withdrawn_at, s.cancelled_at,
+           s.proposal_drift_at, s.proposal_withdrawn_at, s.author_inactive_at, s.cancelled_at,
            case when v.id is not null then json_build_object('id', v.id, 'name', v.name) end as venue,
            case when t.id is not null then json_build_object(
              'id', t.id, 'label', t.label, 'start_time', t.start_time, 'end_time', t.end_time, 'day_date', t.day_date
@@ -106,6 +108,8 @@ export async function listAdminSessions(eventId: string, db: Sql = sql, sessionI
     left join time_slots t on t.id = s.time_slot_id and t.event_id = s.event_id
     left join tracks tr on tr.id = s.track_id and tr.event_id = s.event_id
     where s.event_id = ${eventId} ${byIds}
+      -- A pending proposal whose author's repo is taken down / deactivated leaves the review queue.
+      and not (s.author_inactive_at is not null and s.status = 'pending')
     order by s.created_at desc
   `
 }

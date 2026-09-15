@@ -1,4 +1,8 @@
 # Schelling Point on ATProto — implementation (branch `atproto`)
+> **Superseded (2026-09-14).** This describes the first ATProto pass, which kept Supabase and did not
+> host a PDS. Benjamin chose to build to the full spec instead. The current design, contracts and
+> checklist are in `docs/ATPROTO_APPVIEW_PLAN.md`; the runbook is `deploy/unconference/README.md`.
+
 
 Status: first complete pass, 2026-09-14 (branch `atproto`, not merged). This document is the engineering companion to
 `ATPROTO_MIGRATION_SPEC.md`. The spec describes the target; this file records

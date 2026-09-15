@@ -9,8 +9,10 @@ import 'server-only'
  */
 import { Agent, AtpAgent, XRPCError } from '@atproto/api'
 import { pdsInternalUrl } from './config'
-import { atUri, describeOwnRepo, resolveDidDoc, resolveIdentifier } from './identity'
+import { atUri, resolveIdentifier } from './identity'
 import { isBorrowedNsid } from './nsids'
+import { classifyXrpcError, paceRepoWrite, PDS_WRITE_POINTS, withXrpcBackoff } from './rate-limit'
+import { atpAgentForService, serviceForDid } from './service-url'
 import { assertNoUnknownFields, assertValidRecord } from './validate'
 
 /** Collections we borrow and must never extend (the sidecar rule, enforced at write time). */
@@ -58,29 +60,17 @@ export interface FetchedRecord<T = Record<string, unknown>> {
   value: T
 }
 
-const RETRY_ATTEMPTS = 2
-const RETRY_DELAY_MS = 300
+/** Reads get a shorter wait budget than writes: a page render should not hang on a PDS. */
+const READ_MAX_WAIT_MS = 15_000
 
 /** Network-level failure (no HTTP response), as opposed to an XRPC error the PDS returned. */
 export function isNetworkError(e: unknown): boolean {
-  if (e instanceof XRPCError) return e.status === 1 /* ResponseType.Unknown */
-  if (e instanceof TypeError && /fetch failed|network/i.test(e.message)) return true
-  const code = (e as { code?: string; cause?: { code?: string } })?.code ?? (e as { cause?: { code?: string } })?.cause?.code
-  return typeof code === 'string' && /^(ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|UND_ERR)/.test(code)
+  return classifyXrpcError(e) === 'network'
 }
 
-async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
-  let lastError: unknown
-  for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt++) {
-    try {
-      return await fn()
-    } catch (e) {
-      lastError = e
-      if (!isNetworkError(e) || attempt === RETRY_ATTEMPTS) throw e
-      await new Promise((r) => setTimeout(r, RETRY_DELAY_MS))
-    }
-  }
-  throw lastError
+/** Unauthenticated read: 429 / 5xx / connection failures backed off (see `rate-limit.ts`). */
+function withReadRetry<T>(fn: () => Promise<T>): Promise<T> {
+  return withXrpcBackoff(fn, { maxTotalWaitMs: READ_MAX_WAIT_MS, transientRetries: 2 })
 }
 
 export async function putRecord(agent: Agent, input: PutRecordInput): Promise<WriteResult> {
@@ -89,7 +79,8 @@ export async function putRecord(agent: Agent, input: PutRecordInput): Promise<Wr
     if (isBorrowedCollection(input.collection)) assertNoUnknownFields(input.collection, input.record as object)
   }
   const record = { ...input.record, $type: input.collection }
-  const res = await withRetry(() =>
+  // One write per repo at a time, paced under the PDS's points budget, 429/5xx backed off.
+  const res = await paceRepoWrite(input.repo, PDS_WRITE_POINTS.update, () =>
     agent.com.atproto.repo.putRecord({
       repo: input.repo,
       collection: input.collection,
@@ -105,7 +96,7 @@ export async function putRecord(agent: Agent, input: PutRecordInput): Promise<Wr
 }
 
 export async function deleteRecord(agent: Agent, input: DeleteRecordInput): Promise<void> {
-  await withRetry(() =>
+  await paceRepoWrite(input.repo, PDS_WRITE_POINTS.delete, () =>
     agent.com.atproto.repo.deleteRecord({
       repo: input.repo,
       collection: input.collection,
@@ -124,18 +115,70 @@ const PDS_AGENT_CACHE_CAP = 512
 
 /**
  * An unauthenticated agent pointed at the PDS that hosts `repo`: our own PDS through its
- * internal URL, anything else through the endpoint its DID document names.
+ * internal URL, anything else through the endpoint its DID document names (validated, and
+ * dialled only through `safeFetch` — see `service-url.ts`).
  */
 export async function pdsAgentFor(repo: string): Promise<{ did: string; agent: AtpAgent }> {
   const did = await resolveIdentifier(repo)
   const cached = pdsAgents.get(did)
   if (cached && Date.now() - cached.at < PDS_AGENT_TTL_MS) return { did, agent: cached.agent }
-  const own = await describeOwnRepo(did).catch(() => null)
-  const service = own ? pdsInternalUrl() : (await resolveDidDoc(did)).pds
-  const agent = new AtpAgent({ service })
+  // SSRF guard: own PDS via the internal URL; any other PDS only through safeFetch.
+  const agent = atpAgentForService(await serviceForDid(did))
   if (pdsAgents.size >= PDS_AGENT_CACHE_CAP) pdsAgents.delete(pdsAgents.keys().next().value as string)
   pdsAgents.set(did, { agent, at: Date.now() })
   return { did, agent }
+}
+
+/** Forget the cached read agent for a repo (identity change: its PDS may have moved). */
+export function forgetPdsAgent(did: string): void {
+  pdsAgents.delete(did)
+}
+
+export interface RepoHostingStatus {
+  did: string
+  active: boolean
+  /** `takendown` | `suspended` | `deleted` | `deactivated` | `desynchronized` | `throttled` | `not-found` | … */
+  status: string | null
+  rev: string | null
+  /** `own` = OUR PDS answered (authoritative for the repos it hosts). */
+  host: 'own' | 'foreign'
+}
+
+/** `getRepoStatus` on OUR PDS (internal URL). `null` when it does not host the repo. */
+export async function ownPdsRepoStatus(did: string): Promise<RepoHostingStatus | null> {
+  const url = new URL(`${pdsInternalUrl()}/xrpc/com.atproto.sync.getRepoStatus`)
+  url.searchParams.set('did', did)
+  const res = await withReadRetry(async () => {
+    const r = await fetch(url, { signal: AbortSignal.timeout(5000), cache: 'no-store' })
+    if (r.status === 429 || r.status >= 500) throw Object.assign(new Error(`getRepoStatus ${r.status}`), { status: r.status, headers: Object.fromEntries(r.headers) })
+    return r
+  })
+  const body = (await res.json().catch(() => ({}))) as { active?: boolean; status?: string; rev?: string; error?: string }
+  if (res.ok) return { did, active: body.active === true, status: body.active ? null : (body.status ?? null), rev: body.rev ?? null, host: 'own' }
+  if (res.status === 400 && body.error === 'RepoNotFound') return null
+  throw new Error(`getRepoStatus failed (${body.error ?? res.status})`)
+}
+
+/**
+ * `com.atproto.sync.getRepoStatus` for a repo, from the host that holds it. OUR PDS is asked
+ * first through its internal URL — it answers for its taken-down and deactivated repos too (which
+ * `describeRepo` hides) and is authoritative for them. Any other repo is asked on the PDS its DID
+ * document names, only through `safeFetch` (`service-url.ts`). A host that answers `RepoNotFound`
+ * no longer hosts the repo: `active: false, status: 'not-found'` (hidden, not a deletion).
+ */
+export async function getRepoStatus(did: string): Promise<RepoHostingStatus> {
+  const own = await ownPdsRepoStatus(did)
+  if (own) return own
+  const service = await serviceForDid(did)
+  if (service.internal) return { did, active: false, status: 'not-found', rev: null, host: 'own' }
+  const agent = atpAgentForService(service)
+  try {
+    const res = await withReadRetry(() => agent.com.atproto.sync.getRepoStatus({ did }))
+    return { did, active: res.data.active === true, status: res.data.active ? null : (res.data.status ?? null), rev: res.data.rev ?? null, host: 'foreign' }
+  } catch (e) {
+    if (e instanceof XRPCError && e.error === 'RepoNotFound') return { did, active: false, status: 'not-found', rev: null, host: 'foreign' }
+    throw e
+  }
 }
 
 function isRecordNotFound(e: unknown): boolean {
@@ -150,7 +193,7 @@ export async function getRecord<T = Record<string, unknown>>(
 ): Promise<FetchedRecord<T> | null> {
   const { did, agent } = await pdsAgentFor(repo)
   try {
-    const res = await withRetry(() => agent.com.atproto.repo.getRecord({ repo: did, collection, rkey }))
+    const res = await withReadRetry(() => agent.com.atproto.repo.getRecord({ repo: did, collection, rkey }))
     return { uri: res.data.uri, cid: res.data.cid ?? '', value: res.data.value as T }
   } catch (e) {
     if (isRecordNotFound(e)) return null
@@ -164,7 +207,7 @@ export async function listRecords<T = Record<string, unknown>>(
   opts: { cursor?: string; limit?: number; reverse?: boolean } = {},
 ): Promise<{ records: FetchedRecord<T>[]; cursor?: string }> {
   const { did, agent } = await pdsAgentFor(repo)
-  const res = await withRetry(() =>
+  const res = await withReadRetry(() =>
     agent.com.atproto.repo.listRecords({
       repo: did,
       collection,

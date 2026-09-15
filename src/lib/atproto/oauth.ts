@@ -36,6 +36,7 @@ import {
   type OAuthSession,
 } from '@atproto/oauth-client-node'
 import { sql } from '@/lib/db'
+import { safeFetch } from '@/lib/net/safe-fetch'
 import { defaultPdsUrl, handleResolverUrl, oauthMode, oauthPrivateJwk, publicUrl } from './config'
 
 export const OAUTH_SCOPE = 'atproto transition:generic'
@@ -174,6 +175,10 @@ async function buildClient(): Promise<NodeOAuthClient> {
     handleResolver: handleResolverUrl(),
     // A local PDS speaks plain http; a hosted one never does.
     allowHttp: mode === 'loopback' && defaultPdsUrl().startsWith('http://'),
+    // SSRF guard. Without this the library uses the global fetch for DID documents, protected
+    // resource / authorization server metadata, PAR, token and every session request, all at
+    // URLs an attacker's DID document chooses (only its own handle resolver is SSRF-wrapped).
+    fetch: safeFetch,
     // Single-process deployment: an in-process lock is the correct one, and
     // passing it explicitly is also how the library stops warning. A
     // multi-instance deployment must swap this for a Postgres advisory lock.

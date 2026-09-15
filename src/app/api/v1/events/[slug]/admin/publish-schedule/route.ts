@@ -10,7 +10,12 @@
  * the gathering has an actor, package F's `publishSchedule` writes the calendar event, config
  * and slot records; the per-record results are returned. A network failure never undoes the
  * app-side publish — it is reported so the organizer can retry.
+ *
+ * A schedule of more than 25 sessions is written by a resumable job instead (rate-limit safe,
+ * `publish_jobs`): `network` then carries `queued: true` and `jobId`, and
+ * `GET …/publish-schedule?jobId=<id>` returns `{ job }` with its progress for the UI to poll.
  */
+import { after } from 'next/server'
 import { sql, tx, type Sql } from '@/lib/db'
 import { notify } from '@/lib/notifications'
 import { errorResponse, json, requireOrganizer, rolesWith } from '@/lib/scheduling/admin-api'
@@ -49,6 +54,12 @@ export async function GET(request: Request, { params }: { params: Promise<{ slug
   const { slug } = await params
   const ctx = await requireOrganizer(request, slug, ROLES)
   if (ctx instanceof Response) return ctx
+  const jobId = new URL(request.url).searchParams.get('jobId')
+  if (jobId) {
+    const { getPublishJob } = await import('@/lib/atproto/publish-jobs')
+    const job = await getPublishJob(ctx.event.id, jobId)
+    return job ? json({ job }) : json({ error: 'Publish job not found' }, { status: 404 })
+  }
   try {
     const [event, rows, [counts]] = await Promise.all([
       loadEvent(ctx.event.id),
@@ -127,9 +138,20 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
 
     let network:
       | { attempted: false }
-      | { attempted: true; published: number; failed: number; skipped: number; results: Array<{ kind: string; id: string; uri?: string; error?: string }>; error?: string }
+      | { attempted: true; published: number; failed: number; skipped: number; results: Array<{ kind: string; id: string; uri?: string; error?: string }>; error?: string; queued?: boolean; jobId?: string; total?: number }
       = { attempted: false }
-    if (committed.actorDid) {
+    const jobs = committed.actorDid ? await import('@/lib/atproto/publish-jobs') : null
+    if (committed.actorDid && jobs?.needsJob(committed.scheduled)) {
+      try {
+        const { job } = await jobs.enqueueSchedulePublish({ eventId, callerUserId: ctx.viewer.accountId })
+        // Start right away; the scheduler's /api/jobs/publish resumes it if this run is cut short.
+        after(() => jobs.runDuePublishJobs({ jobId: job.id, timeBudgetMs: 240_000 }).then(() => undefined).catch(() => undefined))
+        network = { attempted: true, queued: true, jobId: job.id, total: job.total, published: job.published, failed: job.failed, skipped: job.skipped, results: [] }
+      } catch (e) {
+        console.error('[publish-schedule] could not queue the network publish:', e instanceof Error ? e.name : 'error')
+        network = { attempted: true, published: 0, failed: 0, skipped: 0, results: [], error: 'The schedule is published here, but the network copy could not be queued. Retry the publish.' }
+      }
+    } else if (committed.actorDid) {
       try {
         const { publishSchedule } = await import('@/lib/atproto/publish')
         const { results } = await publishSchedule({ eventId, callerUserId: ctx.viewer.accountId })
@@ -150,6 +172,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
               ? 'Moved since it was published: move it in the schedule builder, which asks for approvals'
               : r.skipped === 'proposal-withdrawn'
                 ? 'The proposer withdrew this proposal: cancel the session or fill its slot'
+                : r.skipped === 'author-inactive'
+                ? 'The proposer’s account is no longer active on the network: cancel the session or fill its slot'
                 : r.skipped ? `Skipped (${r.skipped})` : undefined),
           })),
         }

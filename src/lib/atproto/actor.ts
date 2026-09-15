@@ -182,10 +182,22 @@ export interface SessionDeleteInput {
   swapRecord?: string
 }
 
+export interface SessionCreateInput {
+  collection: string
+  rkey: string
+  record: Record<string, unknown>
+}
+
 /** Executes repo writes with the gathering's own credential. Never handed out. */
 export interface GatheringSession {
   putRecord(input: SessionPutInput): Promise<{ uri: string; cid: string }>
   deleteRecord(input: SessionDeleteInput): Promise<void>
+  /**
+   * Optional: create several records in ONE commit (`com.atproto.repo.applyWrites`, creates only).
+   * Each op asserts "must not exist yet" (a create of an existing key fails the whole batch).
+   * At most `APPLY_WRITES_MAX_OPS` per call. Results are in input order.
+   */
+  applyCreates?(input: { creates: SessionCreateInput[] }): Promise<Array<{ uri: string; cid: string }>>
 }
 
 export interface ReadYourWrites {
@@ -232,6 +244,12 @@ export interface DeleteAsGatheringInput {
   approvals?: Approval[]
 }
 
+/** One create in an `applyCreatesAsGathering` batch (same gate as `putRecordAsGathering`, `swapRecord: null`). */
+export type CreateAsGatheringInput = Omit<PutAsGatheringInput, 'eventId' | 'swapRecord'>
+
+/** Ops per `applyWrites` call we send (the reference PDS refuses more than 200). */
+export const APPLY_WRITES_MAX_OPS = 100
+
 export interface WriteAsGatheringResult {
   uri: string
   cid: string
@@ -245,6 +263,13 @@ export interface GatheringActorPort {
   authorize(input: AuthorizeInput): Promise<AuthorizeResult>
   putRecordAsGathering(input: Omit<PutAsGatheringInput, 'eventId'>): Promise<WriteAsGatheringResult>
   deleteRecordAsGathering(input: Omit<DeleteAsGatheringInput, 'eventId'>): Promise<{ auditId: string }>
+  /**
+   * Create independent records in as few commits as possible. Every op is validated, R9-checked,
+   * authorised and audited exactly like `putRecordAsGathering`; each asserts the record does not
+   * exist yet. Chunked at `maxOps` (≤ `APPLY_WRITES_MAX_OPS`). A failed chunk throws (audit rows
+   * amended); earlier chunks stay written. Results are in input order.
+   */
+  applyCreatesAsGathering(inputs: CreateAsGatheringInput[], opts?: { maxOps?: number }): Promise<WriteAsGatheringResult[]>
 }
 
 export interface GatheringActorDeps {
@@ -383,6 +408,50 @@ export class AppCustodyGatheringActor implements GatheringActorPort {
       })
     }
     return { uri: res.uri, cid: res.cid, auditId }
+  }
+
+  async applyCreatesAsGathering(inputs: CreateAsGatheringInput[], opts: { maxOps?: number } = {}): Promise<WriteAsGatheringResult[]> {
+    const maxOps = Math.max(1, Math.min(opts.maxOps ?? APPLY_WRITES_MAX_OPS, APPLY_WRITES_MAX_OPS))
+    const out: WriteAsGatheringResult[] = []
+    for (let i = 0; i < inputs.length; i += maxOps) {
+      const slice = inputs.slice(i, i + maxOps)
+      const prepared: Array<{ input: CreateAsGatheringInput; record: Record<string, unknown>; auditId: string }> = []
+      for (const input of slice) {
+        if (input.action === 'publish-role-claim') throw new Error('role claims are written one at a time (subject consent is checked per record)')
+        const record: Record<string, unknown> = { ...input.record, $type: input.collection }
+        assertValidRecord(input.collection, record)
+        if (isBorrowedNsid(input.collection)) assertNoUnknownFields(input.collection, record)
+        assertNoForeignDid(record, this.actorDid, { gatheringDid: this.actorDid })
+        const auditId = await this.gate(input, `at://${this.actorDid}/${input.collection}/${input.rkey}`)
+        prepared.push({ input, record, auditId })
+      }
+      let written: Array<{ uri: string; cid: string }>
+      try {
+        if (this.deps.session.applyCreates && prepared.length > 1) {
+          written = await this.deps.session.applyCreates({
+            creates: prepared.map((p) => ({ collection: p.input.collection, rkey: p.input.rkey, record: p.record })),
+          })
+        } else {
+          written = []
+          for (const p of prepared) {
+            written.push(await this.deps.session.putRecord({ collection: p.input.collection, rkey: p.input.rkey, record: p.record, swapRecord: null }))
+          }
+        }
+      } catch (e) {
+        for (const p of prepared) await this.deps.audit.amend(p.auditId, `batch create failed: ${describeError(e)}`).catch(() => undefined)
+        throw e
+      }
+      for (const [j, p] of prepared.entries()) {
+        const res = written[j]!
+        if (this.deps.index) {
+          await this.deps.index.upsert({ uri: res.uri, cid: res.cid, record: p.record, source: 'local-write' }).catch(async (e) => {
+            await this.deps.audit.amend(p.auditId, `written; index upsert failed (reconcile will repair): ${describeError(e)}`).catch(() => undefined)
+          })
+        }
+        out.push({ uri: res.uri, cid: res.cid, auditId: p.auditId })
+      }
+    }
+    return out
   }
 
   async deleteRecordAsGathering(input: Omit<DeleteAsGatheringInput, 'eventId'>): Promise<{ auditId: string }> {

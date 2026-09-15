@@ -29,6 +29,7 @@ import {
   GatheringNotLinkedError,
   LADDER,
   type AuditRow,
+  type CreateAsGatheringInput,
   type AuditSink,
   type DeleteAsGatheringInput,
   type GatheringActorPort,
@@ -42,6 +43,7 @@ import {
 } from './actor'
 import { forgetOwnRepo } from './identity'
 import { deleteIndexedRecord, upsertIndexedRecord } from './index-store'
+import { isRateLimitBudgetExceeded, paceRepoWrite, PDS_APPLY_WRITES_MAX_OPS, PDS_WRITE_POINTS, type BackoffOptions } from './rate-limit'
 import { isInvalidSwap } from './write'
 
 export { GatheringNotLinkedError, GatheringActionDeniedError } from './actor'
@@ -207,16 +209,23 @@ export class CredentialGatheringSession implements GatheringSession {
     return this.agent
   }
 
-  private async run<T>(fn: (agent: Agent) => Promise<T>): Promise<T> {
+  /**
+   * `points`: what the PDS charges this call (`rate-limit.ts`). The call is paced per repo (one
+   * write at a time, under the points budget) and 429 / 5xx answers are backed off before any of
+   * the credential handling below sees them.
+   */
+  private async run<T>(points: number, fn: (agent: Agent) => Promise<T>, backoff?: BackoffOptions): Promise<T> {
     let attempt = 0
     for (;;) {
       try {
-        const out = await fn(await this.get(attempt > 0))
+        const agent = await this.get(attempt > 0)
+        const out = await paceRepoWrite(this.did, points, () => fn(agent), backoff)
         if (attempt > 0) await recordSuccess(this.did)
         return out
       } catch (e) {
         if (e instanceof GatheringCredentialError) throw e
         if (isInvalidSwap(e)) throw e // a CAS answer, not a credential problem
+        if (isRateLimitBudgetExceeded(e)) throw e // a pacing answer: the credential is fine
         const auth = isAuthFailure(e)
         if (auth && attempt === 0) {
           attempt++
@@ -239,7 +248,7 @@ export class CredentialGatheringSession implements GatheringSession {
   }
 
   async putRecord(input: { collection: string; rkey: string; record: Record<string, unknown>; swapRecord?: string | null }) {
-    return this.run(async (agent) => {
+    return this.run(PDS_WRITE_POINTS.update, async (agent) => {
       const res = await agent.com.atproto.repo.putRecord({
         repo: this.did,
         collection: input.collection,
@@ -253,8 +262,33 @@ export class CredentialGatheringSession implements GatheringSession {
     })
   }
 
+  /**
+   * CREATES only, in one commit (`com.atproto.repo.applyWrites`). A create of a key that already
+   * exists fails the whole batch — the "must not exist yet" CAS every op here asserts. Updates keep
+   * going through `putRecord`, the only call that carries a per-record `swapRecord`.
+   */
+  async applyCreates(input: { creates: Array<{ collection: string; rkey: string; record: Record<string, unknown> }> }) {
+    if (input.creates.length === 0) return []
+    if (input.creates.length > PDS_APPLY_WRITES_MAX_OPS) throw new Error(`applyWrites takes at most ${PDS_APPLY_WRITES_MAX_OPS} operations`)
+    return this.run(PDS_WRITE_POINTS.create * input.creates.length, async (agent) => {
+      const res = await agent.com.atproto.repo.applyWrites({
+        repo: this.did,
+        validate: false,
+        writes: input.creates.map((c) => ({ $type: 'com.atproto.repo.applyWrites#create' as const, collection: c.collection, rkey: c.rkey, value: c.record })),
+      })
+      const results = res.data.results ?? []
+      return input.creates.map((c, i) => {
+        const r = results[i] as { uri?: string; cid?: string } | undefined
+        if (!r?.uri || !r.cid) throw new Error('applyWrites returned no result for an operation')
+        return { uri: r.uri, cid: r.cid }
+      })
+      // One 5xx retry only: a create of an existing key also surfaces as a 5xx on some PDS
+      // versions, and the caller falls back to per-record CAS writes anyway.
+    }, { transientRetries: 1 })
+  }
+
   async deleteRecord(input: { collection: string; rkey: string; swapRecord?: string }) {
-    await this.run(async (agent) => {
+    await this.run(PDS_WRITE_POINTS.delete, async (agent) => {
       await agent.com.atproto.repo.deleteRecord({
         repo: this.did,
         collection: input.collection,
@@ -352,6 +386,11 @@ export function configureGatheringActors(next: GatheringActorOverrides = {}): vo
 export async function putRecordAsGathering(input: PutAsGatheringInput): Promise<WriteAsGatheringResult> {
   const { eventId, ...rest } = input
   return (await actorForEvent(eventId)).putRecordAsGathering(rest)
+}
+
+/** Create independent records as the gathering of `eventId` in as few commits as possible. */
+export async function applyCreatesAsGathering(eventId: string, inputs: CreateAsGatheringInput[], opts?: { maxOps?: number }): Promise<WriteAsGatheringResult[]> {
+  return (await actorForEvent(eventId)).applyCreatesAsGathering(inputs, opts)
 }
 
 export async function deleteRecordAsGathering(input: DeleteAsGatheringInput): Promise<{ auditId: string }> {

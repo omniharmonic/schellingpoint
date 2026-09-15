@@ -5,7 +5,9 @@ import { defineConfig } from '@playwright/test'
 
 export default defineConfig({
   testDir: './tests',
-  timeout: 60000,
+  // Generous: against `next dev` a test's first request to each route waits for it to compile,
+  // and a full run (`--retries=0`) hits dozens of routes cold.
+  timeout: 180000,
   expect: { timeout: 10000 },
   fullyParallel: false,
   // One retry absorbs the dev server compiling a route on its first request.

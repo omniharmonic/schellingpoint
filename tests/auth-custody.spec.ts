@@ -1,11 +1,13 @@
 import { test, expect } from '@playwright/test'
 import { loadEnvConfig } from '@next/env'
 import postgres from 'postgres'
+import { verifyMagicLink } from './helpers/gathering'
 
 // The email door end to end against the running dev server (:3001) and the local stack
 // (deploy/local: Postgres :55432, dev PDS :2583 with handle domain `.test`).
 //
-// The dev server must run WITHOUT a Resend key so the API hands back `devVerifyUrl`:
+// The dev server must run WITHOUT a Resend key so the API hands back `devVerifyUrl`. Opening that
+// link renders a confirmation page; its form POST consumes the token:
 //   RESEND_API_KEY= npm run dev
 //
 // Every account created here is deleted afterwards, from Postgres and from the PDS.
@@ -100,15 +102,26 @@ test.describe('custodial email sign-in', () => {
     expect((await res.json()).did).toBe(did)
   })
 
-  test('the verify link sets the session cookie and redirects to next', async () => {
-    const res = await fetch(verifyUrl, { redirect: 'manual' })
-    expect(res.status).toBe(302)
-    expect(new URL(res.headers.get('location') || '', base).pathname + new URL(res.headers.get('location') || '', base).search).toBe(next)
-    const setCookie = res.headers.get('set-cookie') || ''
+  test('opening the link only renders a confirmation; the form POST sets the session cookie and redirects to next', async () => {
+    // A GET (what a mail scanner issues) renders the page and leaves the token unused.
+    const page = await fetch(verifyUrl, { redirect: 'manual' })
+    expect(page.status).toBe(200)
+    expect(page.headers.get('set-cookie')).toBeNull()
+    expect(await page.text()).toContain('<form method="post" action="/auth/verify">')
+    const [unused] = await sql<{ n: number }[]>`
+      select count(*)::int as n from auth_email_tokens where email = ${email} and purpose = 'signin' and used_at is null
+    `
+    expect(unused.n).toBe(1)
+
+    const res = await verifyMagicLink(verifyUrl, base)
+    expect(res.status).toBe(303)
+    const location = new URL(res.location || '', base)
+    expect(location.pathname + location.search).toBe(next)
+    const setCookie = res.setCookie || ''
     expect(setCookie).toMatch(/^sp_at_session=[^;]+/)
     expect(setCookie).toContain('HttpOnly')
     expect(setCookie).toContain('SameSite=Lax')
-    cookie = setCookie.split(';')[0]
+    cookie = res.cookie!
   })
 
   test('GET /api/auth/me with the cookie returns the user and profile', async () => {
@@ -160,12 +173,12 @@ test.describe('custodial email sign-in', () => {
   })
 
   test('a used token redirects to /login?error=link', async () => {
-    const res = await fetch(verifyUrl, { redirect: 'manual' })
-    expect(res.status).toBe(302)
-    const location = new URL(res.headers.get('location') || '', base)
+    const res = await verifyMagicLink(verifyUrl, base)
+    expect(res.status).toBe(303)
+    const location = new URL(res.location || '', base)
     expect(location.pathname).toBe('/login')
     expect(location.searchParams.get('error')).toBe('link')
-    expect(res.headers.get('set-cookie')).toBeNull()
+    expect(res.setCookie).toBeNull()
   })
 
   test('a returning email reuses the same account', async () => {

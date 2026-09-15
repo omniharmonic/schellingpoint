@@ -19,6 +19,7 @@ import 'server-only'
  */
 import { Agent, AtpAgent, XRPCError } from '@atproto/api'
 import { sql } from '@/lib/db'
+import { safeFetch } from '@/lib/net/safe-fetch'
 import { defaultPdsUrl, pdsInternalUrl } from './config'
 import { unwrapSecret } from './crypto'
 import { restoreOAuthSession } from './oauth'
@@ -60,9 +61,9 @@ interface CredentialRow {
 const cache = new Map<string, AtpAgent>()
 
 /** A credential row's `pds_url` names the public PDS; reach our own through the internal URL. */
-function serviceFor(pdsUrl: string | null): string {
+function serviceFor(pdsUrl: string | null): { url: string; internal: boolean } {
   const url = (pdsUrl ?? defaultPdsUrl()).replace(/\/+$/, '')
-  return url === defaultPdsUrl() ? pdsInternalUrl() : url
+  return url === defaultPdsUrl() ? { url: pdsInternalUrl(), internal: true } : { url, internal: false }
 }
 
 async function loadAccountById(accountId: string): Promise<AccountRow | null> {
@@ -98,8 +99,9 @@ async function markCredential(did: string, ok: boolean, message?: string): Promi
   }
 }
 
-async function login(service: string, identifier: string, password: string): Promise<AtpAgent> {
-  const agent = new AtpAgent({ service })
+async function login(service: { url: string; internal: boolean }, identifier: string, password: string): Promise<AtpAgent> {
+  // SSRF guard: a PDS that is not ours is reached only through safeFetch.
+  const agent = new AtpAgent({ service: service.url, ...(service.internal ? {} : { fetch: safeFetch }) })
   await agent.login({ identifier, password })
   return agent
 }
@@ -132,7 +134,7 @@ async function agentForAccountRow(account: AccountRow, opts: { fresh?: boolean }
     if (cached?.session) return cached
   }
   const password = unwrapSecret(account.wrapped_password, account.key_version)
-  const agent = await login(pdsInternalUrl(), account.did, password)
+  const agent = await login({ url: pdsInternalUrl(), internal: true }, account.did, password)
   cache.set(account.did, agent)
   return agent
 }

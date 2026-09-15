@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test'
 import { loadEnvConfig } from '@next/env'
 import { randomUUID } from 'node:crypto'
 import postgres from 'postgres'
+import { signInWithEmail } from './helpers/gathering'
 
 // Creating, publishing and deleting a gathering against the running dev server (:3001) and the
 // local stack (Postgres :55432, dev PDS :2583 with handle domain `.test`), plus the database
@@ -38,18 +39,7 @@ test.describe.configure({ mode: 'serial', retries: 0 })
 const adminAuth = () => `Basic ${Buffer.from(`admin:${pdsAdminPassword}`).toString('base64')}`
 
 async function signIn(email: string): Promise<string> {
-  const res = await fetch(`${base}/api/auth/email`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', origin: base },
-    body: JSON.stringify({ email, next: '/' }),
-  })
-  const body = await res.json()
-  expect(res.status, JSON.stringify(body)).toBe(200)
-  expect(typeof body.devVerifyUrl, 'run the dev server without RESEND_API_KEY').toBe('string')
-  const verify = await fetch(body.devVerifyUrl, { redirect: 'manual' })
-  const cookie = (verify.headers.get('set-cookie') || '').split(';')[0]
-  expect(cookie).toMatch(/^sp_at_session=/)
-  return cookie
+  return signInWithEmail(email, base)
 }
 
 function wizardState(slug: string, overrides: { visibility?: string; thresholds?: Record<string, unknown> } = {}) {
@@ -115,8 +105,22 @@ test.describe('creating a gathering', () => {
       select id, actor_did from events where slug in ${sql([shortSlug, longSlug, draftSlug, privateSlug])}
     `
     for (const e of events) if (e.actor_did) gatheringDids.add(e.actor_did)
-    if (events.length) await sql`delete from events where id in ${sql(events.map((e) => e.id))}`
     const accounts = await sql<{ id: string; did: string }[]>`select id, did from accounts where email like ${`${emailPrefix}%`}`
+    const accountIds = accounts.map((a) => a.id)
+    const eventIds = events.map((e) => e.id)
+    // Identities minted (and possibly deleted again) by this run's organisers, from their audit trail.
+    if (accountIds.length) {
+      const audited = await sql<{ actor_did: string }[]>`
+        select distinct actor_did from at_audit where caller_user_id in ${sql(accountIds)} and actor_did is not null
+      `
+      for (const a of audited) gatheringDids.add(a.actor_did)
+    }
+    const allDids = [...gatheringDids, ...accounts.map((a) => a.did)]
+    if (allDids.length) await sql`delete from at_records where did in ${sql(allDids)}`
+    if (gatheringDids.size) await sql`delete from at_audit where actor_did in ${sql([...gatheringDids])}`
+    if (eventIds.length) await sql`delete from at_audit where event_id in ${sql(eventIds)}`
+    if (accountIds.length) await sql`delete from at_audit where caller_user_id in ${sql(accountIds)}`
+    if (events.length) await sql`delete from events where id in ${sql(eventIds)}`
     for (const did of [...gatheringDids, ...accounts.map((a) => a.did)]) {
       await fetch(`${pdsUrl}/xrpc/com.atproto.admin.deleteAccount`, {
         method: 'POST',

@@ -12,7 +12,9 @@ RUN npm ci --no-audit --no-fund
 
 FROM deps AS build
 ARG NEXT_PUBLIC_APP_URL
+ARG NEXT_PUBLIC_CONTACT_EMAIL=
 ENV NEXT_PUBLIC_APP_URL=${NEXT_PUBLIC_APP_URL} \
+    NEXT_PUBLIC_CONTACT_EMAIL=${NEXT_PUBLIC_CONTACT_EMAIL} \
     NODE_ENV=production
 COPY . .
 RUN npm run lexicons:validate && npm run build
