@@ -134,7 +134,7 @@ export function clientMetadata(): OAuthClientMetadataInput {
   const base = publicUrl()
   return {
     client_id: `${base}/oauth/client-metadata.json`,
-    client_name: 'Schelling Point',
+    client_name: 'unconference',
     client_uri: base,
     redirect_uris: [`${base}/oauth/callback`],
     // `transition:generic` is what lets us write records in the member's own

@@ -12,7 +12,7 @@
  */
 import { assertSameOrigin, requireViewer } from '@/lib/auth/viewer'
 import { publicUrl } from '@/lib/atproto/config'
-import { createCheckoutSession, expireCheckoutSession, isPlatformChargeFallbackAllowed, stripe } from '@/lib/payments/stripe'
+import { createCheckoutSession, expireCheckoutSession, isPlatformChargeFallbackAllowed, getConnectAccountStatus, stripe } from '@/lib/payments/stripe'
 import { claimFreeTicket, jsonError, loadTicketEvent, startPaidCheckout } from '@/lib/tickets'
 import { sql } from '@/lib/db'
 
@@ -60,9 +60,16 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
     select price_cents from ticket_tiers where id = ${tierId} and event_id = ${event.id}
   `
   if (!tier) return jsonError(404, 'Ticket tier not found')
-  if (tier.price_cents > 0 && !stripe) return jsonError(503, 'Payments are not configured')
+  if (tier.price_cents > 0 && (!stripe || !process.env.STRIPE_WEBHOOK_SECRET)) return jsonError(503, 'Payments are not configured')
   if (tier.price_cents > 0 && !event.stripe_account_id && !isPlatformChargeFallbackAllowed()) {
     return jsonError(503, 'This event cannot accept payments yet', { code: 'NO_PAYOUT_ACCOUNT' })
+  }
+
+  if (tier.price_cents > 0 && event.stripe_account_id) {
+    try {
+      const status = await getConnectAccountStatus(event.stripe_account_id)
+      if (!status.chargesEnabled || !status.payoutsEnabled) return jsonError(503, 'The organizer is still setting up payments', { code: 'PAYOUT_SETUP_REQUIRED' })
+    } catch { return jsonError(503, 'Payment availability could not be checked. Please try again.') }
   }
 
   if (tier.price_cents === 0) {

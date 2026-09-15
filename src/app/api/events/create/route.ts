@@ -196,7 +196,9 @@ export async function POST(request: Request): Promise<Response> {
           ${t.json(timeSlots as never)}::jsonb
         ) as result
       `
-      await t`update events set policy_thresholds = ${t.json(thresholds.value as never)}::jsonb where id = ${row.result.id}`
+      await t`update events set policy_thresholds = ${t.json(thresholds.value as never)}::jsonb,
+        ticketing_enabled = ${state.basics.ticketingEnabled ?? false},
+        platform_fee_percent = ${state.basics.platformFeePercent ?? 1} where id = ${row.result.id}`
       return row.result
     })
   } catch (error) {

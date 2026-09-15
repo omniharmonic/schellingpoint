@@ -12,7 +12,6 @@
  */
 import { requireEventRole } from '@/lib/auth/viewer'
 import { sql } from '@/lib/db'
-import { calculatePlatformFee } from '@/lib/payments/format'
 import { TICKET_ADMIN_ROLES } from '@/lib/tickets'
 
 export const dynamic = 'force-dynamic'
@@ -33,15 +32,14 @@ export async function GET(request: Request, { params }: { params: Promise<{ slug
     from tickets where event_id = ${eventId}
   `
 
-  // Fees are per ticket (5% + 50c), so they are summed per distinct paid amount.
-  const amounts = await sql<{ amount: number; n: number }[]>`
-    select coalesce(amount_paid_cents, 0) as amount, count(*)::int as n
-    from tickets
-    where event_id = ${eventId} and status in ('confirmed', 'checked_in')
-    group by 1
+  // Snapshot amounts preserve the contribution charged when each checkout opened.
+  const [money] = await sql<{ revenue: number; fees: number }[]>`
+    select coalesce(sum(amount_paid_cents), 0)::int as revenue,
+      coalesce(sum(platform_fee_cents), 0)::int as fees
+    from tickets where event_id = ${eventId} and status in ('confirmed', 'checked_in')
   `
-  const totalRevenue = amounts.reduce((sum, a) => sum + a.amount * a.n, 0)
-  const platformFees = amounts.reduce((sum, a) => sum + calculatePlatformFee(a.amount) * a.n, 0)
+  const totalRevenue = money.revenue
+  const platformFees = money.fees
 
   const tierBreakdown = await sql<{ tierId: string; tierName: string; sold: number; revenue: number; capacity: number | null; currency: string }[]>`
     select tt.id as "tierId", tt.name as "tierName", tt.quantity_total as capacity, tt.currency,

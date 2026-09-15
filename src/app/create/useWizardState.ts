@@ -1,5 +1,6 @@
 'use client';
 
+import { validPlatformFeePercent } from '@/lib/payments/format';
 import { useReducer, useCallback } from 'react';
 import type { EventVisibility } from '@/types/event';
 import { DEFAULT_POLICY_THRESHOLDS, type GatheringPolicyThresholds } from '@/lib/events/policy';
@@ -21,6 +22,8 @@ export interface WizardBasics {
   slug: string;
   eventType: EventType;
   visibility: EventVisibility;
+  ticketingEnabled?: boolean;
+  platformFeePercent?: number;
 }
 
 export interface WizardDates {
@@ -173,6 +176,8 @@ export const INITIAL_STATE: WizardState = {
     slug: '',
     eventType: 'unconference',
     visibility: 'public',
+    ticketingEnabled: false,
+    platformFeePercent: 1,
   },
   dates: {
     startDate: '',
@@ -265,7 +270,7 @@ export function isStepValid(state: WizardState, step: number): boolean {
       return (
         state.basics.name.trim().length > 0 &&
         SLUG_LABEL_RE.test(state.basics.slug) &&
-        state.basics.eventType.length > 0
+        state.basics.eventType.length > 0 && validPlatformFeePercent(state.basics.platformFeePercent ?? 1)
       );
 
     case 'dates':
@@ -329,6 +334,7 @@ export function getStepValidationErrors(state: WizardState, step: number): strin
 
   switch (stepName) {
     case 'basics':
+      if (!validPlatformFeePercent(state.basics.platformFeePercent ?? 1)) errors.push('Choose a contribution between 1% and 100%');
       if (!state.basics.name.trim()) {
         errors.push('Event name is required');
       }

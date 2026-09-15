@@ -8,6 +8,7 @@
 #   pds-blocks.tar.gz.age the PDS blob store (immutable files)
 # Restoring needs the age private key, which lives only with the operator (see README).
 set -eu
+set -o pipefail
 
 run_once() {
   stamp=$(date -u +%Y%m%dT%H%M%SZ)
@@ -42,6 +43,9 @@ run_once() {
     echo "backup $stamp kept locally only (${size}KB): BACKUP_S3_* not configured" >&2
   fi
 
+  rm -rf "$work"
+  trap - EXIT
+
   # Local copies are a convenience; the bucket's lifecycle rule is the retention of record.
   find /backups -mindepth 1 -maxdepth 1 -type d -mtime +7 -exec rm -rf {} +
 }
@@ -51,7 +55,8 @@ if [ "${1:-}" = "--loop" ]; then
     now_h=$(date -u +%H | sed 's/^0//')
     target=${BACKUP_HOUR_UTC:-3}
     if [ "${now_h:-0}" -eq "$target" ]; then
-      run_once || echo "backup failed" >&2
+      # A separate shell preserves errexit inside all backup pipelines.
+      /usr/local/bin/backup.sh || echo "backup failed" >&2
       sleep 3700
     else
       sleep 600

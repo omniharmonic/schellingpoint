@@ -102,10 +102,16 @@ test.describe('ATProto callback', () => {
 test.describe('Login page', () => {
   test.skip(!configured, 'ATPROTO_SESSION_SECRET / ATPROTO_CUSTODY_KEY are not set')
 
+  test('renders Bluesky sign-in in the initial HTML without a configuration round-trip', async ({ request }) => {
+    const response = await request.get(`${base}/login`)
+    expect(response.status()).toBe(200)
+    expect(await response.text()).toContain('data-testid="bluesky-signin"')
+  })
+
   test('offers Sign in with Bluesky and the consent sentence', async ({ page }) => {
     await page.goto(`${base}/login`)
     const section = page.getByTestId('bluesky-signin')
-    // The section appears once the client has asked /api/atproto/me whether ATProto is configured.
+    // Availability is included in the initial page, independent of identity lookup latency.
     await expect(section).toBeVisible({ timeout: 45_000 })
     await expect(section.getByPlaceholder('you.bsky.social')).toBeVisible()
     await expect(section).toContainText('permanently attached to this identity')

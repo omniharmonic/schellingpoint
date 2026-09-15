@@ -244,7 +244,7 @@ async function main(): Promise<void> {
     counts['exact locations checked'] = locations.size
     if (locations.size) {
       const everyIndexed = await sql<{ uri: string; did: string; collection: string; record: Record<string, unknown> }[]>`
-        select uri, did, collection, record from at_records where collection <> 
+        select uri, did, collection, record from at_records
       `
       const candidates: Rec[] = [...everyIndexed.map((r) => ({ ...r, source: 'index' as const })), ...gatheringRecords.filter((r) => r.source === 'live')]
       for (const r of candidates) {

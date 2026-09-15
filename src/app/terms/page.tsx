@@ -33,7 +33,7 @@ export default function TermsPage() {
           <section>
             <h2 className="text-xl font-semibold mb-3">Acceptance of Terms</h2>
             <p className="text-muted-foreground leading-relaxed">
-              By accessing and using Schelling Point ("the Service"), you agree to be bound by these Terms of Service.
+              By accessing and using unconference ("the Service"), you agree to be bound by these Terms of Service.
               If you do not agree to these terms, please do not use the Service.
             </p>
           </section>
@@ -41,7 +41,7 @@ export default function TermsPage() {
           <section>
             <h2 className="text-xl font-semibold mb-3">Description of Service</h2>
             <p className="text-muted-foreground leading-relaxed">
-              Schelling Point is a session coordination platform for unconferences, hackathons, and community events, enabling participants to propose
+              unconference is a session coordination platform for unconferences, hackathons, and community events, enabling participants to propose
               sessions, vote using quadratic voting, and help shape event schedules. The Service enables communities
               to collaboratively organize their events.
             </p>
@@ -113,7 +113,7 @@ export default function TermsPage() {
           <section>
             <h2 className="text-xl font-semibold mb-3">Limitation of Liability</h2>
             <p className="text-muted-foreground leading-relaxed">
-              To the maximum extent permitted by law, Schelling Point and event organizers shall not be liable for any indirect,
+              To the maximum extent permitted by law, unconference and event organizers shall not be liable for any indirect,
               incidental, special, or consequential damages arising from your use of the Service.
             </p>
           </section>

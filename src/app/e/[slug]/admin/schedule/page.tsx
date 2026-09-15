@@ -19,7 +19,7 @@ import {
   Send,
   ShieldCheck,
   Undo2,
-  Wand2,
+  SlidersHorizontal,
   X,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -664,7 +664,7 @@ export default function AdminSchedulePage() {
             <div className="ml-auto flex items-center gap-1">
               {unscheduled.length > 0 && (
                 <Button variant="outline" size="sm" onClick={previewAutoSchedule} disabled={autoLoading || busy} className="gap-1.5" title={votingStatus === 'open' ? 'Available after voting closes' : undefined}>
-                  {votingStatus === 'open' ? <Lock className="h-4 w-4" /> : <Wand2 className="h-4 w-4" />}
+                  {votingStatus === 'open' ? <Lock className="h-4 w-4" /> : <SlidersHorizontal className="h-4 w-4" />}
                   <span className="hidden sm:inline">Auto-schedule</span>
                 </Button>
               )}
@@ -867,7 +867,7 @@ export default function AdminSchedulePage() {
           <div className="w-full max-w-2xl max-h-[80vh] bg-card border rounded-xl shadow-xl flex flex-col">
             <div className="p-5 border-b flex items-center justify-between">
               <div className="flex items-center gap-3">
-                <div className="p-2 rounded-full bg-primary/10"><Wand2 className="h-5 w-5 text-primary" /></div>
+                <div className="p-2 rounded-full bg-primary/10"><SlidersHorizontal className="h-5 w-5 text-primary" /></div>
                 <div>
                   <h2 id="auto-title" className="font-semibold">Auto-schedule preview</h2>
                   <p className="text-sm text-muted-foreground">Review proposed placements before adding them to the draft</p>

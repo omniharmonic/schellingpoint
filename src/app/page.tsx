@@ -33,6 +33,10 @@ function formatDateRange(startDate: string, endDate: string): string {
   const endDay = end.getUTCDate();
   const year = end.getUTCFullYear();
 
+  if (start.getUTCFullYear() !== year) {
+    return `${startMonth} ${startDay}, ${start.getUTCFullYear()} – ${endMonth} ${endDay}, ${year}`;
+  }
+  if (startMonth === endMonth && startDay === endDay) return `${startMonth} ${startDay}, ${year}`;
   if (startMonth === endMonth) {
     return `${startMonth} ${startDay}-${endDay}, ${year}`;
   }
@@ -57,7 +61,7 @@ function EventCard({ event, featured = false }: { event: DirectoryEvent; feature
         <div className="border-t pt-4 flex flex-wrap gap-x-5 gap-y-2 text-sm text-muted-foreground">
           <span className="flex items-center gap-2"><Calendar className="h-4 w-4 shrink-0"/>{formatDateRange(event.start_date, event.end_date)}</span>
           {event.location_name && <span className="flex items-center gap-2"><MapPin className="h-4 w-4 shrink-0"/>{event.location_name}</span>}
-          {typeof event.attendee_count === 'number' && <span className="flex items-center gap-2"><Users className="h-4 w-4 shrink-0"/>{event.attendee_count} attendees</span>}
+          {typeof event.attendee_count === 'number' && <span className="flex items-center gap-2"><Users className="h-4 w-4 shrink-0"/>{event.attendee_count} {event.attendee_count === 1 ? 'attendee' : 'attendees'}</span>}
         </div>
       </div>
     </article>
@@ -177,6 +181,11 @@ export default async function HomePage() {
       <SiteHeader />
       <main className="flex-1">
         <GatheringHero />
+        <section aria-label="Built for participant-led events" className="utility-strip">
+          <div><h2>A shared agenda</h2><p>People propose. The community chooses. Organizers make room.</p></div>
+          <div><h2>Your identity comes with you</h2><p>Sign in with Bluesky or email. Keep one profile across gatherings.</p></div>
+          <div><h2>Tickets that support the commons</h2><p>Free or paid admission. Organizers choose a platform contribution from 1%.</p></div>
+        </section>
         <GatheringStory />
 
         {featuredEvents.length > 0 && (

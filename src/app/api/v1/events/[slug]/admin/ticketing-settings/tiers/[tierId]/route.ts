@@ -5,7 +5,7 @@
  *   DELETE → { deleted: true } · 409 when tickets exist for the tier (deactivate it instead)
  */
 import { assertSameOrigin, requireEventRole } from '@/lib/auth/viewer'
-import { pgErrorCode, sql } from '@/lib/db'
+import { pgErrorCode, sql, dbErrorResponse } from '@/lib/db'
 import { jsonError, TICKET_ADMIN_ROLES } from '@/lib/tickets'
 import { validateTier, type TierInput } from '@/lib/tickets/tiers'
 
@@ -52,14 +52,20 @@ export async function PATCH(request: Request, { params }: Params): Promise<Respo
     return jsonError(400, 'Sales must end after they start', { field: 'sale_ends_at' })
   }
 
-  const [tier] = await sql`
-    update ticket_tiers set ${sql(changes, ...Object.keys(changes))}, updated_at = now()
-    where id = ${tierId} and event_id = ${auth.event.id}
-    returning id, name, description, price_cents, currency, quantity_total, quantity_sold, sale_starts_at, sale_ends_at,
-              is_active, display_order, allows_proposals, allows_voting, vote_credits_override
-  `
-  if (!tier) return jsonError(404, 'Ticket tier not found')
-  return Response.json({ tier }, { headers: NO_STORE })
+  try {
+    const [tier] = await sql`
+      update ticket_tiers set ${sql(changes, ...Object.keys(changes))}, updated_at = now()
+      where id = ${tierId} and event_id = ${auth.event.id}
+      returning id, name, description, price_cents, currency, quantity_total, quantity_sold, sale_starts_at, sale_ends_at,
+                is_active, display_order, allows_proposals, allows_voting, vote_credits_override
+    `
+    if (!tier) return jsonError(404, 'Ticket tier not found')
+    return Response.json({ tier }, { headers: NO_STORE })
+  } catch (error) {
+    const response = dbErrorResponse(error)
+    if (response) return response
+    throw error
+  }
 }
 
 export async function DELETE(request: Request, { params }: Params): Promise<Response> {

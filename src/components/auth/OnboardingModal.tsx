@@ -15,7 +15,7 @@ import {
   Upload,
   ChevronRight,
   ChevronLeft,
-  Sparkles,
+  Users,
   Vote,
   Heart,
   Mic,
@@ -23,6 +23,7 @@ import {
   Coins,
   Brain,
 } from 'lucide-react'
+import type { Profile } from '@/hooks/useAuth'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
@@ -34,6 +35,7 @@ interface OnboardingModalProps {
   userId: string
   /** Shown for reference; empty for accounts that signed in with Bluesky. */
   email: string
+  initialProfile?: Profile | null
   onComplete: () => void
   /** Event-specific suggested topics (optional, falls back to defaults) */
   suggestedTopics?: string[]
@@ -49,7 +51,7 @@ const SUGGESTION_CHIPS = 12
 // Intro slides explaining the app
 const introSlides = [
   {
-    icon: Sparkles,
+    icon: Users,
     iconBg: 'bg-primary/20',
     iconColor: 'text-primary',
     title: 'You belong in the conversation.',
@@ -82,7 +84,7 @@ const introSlides = [
 
 ]
 
-export function OnboardingModal({ email, onComplete, suggestedTopics, voteCredits = 100, votingMechanism = 'quadratic', requireProposalApproval = true }: OnboardingModalProps) {
+export function OnboardingModal({ email, initialProfile, onComplete, suggestedTopics, voteCredits = 100, votingMechanism = 'quadratic', requireProposalApproval = true }: OnboardingModalProps) {
   const slides = introSlides.map((slide, index) => index === 1 ? {
     ...slide,
     description: votingMechanism === 'quadratic'
@@ -113,13 +115,13 @@ export function OnboardingModal({ email, onComplete, suggestedTopics, voteCredit
   const [error, setError] = React.useState<string | null>(null)
 
   // Form state
-  const [displayName, setDisplayName] = React.useState('')
-  const [bio, setBio] = React.useState('')
-  const [avatarUrl, setAvatarUrl] = React.useState('')
-  const [affiliation, setAffiliation] = React.useState('')
-  const [building, setBuilding] = React.useState('')
-  const [telegram, setTelegram] = React.useState('')
-  const [interests, setInterests] = React.useState<string[]>([])
+  const [displayName, setDisplayName] = React.useState(initialProfile?.display_name ?? '')
+  const [bio, setBio] = React.useState(initialProfile?.bio ?? '')
+  const [avatarUrl, setAvatarUrl] = React.useState(initialProfile?.avatar_url ?? '')
+  const [affiliation, setAffiliation] = React.useState(initialProfile?.affiliation ?? '')
+  const [building, setBuilding] = React.useState(initialProfile?.building ?? '')
+  const [telegram, setTelegram] = React.useState(initialProfile?.telegram ?? '')
+  const [interests, setInterests] = React.useState<string[]>(initialProfile?.interests ?? [])
   const [customInterest, setCustomInterest] = React.useState('')
 
   // Total steps: 4 intro slides + 3 profile steps = 7
@@ -451,14 +453,14 @@ export function OnboardingModal({ email, onComplete, suggestedTopics, voteCredit
               {isIntroStep ? (
                 <Calendar className="h-5 w-5 text-primary" />
               ) : (
-                <Sparkles className="h-5 w-5 text-primary" />
+                <Users className="h-5 w-5 text-primary" />
               )}
             </div>
             <Dialog.Title className="text-lg sm:text-xl font-semibold">{getStepTitle()}</Dialog.Title>
           </div>
           <Dialog.Description id="onboarding-description" className="text-muted-foreground text-sm">
             {isIntroStep
-              ? 'Quick overview of how Schelling Point works'
+              ? 'Quick overview of how unconference works'
               : 'Set up your profile so others can find and connect with you'
             }
           </Dialog.Description>
@@ -510,8 +512,8 @@ export function OnboardingModal({ email, onComplete, suggestedTopics, voteCredit
                 disabled={isSubmitting || isUploading}
                 className="btn-primary-glow min-h-[44px]"
               >
-                {isSubmitting ? 'Saving...' : 'Join the gathering'}
-                <Sparkles className="h-4 w-4 ml-2" />
+                {isSubmitting ? 'Saving...' : 'Save profile'}
+                <Users className="h-4 w-4 ml-2" />
               </Button>
             )}
           </div>

@@ -24,7 +24,7 @@ export default function CodeOfConductPage() {
 
       {/* Content */}
       <main className="container mx-auto px-4 py-12 max-w-3xl">
-        <h1 className="text-3xl font-bold mb-2">Schelling Point events Code of Conduct</h1>
+        <h1 className="text-3xl font-bold mb-2">unconference Code of Conduct</h1>
         <p className="text-muted-foreground mb-8">Last updated: February 2026</p>
 
         <div className="prose prose-invert prose-sm max-w-none space-y-8">
@@ -32,7 +32,7 @@ export default function CodeOfConductPage() {
           <section>
             <h2 className="text-xl font-semibold mb-3">1. Our Pledge</h2>
             <p className="text-muted-foreground leading-relaxed">
-              Schelling Point events brings together builders, researchers, organizers, and community members who share a commitment to decentralized technology in service of local communities. We pledge to make participation in our event, online spaces, and ongoing community a harassment-free experience for everyone — regardless of age, body size, disability, ethnicity, sex characteristics, gender identity and expression, level of experience, education, socio-economic status, nationality, personal appearance, race, religion, sexual identity, or orientation.
+              unconference brings together builders, researchers, organizers, and community members who share a commitment to decentralized technology in service of local communities. We pledge to make participation in our event, online spaces, and ongoing community a harassment-free experience for everyone — regardless of age, body size, disability, ethnicity, sex characteristics, gender identity and expression, level of experience, education, socio-economic status, nationality, personal appearance, race, religion, sexual identity, or orientation.
             </p>
             <p className="text-muted-foreground leading-relaxed mt-3">
               Your safety and comfort are our priority. If you have questions or concerns at any point before, during, or after the event, contact us at{' '}
@@ -45,12 +45,12 @@ export default function CodeOfConductPage() {
           <section>
             <h2 className="text-xl font-semibold mb-3">2. Scope</h2>
             <p className="text-muted-foreground leading-relaxed mb-3">
-              This Code of Conduct applies across all Schelling Point events spaces, including:
+              This Code of Conduct applies across all unconference spaces, including:
             </p>
             <ul className="list-disc list-inside text-muted-foreground space-y-2">
               <li><strong className="text-foreground">In-person events</strong> — the main conference, workshops, fireside chats, side events, and social gatherings, including setup and teardown</li>
-              <li><strong className="text-foreground">Online spaces</strong> — Telegram groups, Discord servers, forum threads, and any other digital channels operated by or affiliated with Schelling Point events</li>
-              <li><strong className="text-foreground">Public representation</strong> — when an individual is representing Schelling Point events or its community in public (e.g., posting via official social media accounts, using an official email address, or acting as a representative at external events)</li>
+              <li><strong className="text-foreground">Online spaces</strong> — Telegram groups, Discord servers, forum threads, and any other digital channels operated by or affiliated with unconference</li>
+              <li><strong className="text-foreground">Public representation</strong> — when an individual is representing unconference or its community in public (e.g., posting via official social media accounts, using an official email address, or acting as a representative at external events)</li>
             </ul>
           </section>
 
@@ -95,7 +95,7 @@ export default function CodeOfConductPage() {
               <li>Never share API keys, secret keys, or other sensitive credentials.</li>
               <li>Do not post unsolicited referral links, Discord invitations, or promotional content unless specifically requested.</li>
               <li>Do not impersonate organizers, moderators, or other community members.</li>
-              <li>No one from Schelling Point events will ever ask you to send money. Report such incidents immediately.</li>
+              <li>Buy tickets only through the event’s official ticket page. Report unsolicited payment requests to the event organizers.</li>
             </ul>
           </section>
 
@@ -103,7 +103,7 @@ export default function CodeOfConductPage() {
           <section>
             <h2 className="text-xl font-semibold mb-3">4. Unacceptable Behavior</h2>
             <p className="text-muted-foreground leading-relaxed mb-3">
-              The following will not be tolerated in any Schelling Point events space:
+              The following will not be tolerated in any unconference space:
             </p>
             <ul className="list-disc list-inside text-muted-foreground space-y-2">
               <li>Harassment in any form, including sustained unwanted contact after being asked to stop</li>
@@ -137,7 +137,7 @@ export default function CodeOfConductPage() {
 
             <h3 className="text-lg font-medium mt-5 mb-2">Response: Warning &rarr; Removal</h3>
             <p className="text-muted-foreground leading-relaxed mb-3">
-              Schelling Point events uses a straightforward two-step enforcement model:
+              unconference uses a straightforward two-step enforcement model:
             </p>
             <ol className="list-decimal list-inside text-muted-foreground space-y-3">
               <li>
@@ -148,7 +148,7 @@ export default function CodeOfConductPage() {
                 <ul className="list-disc list-inside ml-6 mt-2 space-y-1">
                   <li>Expulsion from the in-person event with no refund</li>
                   <li>Removal from Telegram, Discord, or other community channels</li>
-                  <li>A ban from future Schelling Point events events and activities</li>
+                  <li>A ban from future unconference events and activities</li>
                 </ul>
               </li>
             </ol>

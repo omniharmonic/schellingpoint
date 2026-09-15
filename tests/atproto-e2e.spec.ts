@@ -470,6 +470,8 @@ test.describe('ATProto layer against the local PDS', () => {
   })
 
   test('the privacy audit passes over everything this run published', async () => {
+    // Always exercise the exact-location audit query, even when no other fixture has an address.
+    await raw`update sessions set custom_location = 'Private audit location 92741' where event_id = ${eventId}`
     const out = execFileSync('npx', ['tsx', 'scripts/atproto-privacy-audit.ts'], { encoding: 'utf8' })
     expect(out).toContain('PASS')
     expect(out).toMatch(/gathering records \(live PDS\):\s+[1-9]/)

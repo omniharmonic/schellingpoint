@@ -158,8 +158,12 @@ export function canSeeSession(rel: Pick<SessionRelation, 'status' | 'isHost' | '
  * Returns the resulting role, or null when the event is not open to self-joining.
  */
 export async function ensurePublicMembership(db: Sql, access: EventAccess): Promise<EventRoleName | null> {
-  if (access.role) return access.role
   if (!access.viewer) return null
+  const [admission] = await db<{ allowed: boolean }[]>`
+    select public.has_ticket_entitlement(${access.event.id}, ${access.viewer.accountId}, 'attend') as allowed
+  `
+  if (!admission?.allowed) return null
+  if (access.role) return access.role
   if (access.event.visibility !== 'public' || access.event.status === 'draft') return null
   await db`
     insert into event_members (event_id, user_id, role)

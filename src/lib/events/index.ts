@@ -78,16 +78,15 @@ export type JoinBlock = 'hidden' | 'archived' | 'ticket-required' | null
  * membership comes from a ticket, an invitation, or an explicit join — never from a page view).
  *   hidden           private or draft: invitations only (answer 404)
  *   archived         the gathering is over and closed
- *   ticket-required  ticketing is on with a tier that costs money: buy a ticket instead
+ *   ticket-required  ticketing is on: claim a free ticket or buy admission instead
  */
 export async function joinBlock(event: { id: string; status: string; visibility: string; ticketing_enabled?: boolean | null }): Promise<JoinBlock> {
   if (isHiddenEvent(event)) return 'hidden'
   if (event.status === 'archived') return 'archived'
-  const [paid] = await sql<{ n: number }[]>`
-    select count(*)::int as n from ticket_tiers t join events e on e.id = t.event_id
-    where t.event_id = ${event.id} and e.ticketing_enabled and t.is_active and t.price_cents > 0
+  const [row] = await sql<{ gated: boolean }[]>`
+    select ticketing_enabled as gated from events where id = ${event.id}
   `
-  return (paid?.n ?? 0) > 0 ? 'ticket-required' : null
+  return row?.gated ? 'ticket-required' : null
 }
 
 async function membershipOf(eventId: string, accountId: string): Promise<ViewerMembership | null> {

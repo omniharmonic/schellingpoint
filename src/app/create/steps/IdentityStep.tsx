@@ -129,11 +129,11 @@ export function IdentityStep({ state, dispatch }: IdentityStepProps) {
         <CardContent className="space-y-4 text-sm">
           <div className="flex gap-3">
             <Lock className="h-5 w-5 shrink-0 text-primary" aria-hidden="true" />
-            <p><span className="font-medium">Now, while it is a draft:</span> only the identity exists. Nothing about the gathering is written to the network, and a draft can still be deleted completely — identity included.</p>
+            <p><span className="font-medium">Now, while it is a draft:</span> only the identity exists. No gathering content is published yet. You can delete the draft and close its account; its public identity history may remain.</p>
           </div>
           <div className="flex gap-3">
             <Globe className="h-5 w-5 shrink-0 text-primary" aria-hidden="true" />
-            <p><span className="font-medium">When you publish it:</span> the gathering’s name, dates, description, location and participation rules become public records in its own repository.</p>
+            <p><span className="font-medium">When you publish it:</span> the gathering’s name, dates, description, public location and participation rules become public records in its own repository.</p>
           </div>
           <div className="flex gap-3">
             <ScrollText className="h-5 w-5 shrink-0 text-primary" aria-hidden="true" />

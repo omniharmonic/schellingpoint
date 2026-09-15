@@ -72,7 +72,7 @@ export async function checkEligibility(db: Sql, eventId: string, accountId: stri
   }[]>`
     select m.role,
            m.vote_credits as member_credits,
-           (e.ticketing_enabled and exists (select 1 from ticket_tiers tt where tt.event_id = e.id)) as gated,
+           e.ticketing_enabled as gated,
            exists (
              select 1 from tickets k join ticket_tiers tt on tt.id = k.tier_id
              where k.event_id = e.id and k.user_id = ${accountId}

@@ -46,7 +46,7 @@ export async function generateMetadata({ params }: { params: Promise<{ slug: str
   }
   const { event } = access
   return {
-    title: `${event.name} | Schelling Point`,
+    title: `${event.name} | unconference`,
     description: event.description || event.tagline || `${event.name} unconference`,
     robots: event.visibility === 'public' ? undefined : { index: false },
     openGraph: {

@@ -10,8 +10,8 @@ import { SiteHeader } from '@/components/SiteHeader';
 import { getDirectoryEvents, type DirectoryEvent } from '@/lib/events';
 
 export const metadata: Metadata = {
-  title: 'All gatherings | Schelling Point',
-  description: 'Browse every public gathering on Schelling Point — upcoming unconferences, hackathons, and community events, plus the ones that came before.',
+  title: 'All gatherings | unconference',
+  description: 'Browse every public gathering on unconference — upcoming unconferences, hackathons, and community events, plus the ones that came before.',
 };
 
 // Status badge configuration (mirrors the homepage directory)
@@ -111,7 +111,7 @@ export default async function EventsDirectoryPage() {
             <div className="flex flex-wrap items-end justify-between gap-4 mb-8">
               <div>
                 <h1 className="text-4xl sm:text-5xl font-semibold tracking-tight">All gatherings</h1>
-                <p className="text-muted-foreground mt-3 max-w-xl">Every public gathering on Schelling Point, from what&apos;s coming up to what came before.</p>
+                <p className="text-muted-foreground mt-3 max-w-xl">Every public gathering on unconference, from what&apos;s coming up to what came before.</p>
               </div>
               <Button asChild>
                 <Link href="/create">

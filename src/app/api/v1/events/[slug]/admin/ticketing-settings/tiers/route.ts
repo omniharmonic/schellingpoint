@@ -7,7 +7,7 @@
  *        → 201 { tier }
  */
 import { assertSameOrigin, requireEventRole } from '@/lib/auth/viewer'
-import { sql } from '@/lib/db'
+import { sql, dbErrorResponse } from '@/lib/db'
 import { jsonError, TICKET_ADMIN_ROLES } from '@/lib/tickets'
 import { validateTier } from '@/lib/tickets/tiers'
 
@@ -45,19 +45,25 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
   if (!v.ok) return jsonError(400, v.error, { field: v.field })
   const t = v.value
 
-  const [tier] = await sql`
-    insert into ticket_tiers (
-      event_id, name, description, price_cents, currency, quantity_total, sale_starts_at, sale_ends_at,
-      is_active, allows_proposals, allows_voting, vote_credits_override, display_order
-    ) values (
-      ${auth.event.id}, ${t.name!}, ${t.description ?? null}, ${t.price_cents ?? 0}, ${t.currency ?? 'usd'},
-      ${t.quantity_total ?? null}, ${t.sale_starts_at ?? null}, ${t.sale_ends_at ?? null},
-      ${t.is_active ?? true}, ${t.allows_proposals ?? true}, ${t.allows_voting ?? true},
-      ${t.vote_credits_override ?? null},
-      ${t.display_order ?? sql`(select coalesce(max(display_order) + 1, 0) from ticket_tiers where event_id = ${auth.event.id})`}
-    )
-    returning id, name, description, price_cents, currency, quantity_total, quantity_sold, sale_starts_at, sale_ends_at,
-              is_active, display_order, allows_proposals, allows_voting, vote_credits_override
-  `
-  return Response.json({ tier }, { status: 201, headers: NO_STORE })
+  try {
+    const [tier] = await sql`
+      insert into ticket_tiers (
+        event_id, name, description, price_cents, currency, quantity_total, sale_starts_at, sale_ends_at,
+        is_active, allows_proposals, allows_voting, vote_credits_override, display_order
+      ) values (
+        ${auth.event.id}, ${t.name!}, ${t.description ?? null}, ${t.price_cents ?? 0}, ${t.currency ?? 'usd'},
+        ${t.quantity_total ?? null}, ${t.sale_starts_at ?? null}, ${t.sale_ends_at ?? null},
+        ${t.is_active ?? true}, ${t.allows_proposals ?? true}, ${t.allows_voting ?? true},
+        ${t.vote_credits_override ?? null},
+        ${t.display_order ?? sql`(select coalesce(max(display_order) + 1, 0) from ticket_tiers where event_id = ${auth.event.id})`}
+      )
+      returning id, name, description, price_cents, currency, quantity_total, quantity_sold, sale_starts_at, sale_ends_at,
+                is_active, display_order, allows_proposals, allows_voting, vote_credits_override
+    `
+    return Response.json({ tier }, { status: 201, headers: NO_STORE })
+  } catch (error) {
+    const response = dbErrorResponse(error)
+    if (response) return response
+    throw error
+  }
 }

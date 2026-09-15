@@ -12,7 +12,7 @@ import {
   verifyOAuthState,
   type OAuthStatePayload,
 } from '@/lib/atproto/bridge'
-import { fetchBskyProfile, importBskyProfileInBackground } from '@/lib/atproto/bsky-profile'
+import { fetchBskyProfile, importBskyProfile } from '@/lib/atproto/bsky-profile'
 
 /**
  * Where the authorization server sends the browser back. Finishes the OAuth exchange,
@@ -73,7 +73,7 @@ export async function GET(request: Request) {
       case 'signin': {
         const account = await findOrCreateOAuthAccount(did, handle)
         // The profile trigger seeds display_name with the handle's first label; that counts as empty.
-        if (account.created) importBskyProfileInBackground(account.accountId, did, { placeholderName: handle ? handle.split('.')[0] : null })
+        await importBskyProfile(account.accountId, did, { placeholderName: handle ? handle.split('.')[0] : null }).catch(() => undefined)
         const at = await createAtSession({ did, accountId: account.accountId, kind: 'oauth' })
         return redirectTo(state.next, at.setCookie)
       }

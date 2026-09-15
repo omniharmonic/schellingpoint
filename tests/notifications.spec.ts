@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test'
 import { loadEnvConfig } from '@next/env'
 import Module from 'node:module'
 import path from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, createHash } from 'node:crypto'
 import postgres from 'postgres'
 import { signInWithEmail } from './helpers/gathering'
 
@@ -328,6 +328,7 @@ test.describe('notifications and tickets (package E)', () => {
     })
 
     test.afterAll(async () => {
+      await db.sql`delete from refunded_payments where payment_fingerprint = ${createHash('sha256').update(`pi_a_${run}`).digest('hex')}`
       if (eventId) await db.sql`delete from events where id = ${eventId}`
       if (accounts.length) await db.sql`delete from accounts where id in ${db.sql(accounts)}`
     })
@@ -419,20 +420,20 @@ test.describe('notifications and tickets (package E)', () => {
           ticketId: hold.ticketId, eventId, tierId, holderId, sessionId: hold.sessionId, paymentIntentId: pi, amountPaidCents: 2500,
         })
 
-      expect(await settle(holdB, b, 'pi_b')).toBe('confirmed')
-      expect(await settle(holdB, b, 'pi_b')).toBe('already_confirmed')
+      expect(await settle(holdB, b, `pi_b_${run}`)).toBe('confirmed')
+      expect(await settle(holdB, b, `pi_b_${run}`)).toBe('already_confirmed')
       const [member] = await db.sql<{ role: string }[]>`select role from event_members where event_id = ${eventId} and user_id = ${b}`
       expect(member?.role).toBe('attendee')
       const [note] = await db.sql<{ n: number }[]>`select count(*)::int as n from notifications where user_id = ${b} and type = 'ticket_confirmed'`
       expect(note.n).toBe(1)
 
-      expect(await settle(holdA, a, 'pi_a')).toBe('refund_needed')
+      expect(await settle(holdA, a, `pi_a_${run}`)).toBe('refund_needed')
       expect((await statusOf(holdA.ticketId))?.status).toBe('refund_needed')
       const [seats] = await db.sql<{ n: number }[]>`select count(*)::int as n from tickets where tier_id = ${tierId} and status = 'confirmed'`
       expect(seats.n).toBe(1)
 
       // A refund in Stripe clears it.
-      expect(await tickets.cancelRefundedTicket('pi_a')).toBe(1)
+      expect(await tickets.cancelRefundedTicket(`pi_a_${run}`)).toBe(1)
       expect((await statusOf(holdA.ticketId))?.status).toBe('cancelled')
     })
 
@@ -442,7 +443,7 @@ test.describe('notifications and tickets (package E)', () => {
       const hold = (await checkout(tierId, a, fakeGateway().gateway)) as { ticketId: string; sessionId: string }
       await db.sql`delete from tickets where id = ${hold.ticketId}`
       const outcome = await tickets.settlePaidCheckout({
-        ticketId: hold.ticketId, eventId, tierId, holderId: a, sessionId: hold.sessionId, paymentIntentId: 'pi_swept', amountPaidCents: 2500,
+        ticketId: hold.ticketId, eventId, tierId, holderId: a, sessionId: hold.sessionId, paymentIntentId: `pi_swept_${run}`, amountPaidCents: 2500,
       })
       expect(outcome).toBe('confirmed')
       const rows = await db.sql<{ status: string }[]>`select status from tickets where tier_id = ${tierId} and user_id = ${a}`
@@ -459,8 +460,8 @@ test.describe('notifications and tickets (package E)', () => {
       await db.sql`update tickets set hold_expires_at = now() - interval '1 second' where id = ${holdB.ticketId}`
 
       const outcomes = await Promise.all([
-        tickets.settlePaidCheckout({ ticketId: holdA.ticketId, eventId, tierId, holderId: a, sessionId: holdA.sessionId, paymentIntentId: 'pi_ra', amountPaidCents: 2500 }),
-        tickets.settlePaidCheckout({ ticketId: holdB.ticketId, eventId, tierId, holderId: b, sessionId: holdB.sessionId, paymentIntentId: 'pi_rb', amountPaidCents: 2500 }),
+        tickets.settlePaidCheckout({ ticketId: holdA.ticketId, eventId, tierId, holderId: a, sessionId: holdA.sessionId, paymentIntentId: `pi_ra_${run}`, amountPaidCents: 2500 }),
+        tickets.settlePaidCheckout({ ticketId: holdB.ticketId, eventId, tierId, holderId: b, sessionId: holdB.sessionId, paymentIntentId: `pi_rb_${run}`, amountPaidCents: 2500 }),
       ])
       expect(outcomes.sort()).toEqual(['confirmed', 'refund_needed'])
     })

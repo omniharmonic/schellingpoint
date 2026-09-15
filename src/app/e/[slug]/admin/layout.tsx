@@ -71,7 +71,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   return <div className="min-h-screen bg-background flex">
     <a href="#workspace-main" className="skip-link">Skip to content</a>
     <aside className="hidden md:flex flex-col w-[240px] lg:w-[260px] border-r bg-card fixed inset-y-0 left-0 z-20">
-      <Link href="/" className="flex items-center gap-3 h-[76px] px-6 border-b font-semibold"><NetworkMark className="h-7 w-7 text-primary"/>Schelling Point</Link>
+      <Link href="/" className="flex items-center gap-3 h-[76px] px-6 border-b font-semibold"><NetworkMark className="h-7 w-7 text-primary"/>unconference</Link>
       <div className="px-5 py-6"><p className="font-semibold text-lg leading-snug mb-2 break-words">{event.name}</p><Badge variant="secondary">Organizer workspace</Badge></div>
       <div className="flex-1 overflow-y-auto px-3 pb-6">{navigation}</div>
       <div className="p-4 border-t"><Link href={`/e/${event.slug}/dashboard`} className="workspace-nav-link"><ArrowLeft className="h-4 w-4"/>Attendee view</Link></div>

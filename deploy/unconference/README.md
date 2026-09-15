@@ -76,8 +76,35 @@ age -d -i ~/.config/unconference/backup-age.key postgres.sql.gz.age | gunzip > r
 age -d -i ~/.config/unconference/backup-age.key pds-sqlite.tar.gz.age | tar -xz -C restore-pds/
 age -d -i ~/.config/unconference/backup-age.key pds-blocks.tar.gz.age | tar -xz -C restore-pds/
 # Postgres: create a scratch database and psql -f restore.sql; compare row counts.
-# PDS: stop pds, replace the volume contents with restore-pds/, start pds, check /xrpc/_health and a getRepo.
+# PDS: use a disposable, isolated PDS instance with outbound network disabled.
+# Restore into its scratch volume, then check SQLite integrity and repository reads.
+# Never replace the live production volume during a rehearsal.
 ```
+
+## Payments activation
+
+The application uses Stripe Connect destination charges. Configure `STRIPE_SECRET_KEY` and
+`STRIPE_WEBHOOK_SECRET` securely in the server environment, then recreate the app. Keep test and
+live keys/endpoints separate. Do not place secrets in chat, source control or browser JavaScript.
+The webhook destination is `https://unconference.events/api/webhooks/stripe`, listening for:
+
+- `checkout.session.completed`
+- `checkout.session.async_payment_succeeded`
+- `checkout.session.async_payment_failed`
+- `checkout.session.expired`
+- `charge.refunded`
+
+Before live sales, verify a sandbox organizer completes Connect onboarding and has both charges
+and payouts enabled. Use the app's Connect flow; settings refuse pasted account IDs. Test a $25
+ticket with a 3% contribution: the application fee is $0.75, without a fixed platform surcharge.
+Confirm the signed webhook creates one entitlement and notification, retries do not duplicate
+fulfillment, and a full refund revokes participation even if completion is replayed. Verify the
+revenue page against Stripe. Partial refunds and processing fees remain Stripe-side accounting.
+
+The contribution is snapshotted when checkout opens; changing the event's rate affects new
+checkouts. Disconnecting payouts stops paid sales while preserving ticket admission restrictions.
+Free passes can operate without Stripe configuration. Missing secrets or incomplete payout
+onboarding must never be presented as a successful live payment verification.
 
 ## Health and verification
 

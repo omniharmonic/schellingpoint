@@ -262,6 +262,10 @@ export function ReviewStep({ state, dispatch, onSubmit, isSubmitting }: ReviewSt
       <ValidationSummary state={state} />
 
       {/* Basics Section */}
+      <div className="rounded-xl border bg-muted/30 p-4 text-sm">
+        <p className="font-semibold">{state.basics.ticketingEnabled ? 'Ticket required to participate' : 'Open participation'}</p>
+        <p className="mt-1 text-muted-foreground">{state.basics.platformFeePercent ?? 1}% of paid ticket sales supports unconference. Set up ticket tiers and payouts in the organizer workspace.</p>
+      </div>
       <Section
         title="Event Details"
         icon={<Tag className="h-5 w-5" />}

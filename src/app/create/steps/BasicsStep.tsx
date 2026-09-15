@@ -50,7 +50,7 @@ const VISIBILITY_OPTIONS: { value: EventVisibility; label: string; description: 
   {
     value: 'public',
     label: 'Public',
-    description: 'Anyone can discover and join',
+    description: 'Anyone can discover your event',
   },
   {
     value: 'unlisted',
@@ -337,6 +337,33 @@ export function BasicsStep({ state, dispatch }: BasicsStepProps) {
               </p>
             </div>
           )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Admission</CardTitle>
+          <CardDescription>Decide how people join. You can set up ticket tiers and payouts after creating your event.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-5">
+          <div className="grid gap-3 sm:grid-cols-2">
+            {[{ value: false, title: 'Open participation', description: 'People join and help shape the program.' },
+              { value: true, title: 'Ticket required', description: 'A free or paid ticket unlocks participation.' }].map(option => (
+              <button key={option.title} type="button" aria-pressed={Boolean(basics.ticketingEnabled) === option.value}
+                className={cn('rounded-xl border-2 p-4 text-left', Boolean(basics.ticketingEnabled) === option.value ? 'border-primary bg-primary/5' : 'border-border')}
+                onClick={() => dispatch({ type: 'UPDATE_BASICS', payload: { ticketingEnabled: option.value } })}>
+                <span className="block font-semibold">{option.title}</span>
+                <span className="mt-1 block text-sm text-muted-foreground">{option.description}</span>
+              </button>
+            ))}
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="creation-contribution">Contribution to unconference (%)</Label>
+            <Input id="creation-contribution" type="number" min="1" max="100" step="0.01" required
+              value={basics.platformFeePercent ?? 1} className="max-w-32"
+              onChange={event => dispatch({ type: 'UPDATE_BASICS', payload: { platformFeePercent: Number(event.target.value) } })} />
+            <p className="text-sm text-muted-foreground">Choose what you give back on paid tickets, starting at 1%. No fixed surcharge; free events stay free. Stripe processing fees are separate.</p>
+          </div>
         </CardContent>
       </Card>
 

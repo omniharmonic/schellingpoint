@@ -193,7 +193,7 @@ export default function RevenueDashboardPage() {
                 {formatPrice(stats.platformFees, stats.currency)}
               </div>
               <p className="text-xs text-muted-foreground">
-                5% + $0.50 per paid ticket. Excludes Stripe processing fees.
+                Contributions recorded at checkout. Stripe processing fees are separate.
               </p>
             </CardContent>
           </Card>

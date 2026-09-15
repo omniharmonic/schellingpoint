@@ -18,7 +18,7 @@ import {
   WizardNavButtons,
   WizardValidationErrors,
 } from './WizardNavigation';
-import { WIZARD_STEPS, getStepFromNumber, type WizardState, type WizardAction } from './useWizardState';
+import { WIZARD_STEPS, getStepFromNumber, isStepValid, type WizardState, type WizardAction } from './useWizardState';
 
 import BasicsStep from './steps/BasicsStep';
 import DatesStep from './steps/DatesStep';
@@ -423,6 +423,13 @@ function CreateWizardContent() {
             {/* Step Content */}
             <div className="min-h-[400px]">
               {renderStep()}
+              {state.currentStep === 1 && (
+                <div className="rounded-xl border bg-secondary/40 p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div><h2 className="font-semibold">Start simple.</h2><p className="mt-1 text-sm text-muted-foreground">Use the defaults for now. Add rooms, time slots and program details from your organizer workspace.</p></div>
+                  <Button variant="outline" disabled={!isStepValid(state, 0) || !isStepValid(state, 1)}
+                    onClick={() => dispatch({ type: 'SET_STEP', payload: WIZARD_STEPS.indexOf('identity') })}>Continue with defaults</Button>
+                </div>
+              )}
             </div>
 
             {/* Keep the next action available after the form. */}

@@ -161,7 +161,7 @@ test.describe('events core API', () => {
     const host = `${slug}.${handleDomain}`
     const page = await getWithHost('/', host)
     expect(page.status).toBe(200)
-    expect(page.body).toContain(`<title>${gathering.name} | Schelling Point</title>`)
+    expect(page.body).toContain(`<title>${gathering.name} | unconference</title>`)
 
     const sessions = await getWithHost('/sessions', host)
     expect(sessions.status).toBe(200)

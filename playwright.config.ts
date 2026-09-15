@@ -1,7 +1,7 @@
 import { defineConfig } from '@playwright/test'
 
-// Test env vars: set TEST_SUPABASE_ANON_KEY and TEST_SUPABASE_SERVICE_KEY
-// from `supabase status` output before running tests.
+// Integration tests use .env.local, Postgres, the local PDS and mock PLC.
+// Limit workers to avoid competing cold-route compilations on developer machines.
 
 export default defineConfig({
   testDir: './tests',
@@ -10,6 +10,7 @@ export default defineConfig({
   timeout: 180000,
   expect: { timeout: 10000 },
   fullyParallel: false,
+  workers: 2,
   // One retry absorbs the dev server compiling a route on its first request.
   retries: 1,
   reporter: 'list',

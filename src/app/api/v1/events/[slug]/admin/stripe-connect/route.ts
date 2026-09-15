@@ -178,7 +178,7 @@ export async function POST(
       }
     } catch {
       // The Stripe account now exists but we failed to persist its id; surface
-      // it so an operator can attach it manually via ticketing-settings.
+      // it so an operator can investigate; retrying uses the same idempotency key.
       console.error('[stripe-connect] failed to persist the connected account id')
       return NextResponse.json(
         { error: 'Stripe account created but could not be saved', accountId },
@@ -219,14 +219,10 @@ export async function DELETE(
     return NextResponse.json({ error: 'No Stripe account is connected to this event' }, { status: 400 })
   }
 
-  // Without a connected account, paid checkout can only proceed on the
-  // platform account; unless that fallback is explicitly enabled, turn
-  // ticketing off so nobody hits a broken checkout.
-  const keepTicketing = isPlatformChargeFallbackAllowed()
+  // Admission rules survive a payout disconnection. Paid checkout fails closed.
   const [updated] = await sql<{ ticketing_enabled: boolean; stripe_account_id: string | null }[]>`
     update events
     set stripe_account_id = null,
-        ticketing_enabled = ${keepTicketing ? sql`ticketing_enabled` : sql`false`},
         updated_at = now()
     where id = ${event.id}
     returning ticketing_enabled, stripe_account_id

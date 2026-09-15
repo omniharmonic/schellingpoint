@@ -1,6 +1,5 @@
 import 'server-only'
 import Stripe from 'stripe'
-import { calculatePlatformFee } from './format'
 
 /**
  * Stripe is optional: without STRIPE_SECRET_KEY every payment route answers 503 and free
@@ -16,6 +15,8 @@ export const stripe = stripeSecretKey
   ? new Stripe(stripeSecretKey, {
       apiVersion: '2026-01-28.clover',
       typescript: true,
+      timeout: 15000,
+      maxNetworkRetries: 1,
     })
   : null
 
@@ -46,6 +47,7 @@ export async function createCheckoutSession({
   expiresAt,
   tierName,
   priceCents,
+  platformFeeCents,
   currency,
   eventId,
   eventName,
@@ -60,6 +62,7 @@ export async function createCheckoutSession({
   expiresAt: Date
   tierName: string
   priceCents: number
+  platformFeeCents: number
   currency: string
   eventId: string
   eventName: string
@@ -72,10 +75,9 @@ export async function createCheckoutSession({
     throw new Error('Stripe is not configured')
   }
 
-  const metadata = { ticket_id: ticketId, event_id: eventId, tier_id: tierId, holder_id: holderId }
+  const metadata = { ticket_id: ticketId, event_id: eventId, tier_id: tierId, holder_id: holderId, platform_fee_cents: String(platformFeeCents) }
 
   const sessionParams: Stripe.Checkout.SessionCreateParams = {
-    payment_method_types: ['card'],
     mode: 'payment',
     line_items: [
       {
@@ -97,11 +99,11 @@ export async function createCheckoutSession({
     expires_at: Math.floor(expiresAt.getTime() / 1000),
   }
 
-  // If event has connected Stripe account, use it with application fee (5% + $0.50)
+  // The fee is snapshotted when the checkout hold is created.
   if (stripeAccountId) {
     sessionParams.payment_intent_data = {
       ...sessionParams.payment_intent_data,
-      application_fee_amount: calculatePlatformFee(priceCents),
+      application_fee_amount: platformFeeCents,
       transfer_data: { destination: stripeAccountId },
     }
   }
@@ -209,7 +211,7 @@ export async function createConnectAccount({
       event_id: eventId,
       event_slug: eventSlug,
     },
-  })
+  }, { idempotencyKey: `unconference-connect-${eventId}` })
 }
 
 /**

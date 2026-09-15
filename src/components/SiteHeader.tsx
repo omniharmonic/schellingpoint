@@ -14,9 +14,9 @@ export function SiteHeader() {
   return (
     <header className="sticky top-0 z-40 border-b bg-background/95 backdrop-blur-md">
       <div className="container mx-auto px-5 flex h-[76px] items-center justify-between gap-3">
-        <Link href="/" className="flex items-center gap-2.5 font-display font-semibold text-lg tracking-tight">
+        <Link href="/" className="flex items-center gap-2.5 font-display font-bold text-xl tracking-[-0.045em]">
           <NetworkMark className="h-8 w-8 text-primary shrink-0" />
-          <span className="leading-tight">Schelling Point</span>
+          <span className="leading-tight">unconference</span>
         </Link>
         <nav aria-label="Main navigation" className="flex items-center gap-2 sm:gap-4">
           <Link href="/#upcoming" className="hidden md:block text-sm text-muted-foreground hover:text-foreground">Explore events</Link>

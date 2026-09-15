@@ -151,7 +151,7 @@ function DashboardShell({ children }: DashboardLayoutProps) {
                 {event.name}
               </div>
               <div className="text-xs text-muted-foreground tracking-wider">
-                Schelling Point
+                unconference
               </div>
             </div>
           </Link>
@@ -370,6 +370,7 @@ function DashboardShell({ children }: DashboardLayoutProps) {
         <OnboardingModal
           userId={user.id}
           email={user.email || ''}
+          initialProfile={profile}
           onComplete={handleOnboardingComplete}
           suggestedTopics={event.suggestedTopics}
           voteCredits={voteCredits}

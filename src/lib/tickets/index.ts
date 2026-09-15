@@ -1,4 +1,5 @@
 import 'server-only'
+import { createHash } from 'node:crypto'
 import type postgres from 'postgres'
 import { sql, tx } from '@/lib/db'
 import { getViewer, eventRole, type Viewer } from '@/lib/auth/viewer'
@@ -6,6 +7,7 @@ import { notify } from '@/lib/notifications'
 import { canRolePerform } from '@/lib/permissions'
 import type { EventRoleName } from '@/types/event'
 import { readTicketToken } from './qr'
+import { calculatePlatformFee } from '@/lib/payments/format'
 
 /**
  * Tickets are app-side entitlements bound to an account, and so to its DID (spec §5.5). They
@@ -260,9 +262,10 @@ export type HoldResult =
 export async function reserveTicketHold(
   input: { eventId: string; tierId: string; accountId: string },
   now: Date = new Date(),
+  transaction?: Tx,
 ): Promise<HoldResult> {
   const holdExpiresAt = new Date(Math.floor(now.getTime() / 1000) * 1000 + CHECKOUT_HOLD_SECONDS * 1000)
-  return tx(async (t) => {
+  const reserve = async (t: Tx): Promise<HoldResult> => {
     const tier = await lockTier(t, input.eventId, input.tierId)
     if (!tier) return { ok: false, status: 404, error: 'Ticket tier not found', code: 'TIER_NOT_FOUND' }
     if (tier.price_cents === 0) return { ok: false, status: 400, error: 'This tier is free', code: 'FREE_TIER' }
@@ -285,7 +288,8 @@ export async function reserveTicketHold(
       returning id
     `
     return { ok: true, ticketId: ticket.id, reused: false, previousSessionId: null, holdExpiresAt }
-  })
+  }
+  return transaction ? reserve(transaction) : tx(reserve)
 }
 
 /** Stripe calls used by `startPaidCheckout`, injectable so tests can stand in for Stripe. */
@@ -297,6 +301,7 @@ export interface CheckoutGateway {
     expiresAt: Date
     tierName: string
     priceCents: number
+    platformFeeCents: number
     currency: string
     eventId: string
     eventName: string
@@ -323,55 +328,65 @@ export async function startPaidCheckout(
   },
   gateway: CheckoutGateway,
 ): Promise<CheckoutResult> {
-  const hold = await reserveTicketHold({ eventId: input.event.id, tierId: input.tierId, accountId: input.holder.accountId })
-  if (!hold.ok) return hold
+  return tx(async (t): Promise<CheckoutResult> => {
+    const key = `checkout:${input.event.id}:${input.tierId}:${input.holder.accountId}`
+    const [lock] = await t`select pg_try_advisory_xact_lock(hashtextextended(${key}, 0)) as acquired`
+    if (!lock.acquired) return { ok: false, status: 409, code: 'CHECKOUT_IN_PROGRESS', error: 'Checkout is already opening. Please wait a moment.' }
+    const hold = await reserveTicketHold({ eventId: input.event.id, tierId: input.tierId, accountId: input.holder.accountId }, new Date(), t)
+    if (!hold.ok) return hold
 
-  const release = async () => {
-    if (hold.reused) {
-      await sql`update tickets set hold_expires_at = now(), updated_at = now() where id = ${hold.ticketId} and status = 'pending'`
-    } else {
-      await sql`delete from tickets where id = ${hold.ticketId} and status = 'pending'`
-    }
-  }
-
-  try {
-    if (hold.previousSessionId) {
-      // Never leave two payable sessions for one seat.
-      const previous = await gateway.expireSession(hold.previousSessionId)
-      if (previous === 'complete') {
-        return {
-          ok: false, status: 409, code: 'PAYMENT_IN_PROGRESS',
-          error: 'Your previous checkout was paid; your ticket will appear shortly',
-        }
+    const release = async () => {
+      if (hold.reused) {
+        await t`update tickets set hold_expires_at = now(), updated_at = now() where id = ${hold.ticketId} and status = 'pending'`
+      } else {
+        await t`delete from tickets where id = ${hold.ticketId} and status = 'pending'`
       }
     }
 
-    const [tier] = await sql<{ name: string; price_cents: number; currency: string }[]>`
-      select name, price_cents, currency from ticket_tiers where id = ${input.tierId}
-    `
-    const base = `${input.origin}/e/${encodeURIComponent(input.event.slug)}/tickets`
-    const session = await gateway.createSession({
-      ticketId: hold.ticketId,
-      tierId: input.tierId,
-      holderId: input.holder.accountId,
-      expiresAt: hold.holdExpiresAt,
-      tierName: tier.name,
-      priceCents: tier.price_cents,
-      currency: tier.currency,
-      eventId: input.event.id,
-      eventName: input.event.name,
-      customerEmail: input.holder.email,
-      stripeAccountId: input.event.stripe_account_id,
-      successUrl: `${base}/success?ticket=${hold.ticketId}`,
-      cancelUrl: `${base}?cancelled=true`,
-    })
-    await sql`update tickets set checkout_session_id = ${session.id}, updated_at = now() where id = ${hold.ticketId}`
-    return { ok: true, ticketId: hold.ticketId, sessionId: session.id, url: session.url }
-  } catch (err) {
-    console.error('[checkout] payment session could not be opened:', err instanceof Error ? err.name : 'error')
-    await release()
-    return { ok: false, status: 502, error: 'Failed to create checkout session', code: 'CHECKOUT_FAILED' }
-  }
+    try {
+      if (hold.previousSessionId) {
+        // Never leave two payable sessions for one seat.
+        const previous = await gateway.expireSession(hold.previousSessionId)
+        if (previous !== 'expired') {
+          return {
+            ok: false, status: 409, code: 'PAYMENT_IN_PROGRESS',
+            error: previous === 'complete' ? 'Your previous checkout was paid; your ticket will appear shortly' : 'Your previous checkout is still open. Please finish it before starting another.',
+          }
+        }
+      }
+
+      const [tier] = await t<{ name: string; price_cents: number; currency: string }[]>`
+        select name, price_cents, currency from ticket_tiers where id = ${input.tierId}
+      `
+      const [contribution] = await t<{ platform_fee_percent: number }[]>`select platform_fee_percent from events where id = ${input.event.id}`
+      const platformFeeCents = input.event.stripe_account_id ? calculatePlatformFee(tier.price_cents, contribution.platform_fee_percent) : 0
+      await t`update tickets set quoted_price_cents = ${tier.price_cents}, paid_currency = ${tier.currency},
+        platform_fee_cents = ${platformFeeCents} where id = ${hold.ticketId}`
+      const base = `${input.origin}/e/${encodeURIComponent(input.event.slug)}/tickets`
+      const session = await gateway.createSession({
+        ticketId: hold.ticketId,
+        tierId: input.tierId,
+        holderId: input.holder.accountId,
+        expiresAt: hold.holdExpiresAt,
+        tierName: tier.name,
+        priceCents: tier.price_cents,
+        platformFeeCents,
+        currency: tier.currency,
+        eventId: input.event.id,
+        eventName: input.event.name,
+        customerEmail: input.holder.email,
+        stripeAccountId: input.event.stripe_account_id,
+        successUrl: `${base}/success?ticket=${hold.ticketId}`,
+        cancelUrl: `${base}?cancelled=true`,
+      })
+      await t`update tickets set checkout_session_id = ${session.id}, updated_at = now() where id = ${hold.ticketId}`
+      return { ok: true, ticketId: hold.ticketId, sessionId: session.id, url: session.url }
+    } catch (err) {
+      console.error('[checkout] payment session could not be opened:', err instanceof Error ? err.name : 'error')
+      await release()
+      return { ok: false, status: 502, error: 'Failed to create checkout session', code: 'CHECKOUT_FAILED' }
+    }
+  })
 }
 
 export type SettlementOutcome = 'confirmed' | 'already_confirmed' | 'refund_needed' | 'ignored'
@@ -392,8 +407,19 @@ export async function settlePaidCheckout(input: {
   sessionId: string
   paymentIntentId: string | null
   amountPaidCents: number | null
+  currency?: string | null
+  platformFeeCents?: number | null
 }): Promise<SettlementOutcome> {
   const outcome = await tx(async (t): Promise<SettlementOutcome> => {
+    if (input.paymentIntentId) {
+      await t`select pg_advisory_xact_lock(hashtextextended(${`payment:${input.paymentIntentId}`}, 0))`
+      const refunded = await t`select 1 from refunded_payments where payment_fingerprint = ${createHash('sha256').update(input.paymentIntentId).digest('hex')}`
+      if (refunded.length) {
+        await t`update tickets set status = 'cancelled', hold_expires_at = null, updated_at = now()
+          where id = ${input.ticketId} and event_id = ${input.eventId} and status = 'pending' and (checkout_session_id is null or checkout_session_id = ${input.sessionId})`
+        return 'ignored'
+      }
+    }
     const [ticket] = await t<{ id: string; tier_id: string; user_id: string; status: string; hold_expires_at: string | null; payment_intent_id: string | null; checkout_session_id: string | null }[]>`
       select id, tier_id, user_id, status, hold_expires_at, payment_intent_id, checkout_session_id
       from tickets where id = ${input.ticketId} and event_id = ${input.eventId}
@@ -405,8 +431,8 @@ export async function settlePaidCheckout(input: {
     if (!tier) return 'ignored'
 
     const [current] = ticket
-      ? await t<{ status: string; hold_expires_at: string | null; payment_intent_id: string | null; checkout_session_id: string | null }[]>`
-          select status, hold_expires_at, payment_intent_id, checkout_session_id from tickets where id = ${ticket.id} for update
+      ? await t<{ status: string; hold_expires_at: string | null; payment_intent_id: string | null; checkout_session_id: string | null; quoted_price_cents: number | null; paid_currency: string | null }[]>`
+          select status, hold_expires_at, payment_intent_id, checkout_session_id, quoted_price_cents, paid_currency from tickets where id = ${ticket.id} for update
         `
       : []
 
@@ -418,7 +444,9 @@ export async function settlePaidCheckout(input: {
       await t`
         update tickets
         set status = 'confirmed', payment_intent_id = coalesce(${input.paymentIntentId}, payment_intent_id),
-            amount_paid_cents = ${input.amountPaidCents}, payment_confirmed_at = now(), hold_expires_at = null,
+            amount_paid_cents = ${input.amountPaidCents},
+            platform_fee_cents = coalesce(${input.platformFeeCents ?? null}, platform_fee_cents, 0),
+            paid_currency = coalesce(${input.currency ?? null}, paid_currency, ${tier.currency}), payment_confirmed_at = now(), hold_expires_at = null,
             checkout_session_id = ${input.sessionId}, updated_at = now()
         where id = ${id}
       `
@@ -443,10 +471,14 @@ export async function settlePaidCheckout(input: {
     }
 
     if (current) {
+      // Stripe does not guarantee delivery order. A completed event replayed
+      // after a full refund must never restore the cancelled entitlement.
+      if (current.status === 'cancelled' && current.payment_intent_id && samePayment(current)) return 'ignored'
       if (current.status === 'confirmed' || current.status === 'checked_in') {
         return samePayment(current) ? 'already_confirmed' : refundNeeded(null)
       }
       if (current.status === 'refund_needed') return samePayment(current) ? 'refund_needed' : refundNeeded(null)
+      if (current.quoted_price_cents !== null && (input.amountPaidCents !== current.quoted_price_cents || (input.currency && current.paid_currency !== input.currency))) return refundNeeded(ticket.id)
       if (current.status === 'pending' && current.hold_expires_at && new Date(current.hold_expires_at) > new Date()) {
         return confirm(ticket.id)
       }
@@ -491,11 +523,15 @@ export async function releaseCheckoutHold(input: { ticketId: string; eventId: st
 
 /** Cancels whatever a fully refunded payment intent paid for (including refund-needed rows). */
 export async function cancelRefundedTicket(paymentIntentId: string): Promise<number> {
-  const result = await sql`
-    update tickets set status = 'cancelled', hold_expires_at = null, updated_at = now()
-    where payment_intent_id = ${paymentIntentId} and status in ('pending', 'confirmed', 'checked_in', 'refund_needed')
-  `
-  return result.count
+  return tx(async (t) => {
+    await t`select pg_advisory_xact_lock(hashtextextended(${`payment:${paymentIntentId}`}, 0))`
+    await t`insert into refunded_payments (payment_fingerprint) values (${createHash('sha256').update(paymentIntentId).digest('hex')}) on conflict do nothing`
+    const result = await t`
+      update tickets set status = 'cancelled', hold_expires_at = null, updated_at = now()
+      where payment_intent_id = ${paymentIntentId} and status in ('pending', 'confirmed', 'checked_in', 'refund_needed')
+    `
+    return result.count
+  })
 }
 
 // -----------------------------------------------------------------------------

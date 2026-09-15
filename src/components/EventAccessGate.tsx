@@ -52,7 +52,7 @@ export function EventAccessGate({ reason = 'unknown' }: EventAccessGateProps) {
   }
 
   return <><SiteHeader /><main className="mx-auto max-w-xl px-6 py-24 text-center">
-    <p className="eyebrow mb-4">Schelling Point</p>
+    <p className="eyebrow mb-4">unconference</p>
     <h1 className="text-4xl font-semibold tracking-tight">{isLoading ? 'Finding your gathering…' : title}</h1>
     <p className="mt-5 text-muted-foreground">{isLoading ? 'Checking your access.' : body}</p>
     {!isLoading && <div className="mt-8 flex flex-wrap justify-center gap-3">

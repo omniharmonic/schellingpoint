@@ -8,12 +8,15 @@ export function formatPrice(cents: number, currency: string = 'usd'): string {
   }).format(cents / 100)
 }
 
-/**
- * Platform application fee: 5% of the ticket price + 50 cents, in cents.
- * Used as `application_fee_amount` on destination charges to connected accounts, and by the
- * revenue dashboard to show net amounts.
- */
-export function calculatePlatformFee(amountCents: number): number {
-  if (!Number.isFinite(amountCents) || amountCents <= 0) return 0
-  return Math.round(amountCents * 0.05) + 50
+/** Organizer-selected percentage; no fixed surcharge. Values are validated at every write. */
+export function validPlatformFeePercent(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 1 && value <= 100
+    && Math.abs(value * 100 - Math.round(value * 100)) < 0.000001
+}
+
+export function calculatePlatformFee(amountCents: number, percent: number = 1): number {
+  if (!validPlatformFeePercent(percent)) throw new Error('Choose a platform contribution from 1% to 100%, with up to two decimal places')
+  if (!Number.isSafeInteger(amountCents) || amountCents < 0) throw new Error('Ticket amount must be a non-negative whole number')
+  if (amountCents === 0) return 0
+  return Math.min(amountCents, Math.max(1, Math.round(amountCents * percent / 100)))
 }

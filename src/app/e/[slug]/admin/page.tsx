@@ -295,16 +295,23 @@ export default function AdminPage() {
           </div>
         )}
 
-        {event.status === 'draft' && can('editEventSettings') && (
-          <Card className="border-primary/25 bg-secondary">
-            <CardContent className="p-6 flex flex-wrap items-center justify-between gap-5">
-              <div>
-                <h2 className="text-xl font-semibold">Ready to invite your people?</h2>
-                <p className="mt-2 text-sm text-muted-foreground max-w-xl">Your event is a draft. Review the invitation, publish it, then open proposals when you&rsquo;re ready to hear from the community.</p>
-              </div>
-              <Button asChild><Link href={`/e/${event.slug}/admin/settings`}>Review &amp; publish</Link></Button>
-            </CardContent>
-          </Card>
+        {event.status === 'draft' && (
+          <section aria-labelledby="setup-title" className="overflow-hidden rounded-2xl border border-primary/25 bg-card">
+            <div className="p-6 sm:p-8 bg-secondary/50">
+              <h2 id="setup-title" className="text-2xl font-semibold tracking-tight">Give your gathering a good start.</h2>
+              <p className="mt-2 text-sm text-muted-foreground max-w-xl">Your draft is private. Set the essentials, preview the invitation, then publish when you’re ready.</p>
+            </div>
+            <div className="grid divide-y sm:grid-cols-3 sm:divide-y-0 sm:divide-x">
+              {[{ href: 'settings', title: 'Event details', detail: 'Dates, location and the invitation.' },
+                { href: 'setup', title: 'Rooms & time slots', detail: `${venues.length} rooms and ${timeSlots.filter(slot => !slot.is_break).length} session slots ready.` },
+                { href: event.ticketingEnabled ? 'tickets' : 'settings', title: 'Admission & publishing', detail: event.ticketingEnabled ? 'Set up ticket tiers and connect payouts.' : 'Review participation and publish your event.' }].map(item => (
+                <Link key={item.title} href={`/e/${event.slug}/admin/${item.href}`} className="group p-5 hover:bg-muted/40 focus-visible:outline-primary">
+                  <span className="flex items-center justify-between gap-3 font-semibold">{item.title}<ArrowUpRight className="h-4 w-4" /></span>
+                  <span className="mt-2 block text-sm text-muted-foreground">{item.detail}</span>
+                </Link>
+              ))}
+            </div>
+          </section>
         )}
 
         {overview && overview.flagged.length > 0 && (

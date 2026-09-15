@@ -61,12 +61,14 @@ export async function POST(request: Request): Promise<Response> {
         const ref = ticketRef(session)
         if (!ref) break
         // `completed` also fires for delayed payment methods before the money arrives.
-        if (session.payment_status !== 'paid' && session.payment_status !== 'no_payment_required') break
+        if (session.payment_status !== 'paid') break
         await settlePaidCheckout({
           ...ref,
           sessionId: session.id,
           paymentIntentId: paymentIntentId(session.payment_intent),
           amountPaidCents: session.amount_total ?? null,
+          currency: session.currency,
+          platformFeeCents: /^\d+$/.test(session.metadata?.platform_fee_cents ?? '') ? Number(session.metadata!.platform_fee_cents) : null,
         })
         break
       }

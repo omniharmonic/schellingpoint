@@ -9,9 +9,11 @@ import 'server-only'
  * ourselves at creation (the handle), which the real display name may replace.
  *
  * Read-only, unauthenticated, and best-effort: any failure is logged and
- * swallowed. Callers fire-and-forget.
+ * swallowed. Sign-in awaits the bounded import before rendering onboarding.
  */
 import { sql } from '@/lib/db'
+import sharp from 'sharp'
+import { storeImage } from '@/lib/storage/files'
 import { safeFetch } from '@/lib/net/safe-fetch'
 
 const PUBLIC_APPVIEW = 'https://public.api.bsky.app'
@@ -35,7 +37,7 @@ export async function fetchBskyProfile(actor: string): Promise<BskyProfile | nul
     })
     if (!res.ok) return null
     const data = (await res.json()) as Record<string, unknown>
-    if (typeof data.did !== 'string' || typeof data.handle !== 'string') return null
+    if (typeof data.did !== 'string' || typeof data.handle !== 'string' || (actor.startsWith('did:') && data.did !== actor)) return null
     return {
       did: data.did,
       handle: data.handle,
@@ -61,16 +63,36 @@ export async function importBskyProfile(
   const remote = await fetchBskyProfile(did)
   if (!remote) return { updated: [] }
 
-  const rows = await sql<{ display_name: string | null; avatar_url: string | null; bio: string | null }[]>`
-    select display_name, avatar_url, bio from profiles where id = ${userId}
+  return applyBskyProfile(userId, remote, opts)
+}
+
+/** Fill missing fields atomically; a profile edit made during the remote fetch always wins. */
+export async function applyBskyProfile(
+  userId: string,
+  remote: BskyProfile,
+  opts: { placeholderName?: string | null } = {},
+): Promise<{ updated: string[] }> {
+  const rows = await sql<{ display_name: string | null; avatar_url: string | null; bio: string | null; onboarding_completed: boolean }[]>`
+    select display_name, avatar_url, bio, onboarding_completed from profiles where id = ${userId}
   `
   const current = rows[0]
   if (!current) return { updated: [] }
 
   const name = current.display_name?.trim() ?? ''
-  const nameIsEmpty = !name || (opts.placeholderName ? name === opts.placeholderName : false)
+  const nameIsEmpty = !name || (!current.onboarding_completed && opts.placeholderName ? name === opts.placeholderName : false)
   const displayName = nameIsEmpty && remote.displayName ? remote.displayName : null
-  const avatar = !current.avatar_url?.trim() && remote.avatar ? remote.avatar : null
+  let avatar: string | null = null
+  if (!current.avatar_url?.trim() && remote.avatar) {
+    try {
+      const response = await safeFetch(remote.avatar, { signal: AbortSignal.timeout(TIMEOUT_MS) })
+      if (response.ok) {
+        const bytes = await response.arrayBuffer()
+        const normalized = await sharp(Buffer.from(bytes), { limitInputPixels: 16_000_000, animated: false })
+          .rotate().resize(512, 512, { fit: 'cover', withoutEnlargement: true }).webp({ quality: 82 }).toBuffer()
+        avatar = (await storeImage(normalized, 'webp')).url
+      }
+    } catch { /* A broken avatar does not prevent name/bio import or sign-in. */ }
+  }
   const bio = !current.bio?.trim() && remote.description ? remote.description : null
 
   const updated = [
@@ -80,13 +102,14 @@ export async function importBskyProfile(
   ]
   if (updated.length === 0) return { updated }
   try {
-    await sql`
+    const saved = await sql`
       update profiles set
-        display_name = coalesce(${displayName}, display_name),
-        avatar_url = coalesce(${avatar}, avatar_url),
-        bio = coalesce(${bio}, bio)
-      where id = ${userId}
+        display_name = case when display_name is not distinct from ${current.display_name} then coalesce(${displayName}, display_name) else display_name end,
+        avatar_url = case when avatar_url is not distinct from ${current.avatar_url} then coalesce(${avatar}, avatar_url) else avatar_url end,
+        bio = case when bio is not distinct from ${current.bio} then coalesce(${bio}, bio) else bio end
+      where id = ${userId} and exists (select 1 from accounts where id = ${userId} and did = ${remote.did})
     `
+    if (!saved.count) return { updated: [] }
   } catch {
     return { updated: [] }
   }

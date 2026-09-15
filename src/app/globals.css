@@ -37,7 +37,7 @@
 @layer base {
   :root, .light {
     color-scheme: light;
-    --background: 150 14% 97%;
+    --background: 120 14% 99%;
     --foreground: 162 17% 15%;
     --card: 0 0% 100%;
     --card-foreground: 162 17% 15%;
@@ -165,7 +165,10 @@
   .bold-cta:hover { transform: translateY(-2px); box-shadow: 0 5px 0 hsl(var(--primary) / .15); }
   .bold-cta-outline { @apply bg-transparent text-foreground border border-foreground/25; }
   .gathering-hero { @apply max-w-[1600px] mx-auto px-5 md:px-10 xl:px-16 grid lg:grid-cols-[1.1fr_1fr] items-center gap-10; padding-block: clamp(3rem, 7vw, 7rem); }
-  .hero-intro h1 { font-size: clamp(3.75rem, 7.7vw, 8.2rem); line-height: .95; font-weight: 700; letter-spacing: -.065em; max-width: 9ch; text-wrap: initial; }
+  .hero-intro h1 { font-size: clamp(3.25rem, 6.8vw, 7.2rem); line-height: .95; font-weight: 700; letter-spacing: -.065em; max-width: 12ch; text-wrap: balance; }
+  .utility-strip { @apply max-w-[1440px] mx-auto grid md:grid-cols-3 gap-8 px-5 md:px-10 py-10 border-t; }
+  .utility-strip h2 { @apply text-lg font-semibold mb-2 tracking-tight; }
+  .utility-strip p { @apply text-sm text-muted-foreground leading-relaxed max-w-sm; }
   .hero-intro > p { @apply text-lg md:text-xl mt-7 max-w-sm leading-relaxed text-muted-foreground; }
   .possibility-field { @apply relative w-full rounded-[2rem] overflow-hidden; aspect-ratio: 1 / 1.04; background: #bbdac5; color: #203b30; }
   .field-caption { @apply absolute top-6 left-6 text-sm font-semibold flex items-center gap-2; }

@@ -24,6 +24,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 
@@ -142,8 +143,10 @@ function AdminTicketsPageInner() {
     stripe_account_id: string | null
     platform_stripe_configured: boolean
     webhook_configured: boolean
+    platform_fee_percent: number
   } | null>(null)
   const [isTogglingTicketing, setIsTogglingTicketing] = React.useState(false)
+  const [contributionSaved, setContributionSaved] = React.useState(false)
   const [ticketingError, setTicketingError] = React.useState<string | null>(null)
 
   // Stripe Connect state
@@ -417,12 +420,12 @@ function AdminTicketsPageInner() {
             <div>
               <h1 className="text-2xl font-display font-bold">Tickets</h1>
               <p className="text-muted-foreground mt-1">
-                Configure ticket types and pricing
+                Set admission, ticket options and your contribution.
               </p>
             </div>
             <Button onClick={openCreateForm}>
               <Plus className="h-4 w-4 mr-2" />
-              Add Tier
+              Add ticket type
             </Button>
           </div>
 
@@ -439,8 +442,8 @@ function AdminTicketsPageInner() {
                       <h3 className="font-medium">Ticket sales</h3>
                       <p className="text-sm text-muted-foreground mt-0.5">
                         {settings.ticketing_enabled
-                          ? 'Attendees can purchase tickets from the public tickets page.'
-                          : 'Ticket sales are disabled. Enable to let attendees buy tickets.'}
+                          ? 'Attendees need a valid ticket to participate. Offer free passes or paid tickets.'
+                          : 'Ticket admission is off. Eligible attendees can join without a ticket.'}
                       </p>
                     </div>
                   </div>
@@ -478,16 +481,41 @@ function AdminTicketsPageInner() {
                   </Alert>
                 )}
 
+                <form className="rounded-xl border bg-muted/30 p-4 space-y-3" onSubmit={async (event) => {
+                  event.preventDefault()
+                  const form = new FormData(event.currentTarget)
+                  setIsSaving(true)
+                  setTicketingError(null)
+                  setContributionSaved(false)
+                  try {
+                    const response = await fetch(`/api/v1/events/${eventSlug}/admin/ticketing-settings`, {
+                      method: 'POST', headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ platform_fee_percent: Number(form.get('contribution')) }),
+                    })
+                    const data = await response.json()
+                    if (!response.ok) throw new Error(data.error || 'Contribution could not be saved')
+                    setSettings(data)
+                    setContributionSaved(true)
+                  } catch (error) { setTicketingError(error instanceof Error ? error.message : 'Contribution could not be saved') }
+                  finally { setIsSaving(false) }
+                }}>
+                  {contributionSaved && <p role="status" className="text-sm text-primary">Contribution saved. Applies to new checkouts.</p>}
+                  <Label htmlFor="platform-contribution">Your contribution to unconference</Label>
+                  <p className="text-sm text-muted-foreground">Choose what this event gives back. Minimum 1%, with no fixed platform surcharge. Free tickets stay free.</p>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <Input key={settings.platform_fee_percent} id="platform-contribution" name="contribution" type="number" min="1" max="100" step="0.01" required defaultValue={settings.platform_fee_percent} className="w-24" />
+                    <span className="text-sm">% of ticket sales</span>
+                    <Button type="submit" variant="outline" disabled={isSaving}>Save contribution</Button>
+                  </div>
+                </form>
+
                 {/* Stripe status */}
                 {settings.ticketing_enabled && !settings.platform_stripe_configured && (
                   <Alert variant="destructive">
                     <AlertTriangle className="h-4 w-4" />
                     <AlertDescription>
-                      Stripe isn&apos;t configured on this deployment. Set{' '}
-                      <code className="text-xs">STRIPE_SECRET_KEY</code> (and{' '}
-                      <code className="text-xs">STRIPE_WEBHOOK_SECRET</code>) in
-                      environment variables before accepting paid tickets. Free
-                      tickets still work.
+                      Paid ticket sales are not available yet. Free tickets still work;
+                      contact the platform team to activate payments.
                     </AlertDescription>
                   </Alert>
                 )}
@@ -498,10 +526,8 @@ function AdminTicketsPageInner() {
                     <Alert>
                       <AlertTriangle className="h-4 w-4" />
                       <AlertDescription>
-                        Stripe webhooks are not configured. Set{' '}
-                        <code className="text-xs">STRIPE_WEBHOOK_SECRET</code> and
-                        point Stripe at <code className="text-xs">/api/webhooks/stripe</code>{' '}
-                        so purchases are automatically confirmed.
+                        Payment confirmation is not ready yet, so paid checkout is paused.
+                        Contact the platform team to finish activating payments.
                       </AlertDescription>
                     </Alert>
                   )}
@@ -533,7 +559,7 @@ function AdminTicketsPageInner() {
                       {isLoadingConnect ? (
                         <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
                       ) : connect?.unavailable ? (
-                        <Badge variant="secondary">Stripe not configured</Badge>
+                        <Badge variant="secondary">Payments unavailable</Badge>
                       ) : !connect?.connected ? (
                         <Badge variant="secondary">Not connected</Badge>
                       ) : connect.chargesEnabled ? (
@@ -544,11 +570,11 @@ function AdminTicketsPageInner() {
                     </div>
                     <p className="text-sm text-muted-foreground mt-0.5">
                       {connect?.unavailable
-                        ? 'This deployment has no Stripe secret key, so accounts cannot be connected.'
+                        ? 'Paid ticket sales are not available yet. You can set up ticket types and offer free passes now.'
                         : !connect?.connected
                           ? connect?.platformFallbackAllowed
                             ? 'No Stripe account connected. Paid tickets are charged to the platform account until you connect your own.'
-                            : 'Connect a Stripe account to receive ticket revenue. Payouts go straight to you; the platform keeps 5% + $0.50 per paid ticket.'
+                            : 'Connect a Stripe account to receive ticket revenue. Payouts go straight to you; your chosen contribution supports unconference.'
                           : connect.chargesEnabled
                             ? `Connected to ${connect.accountId}. Ticket revenue is paid out to this account${connect.payoutsEnabled ? '' : ' once payouts are enabled'}.`
                             : `Account ${connect.accountId} was created but Stripe still needs information before it can accept charges.`}
@@ -855,13 +881,13 @@ function AdminTicketsPageInner() {
             <Card>
               <CardContent className="py-12 text-center">
                 <Ticket className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
-                <h2 className="text-lg font-semibold mb-2">No ticket tiers yet</h2>
+                <h2 className="text-lg font-semibold mb-2">Your first ticket type</h2>
                 <p className="text-muted-foreground mb-4">
-                  Create your first ticket tier to start selling tickets.
+                  Offer a free pass or a paid ticket, and choose the participation rights it includes.
                 </p>
                 <Button onClick={openCreateForm}>
                   <Plus className="h-4 w-4 mr-2" />
-                  Create First Tier
+                  Create ticket type
                 </Button>
               </CardContent>
             </Card>

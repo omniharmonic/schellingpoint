@@ -1,6 +1,6 @@
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
-import { ArrowRight, Calendar, FileText, Globe, MapPin, Sparkles, Users, Vote } from 'lucide-react'
+import { ArrowRight, Calendar, FileText, Globe, MapPin, MessagesSquare, Users, Vote } from 'lucide-react'
 import { GatheringArtwork } from '@/components/GatheringArtwork'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -170,7 +170,7 @@ export default async function EventPage({ params }: { params: Promise<{ slug: st
             <section>
               <div className="flex items-center justify-between mb-4">
                 <h2 className="font-display text-lg font-bold flex items-center gap-2">
-                  <Sparkles className="h-5 w-5 text-primary" strokeWidth={1.5} />
+                  <MessagesSquare className="h-5 w-5 text-primary" strokeWidth={1.5} />
                   Recently added ideas
                 </h2>
                 <Link href={`/e/${event.slug}/sessions`} className="text-xs text-muted-foreground hover:text-primary transition-colors">View all →</Link>

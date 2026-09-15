@@ -7,7 +7,7 @@ import { cn } from '@/lib/utils'
 
 const chapters = [
   { name: 'Propose', title: 'A good question is a good beginning.', text: 'You don’t need a finished talk. Bring a question, a skill, or something you’re figuring out. Propose a conversation, a workshop, or a session worth sharing.', detail: 'Organizers can review proposals before the community sees them.', prompt: 'Try adding an idea to the room.' },
-  { name: 'Vote', title: 'Put your curiosity to work.', text: 'Everyone gets a budget of credits. With quadratic voting, one vote costs one credit, two cost four, and three cost nine. Support a few different ideas or put more behind the one you love.', detail: 'Organizers choose the credit budget and voting method for each event.', prompt: 'Try dividing nine credits between these ideas.' },
+  { name: 'Vote', title: 'Put your curiosity to work.', text: 'Everyone gets a budget of credits. With quadratic voting, one vote costs one credit, two cost four, and three cost nine. Support a few different ideas or put more behind the one you love.', detail: 'Your ballot stays private. Nobody sees the results while a round is open.', prompt: 'Try dividing nine credits between these ideas.' },
   { name: 'Gather', title: 'Shared interest becomes shared time.', text: 'Organizers turn the community’s choices into a program, matching sessions with rooms and times. Save the sessions you want to attend. Then show up and see what happens.', detail: 'Votes guide the program. Organizers still make the final scheduling decisions.', prompt: 'The example program carries your ideas forward.' },
 ]
 const initialIdeas = ['What can we build together?', 'A city that belongs to everyone', 'Make something with your hands']
@@ -17,9 +17,9 @@ export function GatheringHero() {
   const topics = ['A question', 'A skill to share', 'An unfinished idea', 'A different perspective']
   return <section className="gathering-hero">
     <div className="hero-intro">
-      <h1>The best part is who shows up.</h1>
-      <p>An unconference shaped by its people. Bring ideas, choose sessions together, and make room for what happens next.</p>
-      <div className="flex flex-wrap gap-3 mt-8"><Link href="/create" className="bold-cta">Create a gathering <Plus className="h-5 w-5"/></Link><a href="#how-it-works" className="bold-cta bold-cta-outline">See how it works <ArrowDown className="h-5 w-5"/></a></div>
+      <h1>Bring people together. Let them shape it.</h1>
+      <p>The event platform for shared agendas. Host a gathering, invite your people, and turn their ideas into a program.</p>
+      <div className="flex flex-wrap gap-3 mt-8"><Link href="/create" className="bold-cta">Create an event <Plus className="h-5 w-5"/></Link><a href="#how-it-works" className="bold-cta bold-cta-outline">See how it works <ArrowDown className="h-5 w-5"/></a></div>
       <a href="#upcoming" className="inline-flex items-center gap-2 mt-7 text-sm font-semibold underline underline-offset-4">Find a gathering <ArrowUpRight className="h-4 w-4"/></a>
     </div>
     <div className="possibility-field">
@@ -79,7 +79,7 @@ export function GatheringStory() {
       <div className="credit-dots" aria-hidden="true">{Array.from({length:9}, (_, i) => <span key={i} className={i < 9 - remaining ? 'spent' : ''}/>)}</div><div className="flex justify-between items-center gap-3 mt-4"><p className="text-sm">{remaining === 0 ? 'All nine credits have a purpose.' : 'Each extra vote costs a little more.'}</p><button className="demo-reset" onClick={() => setVotes([0, 0, 0])}><RotateCcw className="h-3.5 w-3.5"/>Reset</button></div>
     </> : <>
       <h3>Make room. Make connections.</h3>
-      <div className="example-program"><div className="program-day"><strong>Saturday</strong><span>Your example gathering</span></div><div className="program-rooms"><span/><span>The commons</span><span>The studio</span></div><div className="program-row"><time>10:00</time><div className="program-session program-session-lilac"><span>Conversation</span><strong>{ideas[0]}</strong><span><Check className="h-3 w-3"/> Community interest: {votes[0]} votes</span></div><div className="program-session program-session-mint"><span>Workshop</span><strong>{ideas[2]}</strong><span><Check className="h-3 w-3"/> Community interest: {votes[2]} votes</span></div></div><div className="program-break"><time>11:00</time><span>Take a breath. Meet someone new.</span></div><div className="program-row"><time>11:30</time><div className="program-session program-session-yellow"><span>Discussion</span><strong>{ideas[1]}</strong><span><Check className="h-3 w-3"/> Community interest: {votes[1]} votes</span></div><div className="program-open">Leave a little space for the unexpected.</div></div></div>
+      <div className="example-program"><div className="program-day"><strong>Saturday</strong><span>Your example gathering</span></div><div className="program-rooms"><span/><span>The commons</span><span>The studio</span></div><div className="program-row"><time>10:00</time><div className="program-session program-session-lilac"><span>Conversation</span><strong>{ideas[0]}</strong><span><Check className="h-3 w-3"/> Your support: {votes[0]}</span></div><div className="program-session program-session-mint"><span>Workshop</span><strong>{ideas[2]}</strong><span><Check className="h-3 w-3"/> Your support: {votes[2]}</span></div></div><div className="program-break"><time>11:00</time><span>Take a breath. Meet someone new.</span></div><div className="program-row"><time>11:30</time><div className="program-session program-session-yellow"><span>Discussion</span><strong>{ideas[1]}</strong><span><Check className="h-3 w-3"/> Your support: {votes[1]}</span></div><div className="program-open">Leave a little space for the unexpected.</div></div></div>
       <p className="mt-5 text-sm">An illustration of a program, not an automatic ranking.</p>
     </>}
   </div>

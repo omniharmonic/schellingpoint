@@ -40,7 +40,7 @@ interface FooterBranding {
 }
 
 const PLATFORM_BRANDING: FooterBranding = {
-  name: 'Schelling Point',
+  name: 'unconference',
   tagline: 'Coordination protocol for unconferences',
 
 }
@@ -92,7 +92,7 @@ export function Footer({ className, variant = 'default', event }: FooterProps) {
       <div className={cn('container mx-auto px-5', isMinimal ? 'py-6' : 'py-10')}>
         <div className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <Link href="/" className="font-semibold tracking-tight">{event ? 'Powered by Schelling Point' : 'Schelling Point'}</Link>
+            <Link href="/" className="font-semibold tracking-tight">{event ? 'Powered by unconference' : 'unconference'}</Link>
             {!isMinimal && <p className="text-sm text-muted-foreground mt-1">A little structure. A lot of possibility.</p>}
           </div>
           <div className="flex flex-wrap items-center gap-5 text-xs text-muted-foreground">

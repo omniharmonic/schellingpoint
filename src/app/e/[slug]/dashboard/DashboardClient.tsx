@@ -10,7 +10,7 @@ import {
   Lock,
   Mic,
   Presentation,
-  Sparkles,
+  MessagesSquare,
   Users,
   Vote,
   Zap,
@@ -346,7 +346,7 @@ function Dashboard({ data }: { data: DashboardData }) {
           <CardHeader className="pb-3">
             <div className="flex items-center justify-between">
               <CardTitle className="text-lg flex items-center gap-2">
-                <Sparkles className="h-5 w-5 text-primary" aria-hidden />
+                <MessagesSquare className="h-5 w-5 text-primary" aria-hidden />
                 Recently proposed
               </CardTitle>
               <Button variant="ghost" size="sm" asChild>
@@ -365,7 +365,7 @@ function Dashboard({ data }: { data: DashboardData }) {
                     className="flex items-center gap-3 p-2.5 rounded-lg hover:bg-muted/50 transition-colors group"
                   >
                     <div className="w-8 h-8 rounded-full bg-muted flex items-center justify-center flex-shrink-0">
-                      <Sparkles className="h-4 w-4 text-muted-foreground" aria-hidden />
+                      <MessagesSquare className="h-4 w-4 text-muted-foreground" aria-hidden />
                     </div>
                     <div className="flex-1 min-w-0">
                       <p className="font-medium truncate group-hover:text-primary transition-colors">{session.title}</p>

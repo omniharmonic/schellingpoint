@@ -1,7 +1,7 @@
 'use client'
 
 import * as React from 'react'
-import { Zap, Coffee } from 'lucide-react'
+import { CalendarPlus, Coffee } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
@@ -13,6 +13,7 @@ interface BulkSlotGeneratorProps {
   onGenerate: (slots: GeneratedSlot[]) => void
   onCancel: () => void
   isSaving?: boolean
+  existingSlots?: Array<Pick<GeneratedSlot, 'venueId' | 'dayDate' | 'startTime' | 'endTime'>>
 }
 
 export interface GeneratedSlot {
@@ -60,11 +61,12 @@ export function BulkSlotGenerator({
   onGenerate,
   onCancel,
   isSaving = false,
+  existingSlots = [],
 }: BulkSlotGeneratorProps) {
   const [venueId, setVenueId] = React.useState(venues[0]?.id || '')
   const [dayDate, setDayDate] = React.useState(eventDays[0]?.date || '')
-  const [startHour, setStartHour] = React.useState(9)
-  const [endHour, setEndHour] = React.useState(17)
+  const [startHour, setStartHour] = React.useState(9 * 60)
+  const [endHour, setEndHour] = React.useState(17 * 60)
   const [duration, setDuration] = React.useState(60)
   const [includeBreaks, setIncludeBreaks] = React.useState(false)
   const [breakDuration, setBreakDuration] = React.useState(15)
@@ -72,8 +74,8 @@ export function BulkSlotGenerator({
   // One day's pattern of slots, as wall-clock times in the event timezone.
   const pattern = React.useMemo(() => {
     const slots: Array<Pick<GeneratedSlot, 'startTime' | 'endTime' | 'label' | 'isBreak'>> = []
-    let currentMinutes = startHour * 60
-    const endMinutes = endHour * 60
+    let currentMinutes = startHour
+    const endMinutes = endHour
     while (currentMinutes + duration <= endMinutes) {
       const slotEndMinutes = currentMinutes + duration
       slots.push({ startTime: minutesToTime(currentMinutes), endTime: minutesToTime(slotEndMinutes), label: '', isBreak: false })
@@ -94,6 +96,8 @@ export function BulkSlotGenerator({
     return rooms.flatMap((room) => days.flatMap((day) => pattern.map((slot) => ({ ...slot, venueId: room, dayDate: day }))))
   }, [pattern, venueId, dayDate, venues, eventDays])
 
+  const conflicts = preview.filter(slot => existingSlots.some(existing => existing.venueId === slot.venueId &&
+    existing.dayDate === slot.dayDate && existing.startTime < slot.endTime && slot.startTime < existing.endTime))
   const selectedVenue = venues.find(v => v.id === venueId)
   const id = React.useId()
 
@@ -135,32 +139,32 @@ export function BulkSlotGenerator({
         </div>
 
         <div className="space-y-2">
-          <Label htmlFor={`${id}-start`}>Start hour</Label>
+          <Label htmlFor={`${id}-start`}>Start time</Label>
           <select
             id={`${id}-start`}
             value={startHour}
             onChange={(e) => setStartHour(Number(e.target.value))}
             className="w-full h-10 rounded-md border bg-background px-3 text-sm"
           >
-            {Array.from({ length: 24 }, (_, i) => (
-              <option key={i} value={i}>
-                {formatTime(`${i.toString().padStart(2, '0')}:00`)}
+            {Array.from({ length: 96 }, (_, i) => (
+              <option key={i} value={i * 15}>
+                {formatTime(minutesToTime(i * 15))}
               </option>
             ))}
           </select>
         </div>
 
         <div className="space-y-2">
-          <Label htmlFor={`${id}-end`}>End hour</Label>
+          <Label htmlFor={`${id}-end`}>End time</Label>
           <select
             id={`${id}-end`}
             value={endHour}
             onChange={(e) => setEndHour(Number(e.target.value))}
             className="w-full h-10 rounded-md border bg-background px-3 text-sm"
           >
-            {Array.from({ length: 24 }, (_, i) => (
-              <option key={i} value={i}>
-                {formatTime(`${i.toString().padStart(2, '0')}:00`)}
+            {Array.from({ length: 96 }, (_, i) => (
+              <option key={i} value={i * 15}>
+                {formatTime(minutesToTime(i * 15))}
               </option>
             ))}
           </select>
@@ -254,17 +258,20 @@ export function BulkSlotGenerator({
         </div>
       )}
 
+      {conflicts.length > 0 && <p role="alert" className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-sm text-destructive">
+        {conflicts.length} proposed slots overlap existing availability. Choose another time, room or day before adding slots.
+      </p>}
       {startHour >= endHour && (
-        <p className="text-sm text-destructive">End hour must be after start hour</p>
+        <p className="text-sm text-destructive">End time must be after start time</p>
       )}
 
-      <div className="flex gap-3 pt-2">
+      <div className="flex flex-wrap gap-3 pt-2">
         <Button
           onClick={() => onGenerate(preview)}
-          disabled={isSaving || preview.length === 0}
+          disabled={isSaving || preview.length === 0 || conflicts.length > 0}
         >
-          <Zap className="h-4 w-4 mr-2" />
-          Generate {preview.length} slots
+          <CalendarPlus className="h-4 w-4 mr-2" />
+          {isSaving ? 'Adding slots…' : `Add ${preview.length} slots`}
         </Button>
         <Button variant="outline" onClick={onCancel}>
           Cancel

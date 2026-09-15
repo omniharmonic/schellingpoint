@@ -147,7 +147,7 @@ export function generateICS(calendar: ICSCalendar): string {
 
   lines.push('BEGIN:VCALENDAR')
   lines.push('VERSION:2.0')
-  lines.push('PRODID:-//Schelling Point//Event Calendar//EN')
+  lines.push('PRODID:-//unconference//Event Calendar//EN')
   lines.push('CALSCALE:GREGORIAN')
   lines.push('METHOD:PUBLISH')
   lines.push(`X-WR-CALNAME:${escapeICS(calendar.name)}`)
