@@ -1,28 +1,37 @@
 import 'server-only'
 /**
- * The `sp_at_session` cookie: a browser session bound to a DID.
+ * The `sp_at_session` cookie: a browser session bound to an account (and its DID).
  *
- * Cookie value is `<id>.<hmac-sha256(id, ATPROTO_SESSION_SECRET)>` where `id`
- * is the primary key of an `at_sessions` row. The HMAC lets us reject forged
- * ids without a database round-trip; the row carries the DID, the linked
- * profile (if any), which door the session came through, and its expiry.
+ * Cookie value is `<id>.<hmac-sha256(id, ATPROTO_SESSION_SECRET)>` where `id` is the
+ * primary key of an `at_sessions` row. The HMAC rejects forged ids without a database
+ * round-trip; the row carries the DID, the account, which door the session came through,
+ * and its expiry. A sign-out is a DELETE.
  *
- * HttpOnly, SameSite=Lax, Path=/, 30 days, Secure when the public URL is https.
+ * `HttpOnly; SameSite=Lax; Path=/; Max-Age=30d`, `Secure` over https. `Lax`, not
+ * `Strict`, because the OAuth callback and the magic link are top-level cross-site GETs.
+ *
+ * When `NEXT_PUBLIC_APP_URL` names a real host, the cookie is written with
+ * `Domain=.<apex>` so gathering subdomains (`<slug>.unconference.events`) share the
+ * session (spec §8 routing). A cookie is only deleted on the scope it was written with,
+ * so clearing emits BOTH the domain-scoped and the host-only deletion.
  */
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { cookies } from 'next/headers'
-import { createAdminClient } from '@/lib/supabase/server'
+import { sql } from '@/lib/db'
 import { publicUrl, sessionSecret } from './config'
 
 export const AT_SESSION_COOKIE = 'sp_at_session'
 export const AT_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000
 
-export type AtSessionKind = 'oauth' | 'app-password'
+export type AtSessionKind = 'custodial' | 'oauth'
 
 export interface AtSession {
   id: string
   did: string
-  userId: string | null
+  /** `accounts.id`. */
+  accountId: string
+  /** @deprecated alias of `accountId`, kept for older readers. */
+  userId: string
   kind: AtSessionKind
   expiresAt: Date
 }
@@ -38,26 +47,64 @@ function sign(id: string): string {
   return createHmac('sha256', sessionSecret()).update(id).digest('base64url')
 }
 
-function isSecure(): boolean {
+function appUrl(): URL | null {
   try {
-    return new URL(publicUrl()).protocol === 'https:'
+    return new URL(publicUrl())
   } catch {
-    return false
+    return null
   }
 }
 
-function cookieAttributes(maxAgeSeconds: number): string {
-  return [`Path=/`, `HttpOnly`, `SameSite=Lax`, `Max-Age=${maxAgeSeconds}`, ...(isSecure() ? ['Secure'] : [])].join('; ')
+function isSecure(): boolean {
+  return appUrl()?.protocol === 'https:'
+}
+
+function isLocalHost(host: string): boolean {
+  return host === 'localhost' || host.endsWith('.localhost') || host === '127.0.0.1' || host === '::1' || host === '[::1]'
+}
+
+/**
+ * `.unconference.events` for `https://unconference.events` (or `www.`); null for a local
+ * or IP-literal origin, where a host-only cookie is the only kind that works.
+ */
+export function sessionCookieDomain(): string | null {
+  const url = appUrl()
+  if (!url) return null
+  const host = url.hostname.toLowerCase()
+  if (isLocalHost(host) || /^\d+\.\d+\.\d+\.\d+$/.test(host) || host.includes(':')) return null
+  return `.${host.replace(/^www\./, '')}`
+}
+
+function cookieAttributes(maxAgeSeconds: number, domain: string | null): string {
+  return [
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    `Max-Age=${maxAgeSeconds}`,
+    ...(domain ? [`Domain=${domain}`] : []),
+    ...(isSecure() ? ['Secure'] : []),
+  ].join('; ')
 }
 
 /** `Set-Cookie` header value that installs `value`. */
 export function sessionCookieHeader(value: string): string {
-  return `${AT_SESSION_COOKIE}=${value}; ${cookieAttributes(Math.floor(AT_SESSION_TTL_MS / 1000))}`
+  return `${AT_SESSION_COOKIE}=${value}; ${cookieAttributes(Math.floor(AT_SESSION_TTL_MS / 1000), sessionCookieDomain())}`
 }
 
-/** `Set-Cookie` header value that clears the cookie. */
+/**
+ * Every `Set-Cookie` value needed to clear the session: the domain-scoped cookie and,
+ * when a domain is in use, the host-only one too.
+ */
+export function clearSessionCookieHeaders(): string[] {
+  const domain = sessionCookieDomain()
+  const out = [`${AT_SESSION_COOKIE}=; ${cookieAttributes(0, domain)}`]
+  if (domain) out.push(`${AT_SESSION_COOKIE}=; ${cookieAttributes(0, null)}`)
+  return out
+}
+
+/** The first clearing header. Prefer `clearSessionCookieHeaders()`. */
 export function clearSessionCookieHeader(): string {
-  return `${AT_SESSION_COOKIE}=; ${cookieAttributes(0)}`
+  return clearSessionCookieHeaders()[0]!
 }
 
 /** Parse and verify a cookie value. Returns the session id or null. */
@@ -68,100 +115,90 @@ export function verifySessionCookie(value: string | undefined | null): string | 
   const id = value.slice(0, dot)
   const mac = value.slice(dot + 1)
   if (!/^[A-Za-z0-9_-]{20,}$/.test(id)) return null
-  const expected = sign(id)
+  let expected: string
+  try {
+    expected = sign(id)
+  } catch {
+    return null
+  }
   const a = Buffer.from(mac)
   const b = Buffer.from(expected)
   if (a.length !== b.length || !timingSafeEqual(a, b)) return null
   return id
 }
 
-function readCookieValue(source: SessionSource): string | undefined {
+export function readSessionCookieValue(source: SessionSource): string | undefined {
   if (source instanceof Request) {
     const header = source.headers.get('cookie') ?? ''
     for (const part of header.split(';')) {
       const [k, ...rest] = part.trim().split('=')
-      if (k === AT_SESSION_COOKIE) return decodeURIComponent(rest.join('='))
+      if (k === AT_SESSION_COOKIE) {
+        try {
+          return decodeURIComponent(rest.join('='))
+        } catch {
+          return undefined
+        }
+      }
     }
     return undefined
   }
   return source.get(AT_SESSION_COOKIE)?.value
 }
 
+/** The verified session id carried by `source` (or Next's request cookies), or null. */
+export async function sessionIdFrom(source?: SessionSource): Promise<string | null> {
+  const src = source ?? (await cookies())
+  return verifySessionCookie(readSessionCookieValue(src))
+}
+
 /**
- * Create a session row and return the cookie to set. `setCookie` is a
- * complete `Set-Cookie` header value; `value` is just the cookie's value for
- * callers that use Next's `cookies().set()`.
+ * Create a session row and return the cookie to set. `setCookie` is a complete
+ * `Set-Cookie` header value; `value` is just the cookie's value.
  */
 export async function createAtSession(input: {
   did: string
-  userId?: string | null
+  accountId: string
   kind: AtSessionKind
 }): Promise<{ id: string; value: string; setCookie: string; expiresAt: Date }> {
   const id = randomBytes(32).toString('base64url')
   const expiresAt = new Date(Date.now() + AT_SESSION_TTL_MS)
-  const db = await createAdminClient()
-  const { error } = await db.from('at_sessions').insert({
-    id,
-    did: input.did,
-    user_id: input.userId ?? null,
-    kind: input.kind,
-    expires_at: expiresAt.toISOString(),
-  })
-  if (error) throw new Error(`at_sessions insert: ${error.message}`)
+  await sql`
+    insert into at_sessions (id, did, user_id, kind, expires_at)
+    values (${id}, ${input.did}, ${input.accountId}, ${input.kind}, ${expiresAt})
+  `
   const value = `${id}.${sign(id)}`
   return { id, value, setCookie: sessionCookieHeader(value), expiresAt }
 }
 
 /**
- * Read the session from a `Request` (its `cookie` header) or a cookie reader
- * (`await cookies()`); when omitted, reads Next's request cookies. Verifies
- * the HMAC, loads the row, checks expiry. Null when absent or invalid.
+ * Read the session from a `Request` (its `cookie` header) or a cookie reader; when
+ * omitted, reads Next's request cookies. Verifies the HMAC, loads the row, checks expiry.
  */
 export async function readAtSession(source?: SessionSource): Promise<AtSession | null> {
-  const src = source ?? (await cookies())
-  const id = verifySessionCookie(readCookieValue(src))
+  const id = await sessionIdFrom(source)
   if (!id) return null
-  const db = await createAdminClient()
-  const { data, error } = await db
-    .from('at_sessions')
-    .select('id, did, user_id, kind, expires_at')
-    .eq('id', id)
-    .maybeSingle()
-  if (error) throw new Error(`at_sessions get: ${error.message}`)
-  if (!data) return null
-  const expiresAt = new Date(data.expires_at as string)
+  const rows = await sql<{ id: string; did: string; user_id: string; kind: AtSessionKind; expires_at: string }[]>`
+    select id, did, user_id, kind, expires_at from at_sessions where id = ${id}
+  `
+  const row = rows[0]
+  if (!row) return null
+  const expiresAt = new Date(row.expires_at)
   if (expiresAt.getTime() <= Date.now()) {
-    await db.from('at_sessions').delete().eq('id', id)
+    await sql`delete from at_sessions where id = ${id}`
     return null
   }
-  return {
-    id: data.id as string,
-    did: data.did as string,
-    userId: (data.user_id as string | null) ?? null,
-    kind: data.kind as AtSessionKind,
-    expiresAt,
-  }
+  return { id: row.id, did: row.did, accountId: row.user_id, userId: row.user_id, kind: row.kind, expiresAt }
 }
 
-/** Delete the session row (if any) and return the clearing `Set-Cookie` value. */
-export async function destroyAtSession(source?: SessionSource): Promise<string> {
-  const src = source ?? (await cookies())
-  const id = verifySessionCookie(readCookieValue(src))
-  if (id) {
-    const db = await createAdminClient()
-    await db.from('at_sessions').delete().eq('id', id)
-  }
-  return clearSessionCookieHeader()
+/** Delete the session row (if any) and return the clearing `Set-Cookie` values. */
+export async function destroyAtSession(source?: SessionSource): Promise<string[]> {
+  const id = await sessionIdFrom(source)
+  if (id) await sql`delete from at_sessions where id = ${id}`
+  return clearSessionCookieHeaders()
 }
 
 /** Housekeeping: drop expired rows. Safe to call from a cron. */
 export async function pruneExpiredAtSessions(): Promise<number> {
-  const db = await createAdminClient()
-  const { data, error } = await db
-    .from('at_sessions')
-    .delete()
-    .lt('expires_at', new Date().toISOString())
-    .select('id')
-  if (error) throw new Error(`at_sessions prune: ${error.message}`)
-  return data?.length ?? 0
+  const rows = await sql`delete from at_sessions where expires_at < now() returning id`
+  return rows.length
 }

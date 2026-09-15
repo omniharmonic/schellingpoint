@@ -1,31 +1,32 @@
 import 'server-only'
 /**
- * The bridge between an ATProto identity (a DID) and a Supabase auth user.
+ * The bridge between an ATProto OAuth callback and our `accounts` table.
  *
  *  - `encodeOAuthState` / `verifyOAuthState`   the opaque `state` we hand to
  *    `authorizeUrl` and get back from `handleCallback`. Signed with
  *    `ATPROTO_SESSION_SECRET`, so the callback can trust the purpose, the
- *    return path, the event and the acting user without a state table.
- *  - `ensureSupabaseUserForDid`   find-or-create the Supabase user a DID signs
- *    in as (`<did-with-dashes>@atproto.schellingpoint.app`, never mailed).
- *  - `linkDidToProfile`   attach a DID to an existing member.
+ *    return path, the event and the acting account without a state table.
+ *  - `findOrCreateOAuthAccount`   the `accounts` row (kind `oauth`) a DID signs in
+ *    as. One account = one DID: a DID that already has a row (custodial or oauth)
+ *    signs in AS that row; it is never attached to a different account.
  *  - `attachGatheringActor`   record a DID as an event's actor (OAuth credential).
- *  - `mintSupabaseSession`   `generateLink` → `verifyOtp`, server-side, so the
- *    browser can land on `/auth/callback#access_token=…` exactly as it does
- *    after a magic link.
- *  - `unlinkDid`   detach a DID from a member and forget its sessions.
+ *
+ * There is no session minting here any more: the `sp_at_session` cookie IS the
+ * session (`session.ts`), for both doors.
  *
  * State wire format:
  *   `<base64url(JSON payload)>.<base64url(HMAC-SHA256(payloadB64, secret))>`
  *   payload = { v: 1, purpose, next, eventId?, userId?, nonce, iat }
  */
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
-import { createClient as createSupabaseClient } from '@supabase/supabase-js'
-import { createAdminClient } from '@/lib/supabase/server'
+import { sql, tx } from '@/lib/db'
 import { safeReturnPath } from '@/lib/auth-redirect'
 import { sessionSecret } from './config'
-import { revokeOAuthSession } from './oauth'
 
+/**
+ * `link` is recognised only so it can be refused: attaching an OAuth identity to an
+ * account that already has one (every account does) is not allowed.
+ */
 export const OAUTH_PURPOSES = ['signin', 'link', 'gathering'] as const
 export type OAuthPurpose = (typeof OAUTH_PURPOSES)[number]
 
@@ -40,7 +41,7 @@ export interface OAuthStatePayload {
   next: string
   /** `gathering` only: the event whose actor is being connected. */
   eventId?: string
-  /** `link` and `gathering`: the signed-in Supabase user who started the flow. */
+  /** `link` and `gathering`: the signed-in account (`accounts.id`) that started the flow. */
   userId?: string
   nonce: string
   /** Unix seconds. */
@@ -50,20 +51,10 @@ export interface OAuthStatePayload {
 /** A state older than this is refused; the PDS consent screen never takes longer. */
 export const OAUTH_STATE_TTL_SECONDS = 15 * 60
 
-/** Sign-in accounts created for a DID live under this domain. Never mailed. */
-export const ATPROTO_EMAIL_DOMAIN = 'atproto.schellingpoint.app'
-
 export class OAuthStateError extends Error {
   constructor(detail: string) {
     super(`invalid oauth state: ${detail}`)
     this.name = 'OAuthStateError'
-  }
-}
-
-export class DidAlreadyLinkedError extends Error {
-  constructor(readonly did: string) {
-    super(`${did} is already linked to another account`)
-    this.name = 'DidAlreadyLinkedError'
   }
 }
 
@@ -139,107 +130,58 @@ export function verifyOAuthState(state: string | null | undefined): OAuthStatePa
 /* ─────────────────────────── authorization ─────────────────────────── */
 
 /** Owner or admin of `eventId`? */
-export async function isEventOrganizer(userId: string, eventId: string): Promise<boolean> {
-  const db = await createAdminClient()
-  const { data, error } = await db
-    .from('event_members')
-    .select('role')
-    .eq('event_id', eventId)
-    .eq('user_id', userId)
-    .maybeSingle()
-  if (error) throw new Error(`event_members get: ${error.message}`)
-  return data?.role === 'owner' || data?.role === 'admin'
+export async function isEventOrganizer(accountId: string, eventId: string): Promise<boolean> {
+  const rows = await sql<{ role: string }[]>`
+    select role from event_members where event_id = ${eventId} and user_id = ${accountId}
+  `
+  const role = rows[0]?.role
+  return role === 'owner' || role === 'admin'
 }
 
-/* ───────────────────────── Supabase user bridge ───────────────────────── */
+/* ───────────────────────── accounts ───────────────────────── */
 
-/** The synthetic, never-mailed address a DID-only account signs in under. */
-export function emailForDid(did: string): string {
-  return `${did.replace(/[^a-z0-9]/gi, '-').toLowerCase()}@${ATPROTO_EMAIL_DOMAIN}`
-}
-
-export function isDidOnlyEmail(email: string | null | undefined): boolean {
-  return !!email && email.toLowerCase().endsWith(`@${ATPROTO_EMAIL_DOMAIN}`)
-}
-
-export interface BridgedUser {
-  userId: string
-  email: string
+export interface BridgedAccount {
+  accountId: string
+  did: string
+  kind: 'custodial' | 'oauth'
   created: boolean
 }
 
 /**
- * The Supabase user for a DID: the profile already carrying `did`, else a
- * fresh auth user (email confirmed) whose `profiles` row `handle_new_user`
- * creates. Sets `did` / `atproto_handle` / `atproto_linked_at` on the profile.
+ * The account a DID signs in as through the Bluesky door: its existing `accounts` row
+ * (whatever the kind), else a new `kind = 'oauth'` row with `email = NULL`. The profile
+ * row is created by the accounts trigger; its `did` / `atproto_handle` are filled here.
  */
-export async function ensureSupabaseUserForDid(did: string, handle: string | null): Promise<BridgedUser> {
-  const db = await createAdminClient()
-
-  const { data: existing, error: lookupError } = await db
-    .from('profiles')
-    .select('id, email, atproto_handle')
-    .eq('did', did)
-    .maybeSingle()
-  if (lookupError) throw new Error(`profiles lookup by did: ${lookupError.message}`)
-
-  if (existing) {
-    const userId = existing.id as string
-    // `profiles.email` mirrors auth at creation; the auth record is authoritative.
-    const { data: authUser } = await db.auth.admin.getUserById(userId)
-    const email = authUser?.user?.email ?? (existing.email as string)
-    if (!email) throw new Error(`user ${userId} has no email to mint a session for`)
-    if (handle && handle !== existing.atproto_handle) {
-      await db.from('profiles').update({ atproto_handle: handle }).eq('id', userId)
+export async function findOrCreateOAuthAccount(did: string, handle: string | null): Promise<BridgedAccount> {
+  return tx(async (t) => {
+    await t`select pg_advisory_xact_lock(hashtext(${did}))`
+    const existing = await t<{ id: string; kind: 'custodial' | 'oauth'; handle: string | null }[]>`
+      select id, kind, handle from accounts where did = ${did}
+    `
+    if (existing[0]) {
+      const row = existing[0]
+      if (handle && handle !== row.handle) {
+        await t`update accounts set handle = ${handle} where id = ${row.id}`
+        await t`update profiles set atproto_handle = ${handle} where id = ${row.id}`
+      }
+      return { accountId: row.id, did, kind: row.kind, created: false }
     }
-    return { userId, email, created: false }
-  }
-
-  const email = emailForDid(did)
-  let userId: string | undefined
-  const { data: created, error: createError } = await db.auth.admin.createUser({
-    email,
-    email_confirm: true,
-    user_metadata: { did, handle, display_name: handle ?? did },
+    const inserted = await t<{ id: string }[]>`
+      insert into accounts (did, handle, email, kind) values (${did}, ${handle}, null, 'oauth') returning id
+    `
+    const accountId = inserted[0]!.id
+    await t`
+      update profiles set did = ${did}, atproto_handle = ${handle}, atproto_linked_at = coalesce(atproto_linked_at, now())
+      where id = ${accountId}
+    `
+    return { accountId, did, kind: 'oauth' as const, created: true }
   })
-  if (createError) {
-    // The auth user survived an earlier unlink; recover it through generateLink,
-    // which returns the user for an existing address without sending mail.
-    const { data: linkData, error: linkError } = await db.auth.admin.generateLink({ type: 'magiclink', email })
-    if (linkError || !linkData?.user) throw new Error(`createUser: ${createError.message}`)
-    userId = linkData.user.id
-  } else {
-    userId = created.user.id
-  }
-
-  // The trigger inserted the profile inside the same transaction as auth.users.
-  const { error: updateError } = await db
-    .from('profiles')
-    .update({ did, atproto_handle: handle, atproto_linked_at: new Date().toISOString() })
-    .eq('id', userId)
-  if (updateError) throw new Error(`profiles link: ${updateError.message}`)
-
-  return { userId, email, created: true }
-}
-
-/** Attach `did` to an existing member. Throws `DidAlreadyLinkedError` when another profile owns it. */
-export async function linkDidToProfile(userId: string, did: string, handle: string | null): Promise<void> {
-  const db = await createAdminClient()
-  const { data: holder, error: lookupError } = await db.from('profiles').select('id').eq('did', did).maybeSingle()
-  if (lookupError) throw new Error(`profiles lookup by did: ${lookupError.message}`)
-  if (holder && holder.id !== userId) throw new DidAlreadyLinkedError(did)
-
-  const { error } = await db
-    .from('profiles')
-    .update({ did, atproto_handle: handle, atproto_linked_at: new Date().toISOString() })
-    .eq('id', userId)
-  if (error) throw new Error(`profiles link: ${error.message}`)
 }
 
 /**
- * Record `did` as the gathering actor for `eventId`. The OAuth session the
- * library stored under the DID is the credential; `at_credentials` only
- * remembers that it exists and who connected it.
+ * Record `did` as the gathering actor for `eventId`. The OAuth session the library stored
+ * under the DID is the credential; `at_credentials` only remembers that it exists and who
+ * connected it.
  */
 export async function attachGatheringActor(input: {
   eventId: string
@@ -248,90 +190,15 @@ export async function attachGatheringActor(input: {
   pdsUrl: string | null
   userId: string
 }): Promise<void> {
-  const db = await createAdminClient()
-  const { error: credError } = await db.from('at_credentials').upsert(
-    {
-      did: input.did,
-      kind: 'oauth',
-      identifier: input.handle,
-      wrapped: null,
-      key_version: null,
-      pds_url: input.pdsUrl,
-      created_by: input.userId,
-      rotated_at: new Date().toISOString(),
-      last_error: null,
-      last_error_at: null,
-    },
-    { onConflict: 'did' },
-  )
-  if (credError) throw new Error(`at_credentials upsert: ${credError.message}`)
-
-  const { error: eventError } = await db
-    .from('events')
-    .update({ actor_did: input.did, actor_handle: input.handle })
-    .eq('id', input.eventId)
-  if (eventError) throw new Error(`events set actor: ${eventError.message}`)
-}
-
-/* ───────────────────────── session minting ───────────────────────── */
-
-export interface MintedSession {
-  access_token: string
-  refresh_token: string
-  expires_in: number
-}
-
-/**
- * A Supabase session for `email` without any mail: the admin client issues a
- * magic-link token hash, the anon client redeems it. The result is what the
- * implicit flow would have put in the URL hash.
- */
-export async function mintSupabaseSession(email: string): Promise<MintedSession> {
-  const admin = await createAdminClient()
-  const { data, error } = await admin.auth.admin.generateLink({ type: 'magiclink', email })
-  if (error || !data?.properties?.hashed_token) throw new Error(`generateLink: ${error?.message ?? 'no token'}`)
-
-  const anon = createSupabaseClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!, {
-    auth: { autoRefreshToken: false, persistSession: false, detectSessionInUrl: false },
+  await tx(async (t) => {
+    await t`
+      insert into at_credentials (did, kind, identifier, wrapped, key_version, pds_url, created_by, rotated_at, last_error, last_error_at)
+      values (${input.did}, 'oauth', ${input.handle}, null, null, ${input.pdsUrl}, ${input.userId}, now(), null, null)
+      on conflict (did) do update set
+        kind = excluded.kind, identifier = excluded.identifier, wrapped = null, key_version = null,
+        pds_url = excluded.pds_url, created_by = excluded.created_by, rotated_at = now(),
+        last_error = null, last_error_at = null
+    `
+    await t`update events set actor_did = ${input.did}, actor_handle = ${input.handle} where id = ${input.eventId}`
   })
-  const { data: verified, error: verifyError } = await anon.auth.verifyOtp({
-    token_hash: data.properties.hashed_token,
-    type: 'magiclink',
-  })
-  if (verifyError || !verified.session) throw new Error(`verifyOtp: ${verifyError?.message ?? 'no session'}`)
-  const s = verified.session
-  return { access_token: s.access_token, refresh_token: s.refresh_token, expires_in: s.expires_in }
-}
-
-/** The `/auth/callback` URL that installs a minted session, exactly as a magic link would. */
-export function implicitCallbackPath(session: MintedSession, next: string): string {
-  const hash = new URLSearchParams({
-    access_token: session.access_token,
-    refresh_token: session.refresh_token,
-    expires_in: String(session.expires_in),
-    token_type: 'bearer',
-  })
-  return `/auth/callback?next=${encodeURIComponent(safeReturnPath(next))}#${hash.toString()}`
-}
-
-/* ───────────────────────────── unlink ───────────────────────────── */
-
-/**
- * Detach a DID from a member: clear the profile columns, drop browser
- * sessions bound to the DID, revoke the stored OAuth session (best-effort).
- */
-export async function unlinkDid(userId: string, did: string): Promise<void> {
-  const db = await createAdminClient()
-  const { error } = await db
-    .from('profiles')
-    .update({ did: null, atproto_handle: null, atproto_linked_at: null, publish_proposals: false })
-    .eq('id', userId)
-    .eq('did', did)
-  if (error) throw new Error(`profiles unlink: ${error.message}`)
-  await db.from('at_sessions').delete().eq('did', did)
-  try {
-    await revokeOAuthSession(did)
-  } catch (e) {
-    console.warn('[atproto] revoke on unlink failed:', describe(e))
-  }
 }

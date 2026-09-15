@@ -1,0 +1,16 @@
+node_modules
+.next
+.next-dev
+.git
+.env
+.env.*
+!.env.example
+test-results
+playwright-report
+screenshots
+supabase/.temp
+deploy/local/pds.env
+deploy/unconference/.env
+deploy/unconference/backups
+.playwright-mcp
+*.log

@@ -2,20 +2,24 @@ import 'server-only'
 /**
  * An authenticated `Agent` for a DID's OWN repo.
  *
- * Two doors, one shape:
- *   - `app-password`  a credential we custody (`at_credentials`, AES-wrapped):
- *                     the gathering actor, or a custodial member account.
- *                     Logged in once per process and cached; re-login on
- *                     `ExpiredToken` / 401.
- *   - `oauth`         restore the stored OAuth session and wrap it in an `Agent`.
+ * Where the credential comes from:
+ *   - `accounts` kind `custodial`  the wrapped password we hold for a member minted on our
+ *                                  PDS. Logged in against `PDS_INTERNAL_URL`, cached per
+ *                                  DID, re-login on `ExpiredToken` / 401. Refused
+ *                                  (`NoActorCredentialError`) once the member has taken
+ *                                  ownership (`owned_at` set) — from then on publishing
+ *                                  needs a real sign-in through the Bluesky door.
+ *   - `accounts` kind `oauth`      the stored OAuth session, restored and wrapped.
+ *   - `at_credentials`             gathering actors: `app-password` (minted on our PDS,
+ *                                  wrapped) or `oauth` (an organizer's existing account).
  *
- * Mirrors Free School's `apps/appview/src/lib/actor-agent.ts`. The gathering
- * actor's agent must only ever be obtained through `actor.ts` so every write
- * as the gathering is authorised and audited.
+ * Mirrors Free School's `apps/appview/src/lib/actor-agent.ts`. The gathering actor's agent
+ * must only ever be obtained through `actor.ts` so every write as the gathering is
+ * authorised and audited.
  */
 import { Agent, AtpAgent, XRPCError } from '@atproto/api'
-import { createAdminClient } from '@/lib/supabase/server'
-import { defaultPdsUrl } from './config'
+import { sql } from '@/lib/db'
+import { defaultPdsUrl, pdsInternalUrl } from './config'
 import { unwrapSecret } from './crypto'
 import { restoreOAuthSession } from './oauth'
 
@@ -26,55 +30,77 @@ export class NoActorCredentialError extends Error {
   }
 }
 
+/** Thrown when an account id names no account (kept under its historical name). */
 export class ProfileNotLinkedError extends Error {
   constructor(readonly userId: string) {
-    super(`profile ${userId} has no linked DID`)
+    super(`account ${userId} has no DID`)
     this.name = 'ProfileNotLinkedError'
   }
+}
+
+interface AccountRow {
+  id: string
+  did: string
+  handle: string | null
+  kind: 'custodial' | 'oauth'
+  wrapped_password: Buffer | null
+  key_version: string | null
+  owned_at: string | null
 }
 
 interface CredentialRow {
   did: string
   kind: 'oauth' | 'app-password'
   identifier: string | null
-  wrapped: string | null
+  wrapped: Buffer | null
   key_version: string | null
   pds_url: string | null
 }
 
 const cache = new Map<string, AtpAgent>()
 
+/** A credential row's `pds_url` names the public PDS; reach our own through the internal URL. */
+function serviceFor(pdsUrl: string | null): string {
+  const url = (pdsUrl ?? defaultPdsUrl()).replace(/\/+$/, '')
+  return url === defaultPdsUrl() ? pdsInternalUrl() : url
+}
+
+async function loadAccountById(accountId: string): Promise<AccountRow | null> {
+  const rows = await sql<AccountRow[]>`
+    select id, did, handle, kind, wrapped_password, key_version, owned_at from accounts where id = ${accountId}
+  `
+  return rows[0] ?? null
+}
+
+async function loadAccountByDid(did: string): Promise<AccountRow | null> {
+  const rows = await sql<AccountRow[]>`
+    select id, did, handle, kind, wrapped_password, key_version, owned_at from accounts where did = ${did}
+  `
+  return rows[0] ?? null
+}
+
 async function loadCredential(did: string): Promise<CredentialRow | null> {
-  const db = await createAdminClient()
-  const { data, error } = await db
-    .from('at_credentials')
-    .select('did, kind, identifier, wrapped, key_version, pds_url')
-    .eq('did', did)
-    .maybeSingle()
-  if (error) throw new Error(`at_credentials get: ${error.message}`)
-  return (data as CredentialRow | null) ?? null
+  const rows = await sql<CredentialRow[]>`
+    select did, kind, identifier, wrapped, key_version, pds_url from at_credentials where did = ${did}
+  `
+  return rows[0] ?? null
 }
 
 async function markCredential(did: string, ok: boolean, message?: string): Promise<void> {
-  const db = await createAdminClient()
-  const now = new Date().toISOString()
-  await db
-    .from('at_credentials')
-    .update(ok ? { last_ok_at: now, last_error: null } : { last_error_at: now, last_error: message?.slice(0, 500) ?? 'error' })
-    .eq('did', did)
+  try {
+    if (ok) await sql`update at_credentials set last_ok_at = now(), last_error = null where did = ${did}`
+    else {
+      const detail = message?.slice(0, 500) ?? 'error'
+      await sql`update at_credentials set last_error_at = now(), last_error = ${detail} where did = ${did}`
+    }
+  } catch {
+    // Bookkeeping only.
+  }
 }
 
-async function loginWithAppPassword(row: CredentialRow): Promise<AtpAgent> {
-  if (!row.wrapped || !row.key_version || !row.identifier) throw new NoActorCredentialError(row.did)
-  const password = unwrapSecret(row.wrapped, row.key_version)
-  const agent = new AtpAgent({ service: row.pds_url ?? defaultPdsUrl() })
-  try {
-    await agent.login({ identifier: row.identifier, password })
-  } catch (e) {
-    await markCredential(row.did, false, e instanceof Error ? e.message : String(e))
-    throw e
-  }
-  await markCredential(row.did, true)
+async function login(service: string, identifier: string, password: string): Promise<AtpAgent> {
+  const agent = new AtpAgent({ service })
+  await agent.login({ identifier, password })
   return agent
 }
 
@@ -84,40 +110,80 @@ export function isAuthExpiredError(e: unknown): boolean {
   return err?.status === 401 || err?.error === 'ExpiredToken' || err?.error === 'InvalidToken'
 }
 
-/** Drop a cached app-password agent (after rotation, or on auth failure). */
+/** Drop a cached password agent (after rotation, take-ownership, or an auth failure). */
 export function evictAgent(did: string): void {
   cache.delete(did)
 }
 
+async function agentForAccountRow(account: AccountRow, opts: { fresh?: boolean }): Promise<Agent> {
+  if (account.kind === 'oauth') {
+    try {
+      return new Agent(await restoreOAuthSession(account.did))
+    } catch {
+      throw new NoActorCredentialError(account.did)
+    }
+  }
+  if (account.owned_at || !account.wrapped_password || !account.key_version) {
+    evictAgent(account.did)
+    throw new NoActorCredentialError(account.did)
+  }
+  if (!opts.fresh) {
+    const cached = cache.get(account.did)
+    if (cached?.session) return cached
+  }
+  const password = unwrapSecret(account.wrapped_password, account.key_version)
+  const agent = await login(pdsInternalUrl(), account.did, password)
+  cache.set(account.did, agent)
+  return agent
+}
+
+/** Agent for a member's own repo, by `accounts.id`. */
+export async function agentForAccount(accountId: string, opts: { fresh?: boolean } = {}): Promise<Agent> {
+  const account = await loadAccountById(accountId)
+  if (!account) throw new ProfileNotLinkedError(accountId)
+  return agentForAccountRow(account, opts)
+}
+
+/** @deprecated alias of `agentForAccount` — the old name read `profiles.did`. */
+export const agentForUser = agentForAccount
+
 /**
- * Agent for `did`. Throws `NoActorCredentialError` when we hold nothing usable.
- * App-password agents are cached per DID; pass `{ fresh: true }` to force a
- * re-login (the caller saw `ExpiredToken`/401).
+ * Agent for `did`: an `accounts` row first (members), else `at_credentials` (gathering
+ * actors). Throws `NoActorCredentialError` when we hold nothing usable.
  */
 export async function agentForDid(did: string, opts: { fresh?: boolean } = {}): Promise<Agent> {
+  const account = await loadAccountByDid(did)
+  if (account) return agentForAccountRow(account, opts)
+
   const row = await loadCredential(did)
   if (row?.kind === 'app-password') {
     if (!opts.fresh) {
       const cached = cache.get(did)
       if (cached?.session) return cached
     }
-    const agent = await loginWithAppPassword(row)
-    cache.set(did, agent)
-    return agent
+    if (!row.wrapped || !row.key_version || !row.identifier) throw new NoActorCredentialError(did)
+    const password = unwrapSecret(row.wrapped, row.key_version)
+    try {
+      const agent = await login(serviceFor(row.pds_url), row.identifier, password)
+      await markCredential(did, true)
+      cache.set(did, agent)
+      return agent
+    } catch (e) {
+      await markCredential(did, false, e instanceof Error ? e.message : String(e))
+      throw e
+    }
   }
-  // OAuth: either an explicit `oauth` credential row or none at all — the
-  // stored OAuth session (at_oauth_session) is the credential.
+  // OAuth: an explicit `oauth` credential row or none at all — the stored OAuth session is the credential.
   try {
-    const session = await restoreOAuthSession(did)
-    return new Agent(session)
+    return new Agent(await restoreOAuthSession(did))
   } catch {
     throw new NoActorCredentialError(did)
   }
 }
 
 /**
- * Run `fn` with an agent for `did`, retrying once with a fresh login when the
- * PDS reports an expired/invalid token. Use this around any write.
+ * Run `fn` with an agent for `did`, retrying once with a fresh login when the PDS reports
+ * an expired/invalid token. Use this around any write.
  */
 export async function withAgentForDid<T>(did: string, fn: (agent: Agent) => Promise<T>): Promise<T> {
   const agent = await agentForDid(did)
@@ -128,14 +194,4 @@ export async function withAgentForDid<T>(did: string, fn: (agent: Agent) => Prom
     evictAgent(did)
     return fn(await agentForDid(did, { fresh: true }))
   }
-}
-
-/** Resolve `profiles.did` for a Supabase user, then `agentForDid`. */
-export async function agentForUser(userId: string): Promise<Agent> {
-  const db = await createAdminClient()
-  const { data, error } = await db.from('profiles').select('did').eq('id', userId).maybeSingle()
-  if (error) throw new Error(`profiles get: ${error.message}`)
-  const did = (data?.did as string | null) ?? null
-  if (!did) throw new ProfileNotLinkedError(userId)
-  return agentForDid(did)
 }

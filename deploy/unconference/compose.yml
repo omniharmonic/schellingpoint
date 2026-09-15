@@ -1,0 +1,176 @@
+# unconference.events production stack: Caddy · AppView (Next.js) · indexer · scheduler · Postgres · PDS.
+#
+# Runs on frontrange-twin-1 beside the Bioregional Twin, as its own compose project. It shares
+# nothing with the Twin: separate network, separate volumes, separate ports (only Caddy publishes
+# 80/443). From the repository root on the server:
+#
+#   docker compose --env-file deploy/unconference/.env -f deploy/unconference/compose.yml -p unconference up -d --build
+#
+# Every secret comes from deploy/unconference/.env (never committed; see .env.example).
+name: unconference
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: unconference
+      POSTGRES_DB: unconference
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U unconference -d unconference']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    # 1 GB is ample for this workload and keeps the Twin's database comfortable on the same box.
+    mem_limit: 1g
+
+  # Our own reference PDS: custodial member accounts and every gathering account live here.
+  # PDS_HOSTNAME is written into every DID document it mints; it must never change casually
+  # (see docs/ATPROTO_APPVIEW_PLAN.md §6 item 4 and the spec §12).
+  pds:
+    image: ghcr.io/bluesky-social/pds:0.4
+    restart: unless-stopped
+    environment:
+      PDS_HOSTNAME: ${PDS_HOST:?Set PDS_HOST}
+      PDS_SERVICE_HANDLE_DOMAINS: .${PDS_HANDLE_DOMAIN:?Set PDS_HANDLE_DOMAIN}
+      PDS_JWT_SECRET: ${PDS_JWT_SECRET:?Set PDS_JWT_SECRET}
+      PDS_ADMIN_PASSWORD: ${PDS_ADMIN_PASSWORD:?Set PDS_ADMIN_PASSWORD}
+      PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX: ${PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX:?Set the rotation key}
+      PDS_DATA_DIRECTORY: /pds
+      PDS_BLOBSTORE_DISK_LOCATION: /pds/blocks
+      PDS_BLOB_UPLOAD_LIMIT: '52428800'
+      PDS_DID_PLC_URL: https://plc.directory
+      PDS_BSKY_APP_VIEW_URL: https://api.bsky.app
+      PDS_BSKY_APP_VIEW_DID: did:web:api.bsky.app
+      PDS_REPORT_SERVICE_URL: https://mod.bsky.app
+      PDS_REPORT_SERVICE_DID: did:plc:ar7c4by46qjdydhdevvrndac
+      # Announce to the relay so every public record reaches the firehose (spec §10, risk 7:
+      # decided on for unconference.events).
+      PDS_CRAWLERS: ${PDS_CRAWLERS:-https://bsky.network}
+      # Only the AppView mints accounts, via admin invite codes.
+      PDS_INVITE_REQUIRED: 'true'
+      PDS_EMAIL_SMTP_URL: ${SMTP_URL:?Set SMTP_URL}
+      PDS_EMAIL_FROM_ADDRESS: ${PDS_EMAIL_FROM:?Set PDS_EMAIL_FROM}
+      LOG_ENABLED: 'true'
+      PDS_PORT: '3000'
+    volumes:
+      - pds:/pds
+    healthcheck:
+      test: [CMD, wget, -qO-, 'http://localhost:3000/xrpc/_health']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  # One-shot: applies db/migrations and ensures the app login role. `up` runs it before the app.
+  migrate:
+    build:
+      context: ../..
+      dockerfile: deploy/unconference/Dockerfile
+      args:
+        NEXT_PUBLIC_APP_URL: https://${WEB_HOST:?Set WEB_HOST}
+    image: unconference-app:${RELEASE:-current}
+    restart: 'no'
+    command: [node, scripts/db-migrate.mjs]
+    environment:
+      DATABASE_URL: postgres://unconference:${POSTGRES_PASSWORD}@postgres:5432/unconference
+      APP_DB_USER: unconference_app
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?Set APP_DB_PASSWORD}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  app:
+    image: unconference-app:${RELEASE:-current}
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    environment: &app-env
+      NODE_ENV: production
+      PORT: '3000'
+      HOSTNAME: 0.0.0.0
+      NEXT_PUBLIC_APP_URL: https://${WEB_HOST}
+      DATABASE_URL: postgres://unconference_app:${APP_DB_PASSWORD}@postgres:5432/unconference
+      # Clients (and DID documents) see the PDS through Caddy; the app talks to it directly.
+      PDS_URL: https://${PDS_HOST}
+      PDS_INTERNAL_URL: http://pds:3000
+      PDS_HANDLE_DOMAIN: ${PDS_HANDLE_DOMAIN}
+      UPLOADS_DIR: /data/uploads
+    volumes:
+      - uploads:/data/uploads
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      pds:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://localhost:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+    stop_grace_period: 30s
+
+  # Jetstream consumer: indexes public records from our PDS and from linked accounts elsewhere.
+  indexer:
+    image: unconference-app:${RELEASE:-current}
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    environment: *app-env
+    command: [npm, run, atproto:indexer]
+    depends_on:
+      app:
+        condition: service_healthy
+
+  # Cron without cron: each loop is one line of curl against the app's authenticated job routes.
+  scheduler:
+    image: curlimages/curl:8.16.0
+    restart: unless-stopped
+    environment:
+      CRON_SECRET: ${CRON_SECRET:?Set CRON_SECRET}
+    entrypoint: [/bin/sh, -c]
+    command:
+      - |
+        job() { curl -fsS -m 280 -H "Authorization: Bearer $$CRON_SECRET" "http://app:3000$$1" -o /dev/null || echo "job $$1 failed"; }
+        n=0
+        while true; do
+          job /api/jobs/close-rounds
+          [ $$((n % 5)) -eq 0 ] && job /api/notifications/dispatch
+          [ $$((n % 60)) -eq 0 ] && job /api/atproto/sync
+          [ $$((n % 1440)) -eq 0 ] && job /api/jobs/retention
+          n=$$((n + 1))
+          sleep 60
+        done
+    depends_on:
+      app:
+        condition: service_healthy
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      WEB_HOST: ${WEB_HOST}
+      PDS_HOST: ${PDS_HOST}
+      PDS_HANDLE_DOMAIN: ${PDS_HANDLE_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    ports:
+      - '80:80'
+      - '443:443'
+      - '443:443/udp'
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+      - pds
+
+volumes:
+  postgres:
+  pds:
+  uploads:
+  caddy_data:
+  caddy_config:

@@ -1,23 +1,18 @@
-import { createAdminClient } from '@/lib/supabase/server'
+import 'server-only'
+import { getViewer } from '@/lib/auth/viewer'
+
+export interface RequestUser {
+  /** `accounts.id` (also `profiles.id`). */
+  id: string
+  email: string | null
+}
 
 /**
- * Extract authenticated user from the Authorization header.
- * This app uses localStorage-based auth with explicit Bearer tokens,
- * not cookie-based auth, so we verify the token via the admin client.
+ * Compatibility shim over `getViewer` (plan §3.2): the signed-in account from the
+ * `sp_at_session` cookie, or null. Routes not yet converted keep compiling; new code
+ * should use `requireViewer` / `requireEventRole` from `@/lib/auth/viewer` directly.
  */
-export async function getUserFromRequest(request: Request) {
-  const authHeader = request.headers.get('Authorization')
-  if (!authHeader?.startsWith('Bearer ')) {
-    return null
-  }
-
-  const token = authHeader.slice(7)
-  const admin = await createAdminClient()
-  const { data: { user }, error } = await admin.auth.getUser(token)
-
-  if (error || !user) {
-    return null
-  }
-
-  return user
+export async function getUserFromRequest(request: Request): Promise<RequestUser | null> {
+  const viewer = await getViewer(request)
+  return viewer ? { id: viewer.accountId, email: viewer.email } : null
 }

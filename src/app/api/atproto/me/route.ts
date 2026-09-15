@@ -1,19 +1,17 @@
 import { NextResponse } from 'next/server'
-import { getUserFromRequest } from '@/lib/api/getUser'
-import { createAdminClient } from '@/lib/supabase/server'
+import { sql } from '@/lib/db'
 import { isAtprotoConfigured, oauthMode } from '@/lib/atproto/config'
-import { clearSessionCookieHeader } from '@/lib/atproto/session'
-import { describe, isDidOnlyEmail, unlinkDid } from '@/lib/atproto/bridge'
+import { describe } from '@/lib/atproto/bridge'
+import { assertSameOrigin, getViewer, requireViewer, type Viewer } from '@/lib/auth/viewer'
 
 /**
  * The signed-in member's ATProto identity.
  *
- *   GET     `{ configured, oauthMode, linked, did, handle, publishProposals }`
- *           — works without a bearer too (then `linked: false`), so the login
- *           page can learn whether the feature is on.
+ *   GET     `{ configured, oauthMode, linked, did, handle, kind, owned, publishProposals }`
+ *           — also answers signed out (`linked: false`) so the login page can learn
+ *           whether the Bluesky door is on.
  *   PATCH   `{ publish_proposals: boolean }`
- *   DELETE  unlink. Refused (409 `primary_identity`) for an account whose only
- *           way in is the DID — unlinking it would lock the member out.
+ *   DELETE  refused (409): every account IS its identity; there is nothing to unlink.
  */
 export const dynamic = 'force-dynamic'
 
@@ -23,32 +21,32 @@ function base() {
   return { configured: isAtprotoConfigured(), oauthMode: oauthMode() }
 }
 
-async function loadIdentity(userId: string) {
-  const db = await createAdminClient()
-  const { data, error } = await db
-    .from('profiles')
-    .select('did, atproto_handle, publish_proposals')
-    .eq('id', userId)
-    .maybeSingle()
-  if (error) throw new Error(`profiles get: ${error.message}`)
+async function loadIdentity(viewer: Viewer) {
+  const rows = await sql<{ owned_at: string | null; publish_proposals: boolean | null }[]>`
+    select a.owned_at, p.publish_proposals
+    from accounts a left join profiles p on p.id = a.id
+    where a.id = ${viewer.accountId}
+  `
   return {
-    linked: !!data?.did,
-    did: (data?.did as string | null) ?? null,
-    handle: (data?.atproto_handle as string | null) ?? null,
-    publishProposals: Boolean(data?.publish_proposals),
+    linked: true,
+    did: viewer.did,
+    handle: viewer.handle,
+    kind: viewer.kind,
+    owned: viewer.kind === 'oauth' || Boolean(rows[0]?.owned_at),
+    publishProposals: Boolean(rows[0]?.publish_proposals),
   }
 }
 
 export async function GET(request: Request) {
-  const user = await getUserFromRequest(request)
-  if (!user) {
-    return NextResponse.json(
-      { ...base(), linked: false, did: null, handle: null, publishProposals: false },
-      { headers: NO_STORE },
-    )
-  }
   try {
-    return NextResponse.json({ ...base(), ...(await loadIdentity(user.id)) }, { headers: NO_STORE })
+    const viewer = await getViewer(request)
+    if (!viewer) {
+      return NextResponse.json(
+        { ...base(), linked: false, did: null, handle: null, kind: null, owned: false, publishProposals: false },
+        { headers: NO_STORE },
+      )
+    }
+    return NextResponse.json({ ...base(), ...(await loadIdentity(viewer)) }, { headers: NO_STORE })
   } catch (e) {
     console.error('[atproto] me GET failed:', describe(e))
     return NextResponse.json({ error: 'internal' }, { status: 500 })
@@ -56,8 +54,10 @@ export async function GET(request: Request) {
 }
 
 export async function PATCH(request: Request) {
-  const user = await getUserFromRequest(request)
-  if (!user) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
+  const refused = assertSameOrigin(request)
+  if (refused) return refused
+  const viewer = await requireViewer(request)
+  if (viewer instanceof Response) return viewer
 
   let body: unknown
   try {
@@ -66,13 +66,13 @@ export async function PATCH(request: Request) {
     return NextResponse.json({ error: 'invalid_json' }, { status: 400 })
   }
   const publish = (body as { publish_proposals?: unknown } | null)?.publish_proposals
-  if (typeof publish !== 'boolean') return NextResponse.json({ error: 'publish_proposals must be boolean' }, { status: 400 })
+  if (typeof publish !== 'boolean') {
+    return NextResponse.json({ error: 'publish_proposals must be boolean', field: 'publish_proposals' }, { status: 400 })
+  }
 
   try {
-    const db = await createAdminClient()
-    const { error } = await db.from('profiles').update({ publish_proposals: publish }).eq('id', user.id)
-    if (error) throw new Error(`profiles update: ${error.message}`)
-    return NextResponse.json({ ...base(), ...(await loadIdentity(user.id)) }, { headers: NO_STORE })
+    await sql`update profiles set publish_proposals = ${publish} where id = ${viewer.accountId}`
+    return NextResponse.json({ ...base(), ...(await loadIdentity(viewer)) }, { headers: NO_STORE })
   } catch (e) {
     console.error('[atproto] me PATCH failed:', describe(e))
     return NextResponse.json({ error: 'internal' }, { status: 500 })
@@ -80,22 +80,12 @@ export async function PATCH(request: Request) {
 }
 
 export async function DELETE(request: Request) {
-  const user = await getUserFromRequest(request)
-  if (!user) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
-  if (isDidOnlyEmail(user.email)) {
-    return NextResponse.json(
-      { error: 'primary_identity', detail: 'This account signs in with its Bluesky identity; it cannot be unlinked.' },
-      { status: 409 },
-    )
-  }
-  try {
-    const current = await loadIdentity(user.id)
-    if (current.did) await unlinkDid(user.id, current.did)
-    const res = NextResponse.json({ ...base(), ...(await loadIdentity(user.id)) }, { headers: NO_STORE })
-    if (isAtprotoConfigured()) res.headers.append('Set-Cookie', clearSessionCookieHeader())
-    return res
-  } catch (e) {
-    console.error('[atproto] me DELETE failed:', describe(e))
-    return NextResponse.json({ error: 'internal' }, { status: 500 })
-  }
+  const refused = assertSameOrigin(request)
+  if (refused) return refused
+  const viewer = await requireViewer(request)
+  if (viewer instanceof Response) return viewer
+  return NextResponse.json(
+    { error: 'This account is its identity; there is nothing to unlink.', code: 'primary_identity' },
+    { status: 409, headers: NO_STORE },
+  )
 }

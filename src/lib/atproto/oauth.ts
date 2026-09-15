@@ -5,7 +5,7 @@ import 'server-only'
  * Server-side (BFF) OAuth. The browser never sees a token: the whole dance
  * happens here and ends in the `sp_at_session` HttpOnly cookie (`session.ts`).
  * Mirrors Free School's `apps/appview/src/http/oauth.ts` with the Postgres
- * stores on Supabase tables instead of Drizzle.
+ * stores as `sql` tagged templates instead of Drizzle.
  *
  * Two modes (`config.oauthMode()`):
  *
@@ -19,7 +19,7 @@ import 'server-only'
  * Routes that should exist (not in this module):
  *   GET /oauth/client-metadata.json   → clientMetadata()
  *   GET /oauth/jwks.json              → jwks()
- *   GET /api/auth/atproto/start       → authorizeUrl()
+ *   GET /api/atproto/auth/start       → authorizeUrl()
  *   GET /oauth/callback               → handleCallback()
  */
 import { JoseKey } from '@atproto/jwk-jose'
@@ -35,7 +35,7 @@ import {
   type OAuthClientMetadataInput,
   type OAuthSession,
 } from '@atproto/oauth-client-node'
-import { createAdminClient } from '@/lib/supabase/server'
+import { sql } from '@/lib/db'
 import { defaultPdsUrl, handleResolverUrl, oauthMode, oauthPrivateJwk, publicUrl } from './config'
 
 export const OAUTH_SCOPE = 'atproto transition:generic'
@@ -43,43 +43,54 @@ export const OAUTH_CLIENT_KID = 'schellingpoint-1'
 
 /* ───────────────────────────── stores ───────────────────────────── */
 
-class SupabaseStateStore implements NodeSavedStateStore {
+type Json = Parameters<typeof sql.json>[0]
+
+function asJson(value: unknown): Json {
+  return value as Json
+}
+
+/** jsonb comes back parsed; tolerate a driver configured to hand back text. */
+function fromJson<T>(value: unknown): T | undefined {
+  if (value == null) return undefined
+  if (typeof value === 'string') {
+    try {
+      return JSON.parse(value) as T
+    } catch {
+      return undefined
+    }
+  }
+  return value as T
+}
+
+class PostgresStateStore implements NodeSavedStateStore {
   async get(key: string): Promise<NodeSavedState | undefined> {
-    const db = await createAdminClient()
-    const { data, error } = await db.from('at_oauth_state').select('state').eq('key', key).maybeSingle()
-    if (error) throw new Error(`at_oauth_state get: ${error.message}`)
-    return (data?.state as NodeSavedState | undefined) ?? undefined
+    const rows = await sql<{ state: unknown }[]>`select state from at_oauth_state where key = ${key}`
+    return fromJson<NodeSavedState>(rows[0]?.state)
   }
   async set(key: string, state: NodeSavedState): Promise<void> {
-    const db = await createAdminClient()
-    const { error } = await db.from('at_oauth_state').upsert({ key, state }, { onConflict: 'key' })
-    if (error) throw new Error(`at_oauth_state set: ${error.message}`)
+    await sql`
+      insert into at_oauth_state (key, state) values (${key}, ${sql.json(asJson(state))})
+      on conflict (key) do update set state = excluded.state
+    `
   }
   async del(key: string): Promise<void> {
-    const db = await createAdminClient()
-    const { error } = await db.from('at_oauth_state').delete().eq('key', key)
-    if (error) throw new Error(`at_oauth_state del: ${error.message}`)
+    await sql`delete from at_oauth_state where key = ${key}`
   }
 }
 
-class SupabaseSessionStore implements NodeSavedSessionStore {
+class PostgresSessionStore implements NodeSavedSessionStore {
   async get(sub: string): Promise<NodeSavedSession | undefined> {
-    const db = await createAdminClient()
-    const { data, error } = await db.from('at_oauth_session').select('session').eq('sub', sub).maybeSingle()
-    if (error) throw new Error(`at_oauth_session get: ${error.message}`)
-    return (data?.session as NodeSavedSession | undefined) ?? undefined
+    const rows = await sql<{ session: unknown }[]>`select session from at_oauth_session where sub = ${sub}`
+    return fromJson<NodeSavedSession>(rows[0]?.session)
   }
   async set(sub: string, session: NodeSavedSession): Promise<void> {
-    const db = await createAdminClient()
-    const { error } = await db
-      .from('at_oauth_session')
-      .upsert({ sub, session, updated_at: new Date().toISOString() }, { onConflict: 'sub' })
-    if (error) throw new Error(`at_oauth_session set: ${error.message}`)
+    await sql`
+      insert into at_oauth_session (sub, session, updated_at) values (${sub}, ${sql.json(asJson(session))}, now())
+      on conflict (sub) do update set session = excluded.session, updated_at = now()
+    `
   }
   async del(sub: string): Promise<void> {
-    const db = await createAdminClient()
-    const { error } = await db.from('at_oauth_session').delete().eq('sub', sub)
-    if (error) throw new Error(`at_oauth_session del: ${error.message}`)
+    await sql`delete from at_oauth_session where sub = ${sub}`
   }
 }
 
@@ -87,16 +98,18 @@ class SupabaseSessionStore implements NodeSavedSessionStore {
 async function loadOrCreateKey(): Promise<JoseKey> {
   const configured = oauthPrivateJwk()
   if (configured) return JoseKey.fromImportable(JSON.parse(configured), OAUTH_CLIENT_KID)
-  const db = await createAdminClient()
-  const { data, error } = await db.from('at_oauth_client_key').select('jwk').eq('kid', OAUTH_CLIENT_KID).maybeSingle()
-  if (error) throw new Error(`at_oauth_client_key get: ${error.message}`)
-  if (data?.jwk) return JoseKey.fromImportable(data.jwk as Record<string, unknown> as never, OAUTH_CLIENT_KID)
+  const rows = await sql<{ jwk: unknown }[]>`select jwk from at_oauth_client_key where kid = ${OAUTH_CLIENT_KID}`
+  const stored = fromJson<Record<string, unknown>>(rows[0]?.jwk)
+  if (stored) return JoseKey.fromImportable(stored as never, OAUTH_CLIENT_KID)
   const key = await JoseKey.generate(['ES256'], OAUTH_CLIENT_KID)
-  const { error: insertError } = await db
-    .from('at_oauth_client_key')
-    .upsert({ kid: OAUTH_CLIENT_KID, jwk: key.privateJwk as object }, { onConflict: 'kid', ignoreDuplicates: true })
-  if (insertError) throw new Error(`at_oauth_client_key set: ${insertError.message}`)
-  return key
+  await sql`
+    insert into at_oauth_client_key (kid, jwk) values (${OAUTH_CLIENT_KID}, ${sql.json(asJson(key.privateJwk))})
+    on conflict (kid) do nothing
+  `
+  // Another process may have won the insert; use whatever is stored now.
+  const again = await sql<{ jwk: unknown }[]>`select jwk from at_oauth_client_key where kid = ${OAUTH_CLIENT_KID}`
+  const winner = fromJson<Record<string, unknown>>(again[0]?.jwk)
+  return winner ? JoseKey.fromImportable(winner as never, OAUTH_CLIENT_KID) : key
 }
 
 /* ─────────────────────────── metadata ─────────────────────────── */
@@ -156,8 +169,8 @@ async function buildClient(): Promise<NodeOAuthClient> {
   return new NodeOAuthClient({
     clientMetadata: clientMetadata(),
     ...(keyset ? { keyset } : {}),
-    stateStore: new SupabaseStateStore(),
-    sessionStore: new SupabaseSessionStore(),
+    stateStore: new PostgresStateStore(),
+    sessionStore: new PostgresSessionStore(),
     handleResolver: handleResolverUrl(),
     // A local PDS speaks plain http; a hosted one never does.
     allowHttp: mode === 'loopback' && defaultPdsUrl().startsWith('http://'),

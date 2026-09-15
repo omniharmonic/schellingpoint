@@ -59,9 +59,40 @@ export function jetstreamUrl(): string {
   return env('ATPROTO_JETSTREAM_URL') ?? DEFAULT_JETSTREAM_URL
 }
 
-/** PDS used for custodial (app-password) accounts and as the default write target. */
+/**
+ * The public URL of OUR PDS (`https://pds.unconference.events`; locally
+ * `http://localhost:2583`). This is what DID documents name, what gathering
+ * credentials record as `pds_url`, and the default write target.
+ * `PDS_URL` wins; `ATPROTO_DEFAULT_PDS_URL` is the older name.
+ */
 export function defaultPdsUrl(): string {
-  return (env('ATPROTO_DEFAULT_PDS_URL') ?? DEFAULT_PDS_URL).replace(/\/+$/, '')
+  return (env('PDS_URL') ?? env('ATPROTO_DEFAULT_PDS_URL') ?? DEFAULT_PDS_URL).replace(/\/+$/, '')
+}
+
+/**
+ * Where the app reaches the PDS from inside the deployment (`http://pds:3000`
+ * on the box). Admin XRPC and custodial logins go here, never over the edge.
+ */
+export function pdsInternalUrl(): string {
+  return (env('PDS_INTERNAL_URL') ?? defaultPdsUrl()).replace(/\/+$/, '')
+}
+
+/** The PDS admin password (basic auth `admin:<password>`). Never logged. */
+export function pdsAdminPassword(): string {
+  return required('PDS_ADMIN_PASSWORD')
+}
+
+/**
+ * The handle domain accounts are minted under, without a leading dot:
+ * `unconference.events` in production, `test` against the local dev PDS.
+ */
+export function pdsHandleDomain(): string {
+  return required('PDS_HANDLE_DOMAIN').replace(/^\.+/, '').replace(/\.+$/, '').toLowerCase()
+}
+
+/** True when we are running in production (`NODE_ENV=production`). */
+export function isProduction(): boolean {
+  return process.env.NODE_ENV === 'production'
 }
 
 /** XRPC host used for fallback `com.atproto.identity.resolveHandle`. */

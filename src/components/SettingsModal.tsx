@@ -20,6 +20,7 @@ import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import { useAuth } from '@/hooks/useAuth'
+import { apiFetch, ApiError } from '@/lib/api/client'
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!
 const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
@@ -51,6 +52,8 @@ interface AtIdentity {
   linked: boolean
   did: string | null
   handle: string | null
+  kind: 'custodial' | 'oauth' | null
+  owned: boolean
   publishProposals: boolean
 }
 
@@ -140,20 +143,16 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     }
   }, [isOpen, profile])
 
-  // ATProto identity (Bluesky). Loaded from /api/atproto/me when the modal opens.
+  // ATProto identity. Loaded from /api/atproto/me (session cookie) when the modal opens.
   const [atInfo, setAtInfo] = React.useState<AtIdentity | null>(null)
-  const [atHandle, setAtHandle] = React.useState('')
   const [atBusy, setAtBusy] = React.useState(false)
   const [atMessage, setAtMessage] = React.useState<{ type: 'success' | 'error'; text: string } | null>(null)
+  const [revealUrl, setRevealUrl] = React.useState<string | null>(null)
+  const [confirmOwnership, setConfirmOwnership] = React.useState(false)
 
   const loadAtIdentity = React.useCallback(async () => {
-    const token = getAccessToken()
-    if (!token) return
     try {
-      const res = await fetch('/api/atproto/me', {
-        headers: { Accept: 'application/json', Authorization: `Bearer ${token}` },
-      })
-      if (res.ok) setAtInfo((await res.json()) as AtIdentity)
+      setAtInfo(await apiFetch<AtIdentity>('/api/atproto/me'))
     } catch (err) {
       console.error('Error loading ATProto identity:', err)
     }
@@ -162,6 +161,8 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   React.useEffect(() => {
     if (isOpen) {
       setAtMessage(null)
+      setRevealUrl(null)
+      setConfirmOwnership(false)
       loadAtIdentity()
     }
   }, [isOpen, loadAtIdentity])
@@ -302,70 +303,34 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     }
   }
 
-  const handleAtLink = async () => {
-    const token = getAccessToken()
-    const handle = atHandle.trim().replace(/^@/, '')
-    if (!token || !handle) return
+  const handleTakeOwnership = async () => {
+    if (!atInfo || atInfo.kind !== 'custodial' || atInfo.owned || !confirmOwnership) return
     setAtBusy(true)
     setAtMessage(null)
     try {
-      const next = `${window.location.pathname}${window.location.search}`
-      const qs = new URLSearchParams({ handle, purpose: 'link', next })
-      const res = await fetch(`/api/atproto/auth/start?${qs}`, {
-        headers: { Accept: 'application/json', Authorization: `Bearer ${token}` },
+      const res = await apiFetch<{ ok: true; handle: string; revealUrl?: string }>('/api/me/take-ownership', { method: 'POST' })
+      setRevealUrl(res.revealUrl ?? null)
+      setAtMessage({
+        type: 'success',
+        text: res.revealUrl
+          ? 'Done. Open the reveal link below to see your new password once.'
+          : 'Done. We emailed you a single-use link that shows your new password once.',
       })
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok || !data?.url) {
-        setAtMessage({ type: 'error', text: data?.detail || 'Could not start linking. Check the handle and try again.' })
-        setAtBusy(false)
-        return
-      }
-      window.location.assign(data.url)
-    } catch {
-      setAtMessage({ type: 'error', text: 'Could not start linking. Please try again.' })
-      setAtBusy(false)
-    }
-  }
-
-  const handleAtUnlink = async () => {
-    const token = getAccessToken()
-    if (!token) return
-    if (!window.confirm('Unlink this Bluesky identity? Records already published to your repo stay there; you can remove them from your Bluesky account.')) return
-    setAtBusy(true)
-    setAtMessage(null)
-    try {
-      const res = await fetch('/api/atproto/me', {
-        method: 'DELETE',
-        headers: { Accept: 'application/json', Authorization: `Bearer ${token}` },
-      })
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok) {
-        setAtMessage({ type: 'error', text: data?.detail || 'Could not unlink. Please try again.' })
-      } else {
-        setAtInfo(data as AtIdentity)
-        setAtMessage({ type: 'success', text: 'Unlinked.' })
-      }
-    } catch {
-      setAtMessage({ type: 'error', text: 'Could not unlink. Please try again.' })
+      await loadAtIdentity()
+    } catch (err) {
+      setAtMessage({ type: 'error', text: err instanceof ApiError ? err.message : 'Could not take ownership. Please try again.' })
     } finally {
       setAtBusy(false)
     }
   }
 
   const handleAtPublishToggle = async (publish: boolean) => {
-    const token = getAccessToken()
-    if (!token || !atInfo) return
+    if (!atInfo) return
     const previous = atInfo
     setAtInfo({ ...atInfo, publishProposals: publish })
     setAtMessage(null)
     try {
-      const res = await fetch('/api/atproto/me', {
-        method: 'PATCH',
-        headers: { Accept: 'application/json', Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ publish_proposals: publish }),
-      })
-      if (!res.ok) throw new Error(await res.text())
-      setAtInfo((await res.json()) as AtIdentity)
+      setAtInfo(await apiFetch<AtIdentity>('/api/atproto/me', { method: 'PATCH', json: { publish_proposals: publish } }))
     } catch (err) {
       console.error('Error updating publish_proposals:', err)
       setAtInfo(previous)
@@ -576,73 +541,76 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
           </div>
 
           {/* ATProto identity */}
-          {atInfo?.configured && (
+          {atInfo?.linked && (
             <div className="space-y-3 pt-4 border-t border-border" data-testid="atproto-identity">
               <label className="text-sm font-medium flex items-center gap-2">
                 <AtSign className="h-4 w-4 text-muted-foreground" />
-                ATProto identity
+                Your identity
               </label>
-              {atInfo.linked ? (
-                <>
-                  <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/30 px-3 py-2">
-                    <div className="min-w-0">
-                      <a
-                        href={`https://bsky.app/profile/${encodeURIComponent(atInfo.handle || atInfo.did || '')}`}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-sm font-medium hover:underline truncate block"
-                      >
-                        @{atInfo.handle || atInfo.did}
-                      </a>
-                      {atInfo.did && (
-                        <p className="text-[11px] font-mono text-muted-foreground truncate">{atInfo.did}</p>
-                      )}
-                    </div>
-                    <Button type="button" variant="outline" size="sm" onClick={handleAtUnlink} disabled={atBusy}>
-                      Unlink
-                    </Button>
-                  </div>
-                  <label className="flex items-start gap-3 text-sm cursor-pointer">
+              <div className="rounded-lg border border-border bg-muted/30 px-3 py-2 space-y-1">
+                <p className="text-sm font-medium truncate">@{atInfo.handle || atInfo.did}</p>
+                {atInfo.did && <p className="text-[11px] font-mono text-muted-foreground truncate">{atInfo.did}</p>}
+                <p className="text-xs text-muted-foreground">
+                  {atInfo.kind === 'oauth'
+                    ? 'Your own ATProto account (signed in with Bluesky or another ATProto provider).'
+                    : atInfo.owned
+                      ? 'Created here, now owned by you. Publishing here needs an ATProto sign-in.'
+                      : 'Created for you by this app, which holds its password on your behalf.'}
+                </p>
+              </div>
+
+              <label className="flex items-start gap-3 text-sm cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="mt-0.5 h-4 w-4"
+                  checked={atInfo.publishProposals}
+                  onChange={(e) => handleAtPublishToggle(e.target.checked)}
+                  disabled={atBusy}
+                />
+                <span>
+                  <span className="font-medium">Publish my proposals to my repo</span>
+                  <span className="block text-xs text-muted-foreground mt-0.5">
+                    Proposals you submit are written to your own repository on the open network under this
+                    identity. They are public and may be copied by other services even after you delete them.
+                  </span>
+                </span>
+              </label>
+
+              {atInfo.kind === 'custodial' && !atInfo.owned && (
+                <div className="rounded-lg border border-border p-3 space-y-2" data-testid="take-ownership">
+                  <p className="text-sm font-medium">Take ownership of this identity</p>
+                  <p className="text-xs text-muted-foreground">
+                    We will set a new password on your account and email you a link that shows it once. After that we
+                    no longer hold your password: you can sign in to your PDS yourself, change the password, export your
+                    repository, or move to another provider. Publishing from this app will then need you to sign in with
+                    this account through &ldquo;an existing ATProto account&rdquo;. This cannot be undone.
+                  </p>
+                  <label className="flex items-start gap-2 text-xs cursor-pointer">
                     <input
                       type="checkbox"
                       className="mt-0.5 h-4 w-4"
-                      checked={atInfo.publishProposals}
-                      onChange={(e) => handleAtPublishToggle(e.target.checked)}
+                      checked={confirmOwnership}
+                      onChange={(e) => setConfirmOwnership(e.target.checked)}
                       disabled={atBusy}
                     />
-                    <span>
-                      <span className="font-medium">Publish my proposals to my repo</span>
-                      <span className="block text-xs text-muted-foreground mt-0.5">
-                        Proposals you submit are written to your own repository on the open network under this
-                        identity. They are public and may be copied by other services even after you delete them.
-                      </span>
-                    </span>
+                    <span>I understand, and I will save the password when it is shown.</span>
                   </label>
-                </>
-              ) : (
-                <div className="space-y-2">
-                  <div className="flex gap-2">
-                    <Input
-                      placeholder="you.bsky.social"
-                      autoComplete="username"
-                      value={atHandle}
-                      onChange={(e) => setAtHandle(e.target.value)}
-                      disabled={atBusy}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          e.preventDefault()
-                          handleAtLink()
-                        }
-                      }}
-                    />
-                    <Button type="button" variant="outline" onClick={handleAtLink} disabled={atBusy || !atHandle.trim()}>
-                      {atBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Link'}
-                    </Button>
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    Your proposals and public actions will be attached to this identity on the open network.
-                  </p>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={handleTakeOwnership}
+                    disabled={atBusy || !confirmOwnership}
+                  >
+                    {atBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Take ownership'}
+                  </Button>
                 </div>
+              )}
+
+              {revealUrl && (
+                <a href={revealUrl} className="block text-xs underline break-all">
+                  Open the single-use reveal link
+                </a>
               )}
               {atMessage && (
                 <p className={`text-xs ${atMessage.type === 'success' ? 'text-green-500' : 'text-destructive'}`}>

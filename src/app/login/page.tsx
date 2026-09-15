@@ -40,6 +40,9 @@ function LoginContent() {
     if (searchParams.get('error') === 'atproto') {
       setError('Bluesky sign-in did not complete. Please try again.')
     }
+    if (searchParams.get('error') === 'link') {
+      setError('That sign-in link has expired or was already used. Request a new one below.')
+    }
     if (searchParams.get('logged_out') === 'true') {
       setLoggedOutMessage(true)
     }
@@ -49,10 +52,12 @@ function LoginContent() {
   const [atConfigured, setAtConfigured] = React.useState(false)
   const [atHandle, setAtHandle] = React.useState('')
   const [atLoading, setAtLoading] = React.useState(false)
+  const [atConfirmed, setAtConfirmed] = React.useState(false)
+  const [devVerifyUrl, setDevVerifyUrl] = React.useState<string | null>(null)
 
   React.useEffect(() => {
     let cancelled = false
-    fetch('/api/atproto/me', { headers: { Accept: 'application/json' } })
+    fetch('/api/atproto/me', { headers: { Accept: 'application/json' }, credentials: 'same-origin' })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (!cancelled && data?.configured) setAtConfigured(true)
@@ -66,13 +71,16 @@ function LoginContent() {
   const handleBluesky = async (e: React.FormEvent) => {
     e.preventDefault()
     const handle = atHandle.trim().replace(/^@/, '')
-    if (!handle) return
+    if (!handle || !atConfirmed) return
     setAtLoading(true)
     setError(null)
     try {
       const next = safeReturnPath(searchParams.get('returnTo') || searchParams.get('redirect'))
-      const qs = new URLSearchParams({ handle, purpose: 'signin', next })
-      const res = await fetch(`/api/atproto/auth/start?${qs}`, { headers: { Accept: 'application/json' } })
+      const qs = new URLSearchParams({ handle, purpose: 'signin', next, confirm: '1' })
+      const res = await fetch(`/api/atproto/auth/start?${qs}`, {
+        headers: { Accept: 'application/json' },
+        credentials: 'same-origin',
+      })
       const data = await res.json().catch(() => ({}))
       if (!res.ok || !data?.url) {
         setError(data?.detail || 'Could not start Bluesky sign-in. Check the handle and try again.')
@@ -93,12 +101,13 @@ function LoginContent() {
     setIsLoading(true)
     setError(null)
 
-    const { error } = await signIn(email.trim(), safeReturnPath(searchParams.get('returnTo') || searchParams.get('redirect')))
+    const { error, devVerifyUrl: devUrl } = await signIn(email.trim(), safeReturnPath(searchParams.get('returnTo') || searchParams.get('redirect')))
 
     if (error) {
       setError(error.message)
       setIsLoading(false)
     } else {
+      setDevVerifyUrl(process.env.NODE_ENV === 'development' && devUrl ? devUrl : null)
       setEmailSent(true)
       setIsLoading(false)
     }
@@ -122,13 +131,20 @@ function LoginContent() {
           <CardContent className="space-y-4">
             <div className="protocol-box border-border text-sm text-center text-muted-foreground">
               <p>Open the link in your email to pick up where you left off.</p>
-              <p className="mt-2 text-xs">Can’t find it? Check your spam folder, or try again.</p>
+              <p className="mt-2 text-xs">It works once and expires in 15 minutes. Can’t find it? Check your spam folder, or try again.</p>
             </div>
+            {devVerifyUrl && (
+              <div className="rounded-md border border-dashed border-border p-3 text-xs" data-testid="dev-verify-url">
+                <p className="text-muted-foreground mb-1">Development: mail is not configured.</p>
+                <a href={devVerifyUrl} className="underline break-all">Open the sign-in link</a>
+              </div>
+            )}
             <Button
               variant="ghost"
               className="w-full"
               onClick={() => {
                 setEmailSent(false)
+                setDevVerifyUrl(null)
                 setEmail('')
               }}
             >
@@ -159,7 +175,8 @@ function LoginContent() {
           </div>
           <h1 className="text-3xl font-display leading-tight font-semibold">Welcome to the gathering.</h1>
           <CardDescription>
-            Sign in or create an account with your email.
+            Sign in or create an account with your email. We’ll create your unconference identity if you don’t have
+            one yet — your handle is generated, never derived from your email.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -196,10 +213,12 @@ function LoginContent() {
           </form>
           {atConfigured && (
             <div className="mt-6 pt-6 border-t border-border" data-testid="bluesky-signin">
-              <p className="text-xs tracking-wider text-muted-foreground mb-3">Or sign in with Bluesky</p>
+              <p className="text-xs tracking-wider text-muted-foreground mb-3">
+                Or sign in with Bluesky / an existing ATProto account
+              </p>
               <form onSubmit={handleBluesky} className="space-y-3">
                 <div className="space-y-2">
-                  <label htmlFor="at-handle" className="block text-sm font-medium">Bluesky handle</label>
+                  <label htmlFor="at-handle" className="block text-sm font-medium">Handle</label>
                   <Input
                     id="at-handle"
                     name="handle"
@@ -211,19 +230,39 @@ function LoginContent() {
                     className="text-base"
                   />
                 </div>
-                <Button type="submit" variant="outline" className="w-full" loading={atLoading} disabled={!atHandle.trim()}>
-                  Continue with Bluesky <ArrowRight className="ml-2 h-4 w-4" />
+                <label className="flex items-start gap-3 text-sm cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5 h-4 w-4"
+                    checked={atConfirmed}
+                    onChange={(e) => setAtConfirmed(e.target.checked)}
+                    disabled={atLoading}
+                    data-testid="bluesky-confirm"
+                  />
+                  <span>
+                    Your proposals and public actions will be permanently attached to this identity.
+                    <span className="block text-xs text-muted-foreground mt-0.5">
+                      Records written to an existing account are public on the open network and can be copied by other
+                      services. If you would rather keep this gathering separate, use email above instead.
+                    </span>
+                  </span>
+                </label>
+                <Button
+                  type="submit"
+                  variant="outline"
+                  className="w-full"
+                  loading={atLoading}
+                  disabled={!atHandle.trim() || !atConfirmed}
+                >
+                  Continue with this account <ArrowRight className="ml-2 h-4 w-4" />
                 </Button>
-                <p className="text-xs text-muted-foreground">
-                  Your proposals and public actions will be attached to this identity on the open network.
-                </p>
               </form>
             </div>
           )}
           <p className="text-xs text-center text-muted-foreground mt-4 font-mono">
             No password to remember.
             <br />
-            <span className="text-foreground/60">New here? Your account is created when you sign in.</span>
+            <span className="text-foreground/60">New here? Your identity is created when you sign in.</span>
           </p>
         </CardContent>
       </Card>

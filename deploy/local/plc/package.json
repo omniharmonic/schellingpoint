@@ -1,0 +1,13 @@
+{
+  "name": "unconference-local-plc",
+  "private": true,
+  "type": "module",
+  "description": "In-memory did:plc directory for local development (mock database, no persistence).",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "@did-plc/lib": "^0.0.1",
+    "@did-plc/server": "^0.0.1"
+  }
+}

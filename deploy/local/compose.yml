@@ -1,0 +1,89 @@
+# Local development stack for the unconference.events AppView (branch `atproto`).
+#
+#   postgres  the only database            127.0.0.1:55432  (unconference/unconference)
+#   plc       in-memory did:plc directory  127.0.0.1:2582   (state is lost on restart)
+#   pds       reference PDS, invite-only   127.0.0.1:2583   (handles *.test)
+#
+# Usage: see deploy/local/README.md — `npm run stack:up`, then `npm run db:migrate`.
+# DEV ONLY: every secret here is a fixed, published development value.
+name: unconference-local
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: unconference
+      POSTGRES_PASSWORD: unconference
+      POSTGRES_DB: unconference
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U unconference -d unconference"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  plc:
+    image: node:22-alpine
+    restart: unless-stopped
+    working_dir: /plc
+    command: ["sh", "-c", "npm install --omit=dev --no-audit --no-fund --loglevel=error && node server.mjs"]
+    environment:
+      PLC_PORT: "2582"
+    ports:
+      - "127.0.0.1:2582:2582"
+    volumes:
+      - ./plc/package.json:/plc/package.json:ro
+      - ./plc/server.mjs:/plc/server.mjs:ro
+      - plc-node-modules:/plc/node_modules
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:2582/_health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 60s
+
+  pds:
+    image: ghcr.io/bluesky-social/pds:0.4
+    restart: unless-stopped
+    depends_on:
+      plc:
+        condition: service_healthy
+    # Defaults come from the committed example; deploy/local/pds.env (gitignored,
+    # created by the README step) overrides them when present.
+    env_file:
+      - path: ./pds.env.example
+        required: true
+      - path: ./pds.env
+        required: false
+    environment:
+      PDS_PORT: "2583"
+      PDS_HOSTNAME: localhost
+      PDS_DEV_MODE: "true"
+      PDS_DATA_DIRECTORY: /pds
+      PDS_BLOBSTORE_DISK_LOCATION: /pds/blocks
+      PDS_DID_PLC_URL: http://plc:2582
+      PDS_DISABLE_SSRF_PROTECTION: "true"
+      PDS_SERVICE_HANDLE_DOMAINS: .test
+      PDS_INVITE_REQUIRED: "true"
+      # No relay locally: nothing is announced to bsky.network.
+      PDS_CRAWLERS: ""
+      LOG_ENABLED: "true"
+    ports:
+      - "127.0.0.1:2583:2583"
+    volumes:
+      - pds-data:/pds
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:2583/xrpc/_health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+volumes:
+  postgres-data:
+  plc-node-modules:
+  pds-data:

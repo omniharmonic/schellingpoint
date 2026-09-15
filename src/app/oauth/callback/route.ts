@@ -7,36 +7,29 @@ import { createAtSession } from '@/lib/atproto/session'
 import {
   attachGatheringActor,
   describe,
-  DidAlreadyLinkedError,
-  ensureSupabaseUserForDid,
-  implicitCallbackPath,
+  findOrCreateOAuthAccount,
   isEventOrganizer,
-  linkDidToProfile,
-  mintSupabaseSession,
   verifyOAuthState,
   type OAuthStatePayload,
 } from '@/lib/atproto/bridge'
-import { importBskyProfileInBackground } from '@/lib/atproto/bsky-profile'
+import { fetchBskyProfile, importBskyProfileInBackground } from '@/lib/atproto/bsky-profile'
 
 /**
- * Where the authorization server sends the browser back. Finishes the OAuth
- * exchange, verifies our signed `state`, then does one of three things:
+ * Where the authorization server sends the browser back. Finishes the OAuth exchange,
+ * verifies our signed `state`, then:
  *
- *   signin     find-or-create the Supabase user for the DID, set the
- *              `sp_at_session` cookie, mint a Supabase session and land on
- *              `/auth/callback#access_token=…` like a magic link would.
- *   link       attach the DID to the signed-in member; set the cookie.
- *   gathering  remember the DID as the event's actor; NO user cookie.
+ *   signin     find the `accounts` row for the DID or create one (kind `oauth`, email
+ *              NULL), import the Bluesky profile into empty fields, set `sp_at_session`,
+ *              redirect to `next`.
+ *   link       refused — one account = one DID (`?atproto_error=identity_exists`).
+ *   gathering  remember the DID as the event's actor; no session change.
  *
- * Every failure redirects: `/login?error=atproto` for sign-in (or when the
- * state cannot be read), otherwise back to `next` with `atproto_error=<code>`.
+ * Failures redirect: `/login?error=atproto` for sign-in (or an unreadable state),
+ * otherwise back to `next` with `atproto_error=<code>`.
  */
 export const dynamic = 'force-dynamic'
 
 function redirectTo(path: string, setCookie?: string) {
-  // Absolute, on the public origin: in loopback mode the callback lives on
-  // 127.0.0.1 while the app may be opened on localhost; the cookie is scoped
-  // to whichever host served this response, so stay on it.
   const res = NextResponse.redirect(new URL(path, publicUrl()), { status: 302 })
   if (setCookie) res.headers.append('Set-Cookie', setCookie)
   res.headers.set('Cache-Control', 'private, no-store')
@@ -72,23 +65,20 @@ export async function GET(request: Request) {
     pds = doc.pds
   } catch (e) {
     console.warn('[atproto] DID document unavailable after callback:', describe(e))
+    handle = (await fetchBskyProfile(did))?.handle ?? null
   }
 
   try {
     switch (state.purpose) {
       case 'signin': {
-        const bridged = await ensureSupabaseUserForDid(did, handle)
-        importBskyProfileInBackground(bridged.userId, did, { placeholderName: handle ?? did })
-        const at = await createAtSession({ did, userId: bridged.userId, kind: 'oauth' })
-        const minted = await mintSupabaseSession(bridged.email)
-        return redirectTo(implicitCallbackPath(minted, state.next), at.setCookie)
-      }
-      case 'link': {
-        await linkDidToProfile(state.userId!, did, handle)
-        importBskyProfileInBackground(state.userId!, did)
-        const at = await createAtSession({ did, userId: state.userId!, kind: 'oauth' })
+        const account = await findOrCreateOAuthAccount(did, handle)
+        // The profile trigger seeds display_name with the handle's first label; that counts as empty.
+        if (account.created) importBskyProfileInBackground(account.accountId, did, { placeholderName: handle ? handle.split('.')[0] : null })
+        const at = await createAtSession({ did, accountId: account.accountId, kind: 'oauth' })
         return redirectTo(state.next, at.setCookie)
       }
+      case 'link':
+        return redirectTo(withError(state.next, 'identity_exists'))
       case 'gathering': {
         if (!(await isEventOrganizer(state.userId!, state.eventId!))) {
           return redirectTo(withError(state.next, 'forbidden'))
@@ -100,7 +90,6 @@ export async function GET(request: Request) {
   } catch (e) {
     console.error(`[atproto] callback (${state.purpose}) failed:`, describe(e))
     if (state.purpose === 'signin') return redirectTo('/login?error=atproto')
-    const code = e instanceof DidAlreadyLinkedError ? 'conflict' : '1'
-    return redirectTo(withError(state.next, code))
+    return redirectTo(withError(state.next, '1'))
   }
 }

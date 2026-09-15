@@ -2,7 +2,7 @@ import 'server-only'
 /**
  * Public Bluesky profile → local `profiles` row.
  *
- * On first sign-in (or link) we borrow the display name, avatar and bio from
+ * On first sign-in through the Bluesky door we borrow the display name, avatar and bio from
  * the account's public AppView profile so a new member is not called
  * `did-plc-…`. This never overwrites a value the member already has — the
  * only exception is a display name that is still the placeholder we set
@@ -11,7 +11,7 @@ import 'server-only'
  * Read-only, unauthenticated, and best-effort: any failure is logged and
  * swallowed. Callers fire-and-forget.
  */
-import { createAdminClient } from '@/lib/supabase/server'
+import { sql } from '@/lib/db'
 
 const PUBLIC_APPVIEW = 'https://public.api.bsky.app'
 const TIMEOUT_MS = 5000
@@ -49,7 +49,7 @@ export async function fetchBskyProfile(actor: string): Promise<BskyProfile | nul
 }
 
 /**
- * Fill empty `display_name` / `avatar_url` / `bio` on `profiles.id = userId`
+ * Fill empty `display_name` / `avatar_url` / `bio` on `profiles.id = userId` (an `accounts.id`)
  * from the DID's public profile. `placeholderName` (the handle we set at
  * account creation) counts as empty for `display_name` only.
  */
@@ -61,25 +61,35 @@ export async function importBskyProfile(
   const remote = await fetchBskyProfile(did)
   if (!remote) return { updated: [] }
 
-  const db = await createAdminClient()
-  const { data: current, error } = await db
-    .from('profiles')
-    .select('display_name, avatar_url, bio')
-    .eq('id', userId)
-    .maybeSingle()
-  if (error || !current) return { updated: [] }
+  const rows = await sql<{ display_name: string | null; avatar_url: string | null; bio: string | null }[]>`
+    select display_name, avatar_url, bio from profiles where id = ${userId}
+  `
+  const current = rows[0]
+  if (!current) return { updated: [] }
 
-  const patch: Record<string, string> = {}
-  const name = (current.display_name as string | null)?.trim() ?? ''
+  const name = current.display_name?.trim() ?? ''
   const nameIsEmpty = !name || (opts.placeholderName ? name === opts.placeholderName : false)
-  if (nameIsEmpty && remote.displayName) patch.display_name = remote.displayName
-  if (!(current.avatar_url as string | null)?.trim() && remote.avatar) patch.avatar_url = remote.avatar
-  if (!(current.bio as string | null)?.trim() && remote.description) patch.bio = remote.description
+  const displayName = nameIsEmpty && remote.displayName ? remote.displayName : null
+  const avatar = !current.avatar_url?.trim() && remote.avatar ? remote.avatar : null
+  const bio = !current.bio?.trim() && remote.description ? remote.description : null
 
-  const updated = Object.keys(patch)
+  const updated = [
+    ...(displayName ? ['display_name'] : []),
+    ...(avatar ? ['avatar_url'] : []),
+    ...(bio ? ['bio'] : []),
+  ]
   if (updated.length === 0) return { updated }
-  const { error: updateError } = await db.from('profiles').update(patch).eq('id', userId)
-  if (updateError) return { updated: [] }
+  try {
+    await sql`
+      update profiles set
+        display_name = coalesce(${displayName}, display_name),
+        avatar_url = coalesce(${avatar}, avatar_url),
+        bio = coalesce(${bio}, bio)
+      where id = ${userId}
+    `
+  } catch {
+    return { updated: [] }
+  }
   return { updated }
 }
 

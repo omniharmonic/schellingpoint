@@ -1,0 +1,55 @@
+# unconference.events edge. Three kinds of names:
+#   {$WEB_HOST}               the AppView + web (sign-in, OAuth client documents, every API)
+#   {$PDS_HOST}               the PDS, whole
+#   *.{$PDS_HANDLE_DOMAIN}    member handle hosts AND gathering hosts (<slug>.unconference.events)
+#
+# The wildcard is "inverted" exactly as Free School's is (multi-school design §3): a handle host
+# owes the network only `/.well-known/atproto-did` and `/xrpc/*`, which go to the PDS; every other
+# path is the app, which routes a gathering label to that gathering. Handle labels and gathering
+# labels therefore share one namespace; the app's reserved-label check enforces that at minting.
+#
+# There is no DNS challenge here, so wildcard names are issued on demand, one name at a time, and
+# Caddy asks the app first. The ask is answered from closed sets (www, gathering slugs that exist,
+# handles the PDS vouches for) and never from a pattern: Let's Encrypt allows 50 certificates per
+# registered domain per week and a pattern-based gate spends that on the first bot scan.
+{
+	email {$ACME_EMAIL}
+	on_demand_tls {
+		ask http://app:3000/internal/tls-check
+	}
+}
+
+(app) {
+	encode zstd gzip
+	# Container-local job and TLS routes are never reachable from the public internet.
+	@internal path /internal/* /api/jobs/*
+	respond @internal 404
+	reverse_proxy app:3000 {
+		header_up X-Forwarded-Host {host}
+	}
+}
+
+{$WEB_HOST} {
+	import app
+}
+
+{$PDS_HOST} {
+	# Kept on demand like Free School's: a configured wildcard would otherwise suppress issuance.
+	tls {
+		on_demand
+	}
+	reverse_proxy pds:3000
+}
+
+*.{$PDS_HANDLE_DOMAIN} {
+	tls {
+		on_demand
+	}
+	@www host www.{$WEB_HOST}
+	redir @www https://{$WEB_HOST}{uri} permanent
+	@pds path /.well-known/atproto-did /xrpc/*
+	handle @pds {
+		reverse_proxy pds:3000
+	}
+	import app
+}
