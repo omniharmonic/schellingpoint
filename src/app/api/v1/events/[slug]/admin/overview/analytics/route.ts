@@ -7,12 +7,61 @@
  * results; there is no leaderboard beyond the organizer's private sort.
  */
 import { sql } from '@/lib/db'
-import { organizerResults, roundState, RoundOpenError } from '@/lib/voting'
+import { organizerResults, publicTally, roundState, RoundOpenError } from '@/lib/voting'
 import { errorResponse, json, requireOrganizer, rolesWith } from '@/lib/scheduling/admin-api'
 
 export const dynamic = 'force-dynamic'
 
 const ROLES = rolesWith('viewAnalytics')
+
+/**
+ * The attendance round (design §11) for the analytics page. Sealed while open — like the
+ * pre-event round — and, once closed, the k-suppressed tally rather than raw sums: the
+ * "attendance signal" is a public-shaped artifact even on the organizer page. Sessions
+ * that were never scheduled are left out (they could not take an attendance vote).
+ */
+type AttendanceAnalytics =
+  | { enabled: boolean; status: 'none' | 'upcoming' | 'open'; sealed: true; closesAt: string | null }
+  | {
+      enabled: boolean
+      status: 'closed'
+      sealed: false
+      k: number
+      ballotsCast: number
+      credits: number
+      closedAt: string | null
+      entries: Array<{ sessionId: string; title: string; suppressed: true } | { sessionId: string; title: string; suppressed: false; voters: number; votes: number; credits: number }>
+    }
+
+async function attendanceAnalytics(
+  eventId: string,
+  enabled: boolean,
+  sessions: Array<{ id: string; title: string; time_slot_id: string | null }>,
+): Promise<AttendanceAnalytics> {
+  const state = await roundState(eventId, 'attendance')
+  if (state.status !== 'closed') {
+    return { enabled, status: state.status, sealed: true, closesAt: state.round?.closesAt ?? null }
+  }
+  const tally = await publicTally(eventId, undefined, { phase: 'attendance' })
+  if (!tally) return { enabled, status: 'none', sealed: true, closesAt: null }
+  const scheduled = new Map(sessions.filter((s) => s.time_slot_id).map((s) => [s.id, s.title]))
+  return {
+    enabled,
+    status: 'closed',
+    sealed: false,
+    k: tally.k,
+    ballotsCast: tally.ballotsCast,
+    credits: tally.round.credits,
+    closedAt: tally.round.finalizedAt,
+    entries: tally.entries
+      .filter((e) => scheduled.has(e.sessionId))
+      .map((e) =>
+        e.suppressed
+          ? { sessionId: e.sessionId, title: scheduled.get(e.sessionId) ?? '', suppressed: true as const }
+          : { sessionId: e.sessionId, title: scheduled.get(e.sessionId) ?? '', suppressed: false as const, voters: e.voters, votes: e.votes, credits: e.credits },
+      ),
+  }
+}
 
 export async function GET(request: Request, { params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params
@@ -39,6 +88,10 @@ export async function GET(request: Request, { params }: { params: Promise<{ slug
       `,
       roundState(eventId),
     ])
+    const [settings] = await sql<{ attendance_voting_enabled: boolean }[]>`
+      select attendance_voting_enabled from events where id = ${eventId}
+    `
+    const attendance = await attendanceAnalytics(eventId, !!settings?.attendance_voting_enabled, sessions)
 
     const byStatus = { pending: 0, approved: 0, rejected: 0, scheduled: 0 }
     const byFormat = new Map<string, number>()
@@ -108,6 +161,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ slug
         }),
       },
       voting,
+      attendance,
     })
   } catch (e) {
     return errorResponse(e, 'analytics')

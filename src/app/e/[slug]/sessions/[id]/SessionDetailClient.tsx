@@ -43,6 +43,7 @@ import { AtprotoSessionActions } from '@/components/AtprotoSessionActions'
 import { VoteControl } from '@/components/VoteControl'
 import { setFavorite } from '@/components/SessionCard'
 import { useAuth } from '@/hooks/useAuth'
+import { useVoting } from '@/hooks/useVoting'
 import { useEvent } from '@/contexts/EventContext'
 import { apiFetch } from '@/lib/api/client'
 import { sessionStatusBadge } from '@/lib/labels'
@@ -88,6 +89,8 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
   const event = useEvent()
   const { toast } = useToast()
   const votingOpen = isParticipationOpen(event, 'vote')
+  // The attendance round (design §11): open only while the gathering is live and opted in.
+  const attendance = useVoting(event.slug, 'attendance')
 
   const [session, setSession] = React.useState<SessionView | null>(initialSession ?? null)
   const [isLoading, setIsLoading] = React.useState(!initialSession)
@@ -586,6 +589,21 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
                 </CardHeader>
                 <CardContent>
                   <VoteControl eventSlug={event.slug} sessionId={sessionId} sessionTitle={session.title} />
+                </CardContent>
+              </Card>
+            )}
+            {attendance.signedIn && attendance.attendanceOpen && attendance.status === 'open' && session.status === 'scheduled' && (
+              <Card className={cn(attendance.votableNow.has(sessionId) && 'border-primary/40')}>
+                <CardHeader className="pb-3">
+                  <CardTitle>{attendance.votableNow.has(sessionId) ? 'Happening now' : 'Attendance votes'}</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-2">
+                  <p className="text-sm text-muted-foreground">
+                    {attendance.votableNow.has(sessionId)
+                      ? 'You are here: spend fresh attendance credits on this session while it runs.'
+                      : 'Attendance votes open 15 minutes before this session starts and close 15 minutes after it ends.'}
+                  </p>
+                  <VoteControl eventSlug={event.slug} sessionId={sessionId} sessionTitle={session.title} round="attendance" />
                 </CardContent>
               </Card>
             )}

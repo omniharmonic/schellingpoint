@@ -24,6 +24,8 @@ hosted Supabase, schellingpoint.app) lives on `main`; do not merge this branch i
   are written by the gathering actor through the audited port (`src/lib/atproto/{actor,publish}.ts`).
 - **Votes are never records**: ballot-key rounds (`src/lib/voting`). Nobody, organizers included, sees
   counts while a round is open; at close the key is destroyed and entries are unlinkable.
+  Attendance voting (opt-in per gathering) is a second round with `phase = 'attendance'`, fresh
+  credits, votable only while a session is happening (slot ± 15 min); same tables, same close job.
 - **Indexing**: Jetstream consumer (`scripts/atproto-indexer.ts`) + hourly reconciliation.
 - **Feed** (`src/lib/atproto/feed.ts`): the gathering account posts `app.bsky.feed.post` about its own
   activity when `events.feed_posts` is on (off by default). A mention facet may name a host only with

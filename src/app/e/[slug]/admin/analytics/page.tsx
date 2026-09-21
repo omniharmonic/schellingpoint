@@ -2,7 +2,7 @@
 
 import * as React from 'react'
 import Link from 'next/link'
-import { BarChart3, Calendar, FileText, Loader2, Lock, ThumbsUp, Users } from 'lucide-react'
+import { BarChart3, Calendar, FileText, Loader2, Lock, Radio, ThumbsUp, Users } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { PageHeader } from '@/components/PageHeader'
@@ -30,6 +30,19 @@ interface Analytics {
   voting:
     | { status: string; sealed: true; closesAt: string | null; message: string }
     | { status: string; sealed: false; results: Array<{ sessionId: string; title: string; voters: number; votes: number; credits: number }> }
+  /** The attendance round (design §11): sealed while open; the k-suppressed tally after close. */
+  attendance:
+    | { enabled: boolean; status: 'none' | 'upcoming' | 'open'; sealed: true; closesAt: string | null }
+    | {
+        enabled: boolean
+        status: 'closed'
+        sealed: false
+        k: number
+        ballotsCast: number
+        credits: number
+        closedAt: string | null
+        entries: Array<{ sessionId: string; title: string; suppressed: true } | { sessionId: string; title: string; suppressed: false; voters: number; votes: number; credits: number }>
+      }
 }
 
 // One status → color language, via the shared vocabulary's badge variant (tokens only).
@@ -89,7 +102,7 @@ export default function AdminAnalyticsPage() {
     return <div className="flex items-center justify-center py-12" role="status" aria-label="Loading analytics"><Loader2 className="h-8 w-8 animate-spin text-muted-foreground" /></div>
   }
 
-  const { proposals, members, schedule, voting } = data
+  const { proposals, members, schedule, voting, attendance } = data
   const results = voting.sealed ? [] : voting.results
   const totalBallotVotes = results.reduce((sum, r) => sum + r.votes, 0)
   const shownResults = showAllResults ? results : results.slice(0, 10)
@@ -178,6 +191,64 @@ export default function AdminAnalyticsPage() {
               )}
             </CardContent>
           </Card>
+
+          {attendance.enabled || attendance.status !== 'none' ? (
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2"><Radio className="h-5 w-5" aria-hidden="true" />Attendance signal</CardTitle>
+                <CardDescription>
+                  Fresh credits spent during the gathering on the sessions people were in. Held to the same k as pre-voting: a session named by fewer than {attendance.sealed ? 'k' : attendance.k} people shows no counts at all.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {attendance.sealed ? (
+                  <div role="status" className="flex items-start gap-3 rounded-xl border bg-muted/40 p-4">
+                    <Lock className="h-5 w-5 mt-0.5 text-muted-foreground shrink-0" aria-hidden="true" />
+                    <div>
+                      <p className="font-medium">
+                        {attendance.status === 'open' ? 'Attendance voting is in progress — sealed until the round closes.'
+                          : attendance.status === 'upcoming' ? 'The attendance round opens when the gathering goes live.'
+                          : 'No attendance round yet. It opens when the gathering goes live.'}
+                      </p>
+                      {attendance.closesAt ? <p className="text-sm text-muted-foreground mt-1">Closes {new Date(attendance.closesAt).toLocaleString()}.</p> : null}
+                    </div>
+                  </div>
+                ) : attendance.entries.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">No scheduled session took an attendance vote in the closed round.</p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <p className="mb-3 text-sm text-muted-foreground">{plural(attendance.ballotsCast, 'participant')} voted · {attendance.credits} credits each</p>
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="text-left text-muted-foreground border-b">
+                          <th scope="col" className="py-2 pr-4 font-medium">Session</th>
+                          <th scope="col" className="py-2 pr-4 font-medium text-right">Voters</th>
+                          <th scope="col" className="py-2 pr-4 font-medium text-right">Votes</th>
+                          <th scope="col" className="py-2 font-medium text-right">Credits</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {attendance.entries.map((r) => (
+                          <tr key={r.sessionId} className="border-b last:border-0">
+                            <td className="py-2 pr-4">{r.title}</td>
+                            {r.suppressed ? (
+                              <td colSpan={3} className="py-2 text-right text-muted-foreground">fewer than {attendance.k} voters</td>
+                            ) : (
+                              <>
+                                <td className="py-2 pr-4 text-right tabular-nums">{r.voters}</td>
+                                <td className="py-2 pr-4 text-right tabular-nums">{r.votes}</td>
+                                <td className="py-2 text-right tabular-nums">{r.credits}</td>
+                              </>
+                            )}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          ) : null}
 
           <div className="grid gap-6 lg:grid-cols-2">
             <Card>

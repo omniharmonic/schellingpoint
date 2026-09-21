@@ -9,7 +9,7 @@ import { sql } from '@/lib/db'
 import { chatConfig, streamText, type StreamEvent } from './anthropic'
 import { embedTexts, embeddingsConfig } from './embeddings'
 import { markerLabel } from './normalize'
-import { rankEventChunks, type RankedChunk } from './rank'
+import { rankEventChunks, tierPredicate, type RankedChunk, type ReadTier } from './rank'
 
 export const MAX_QUESTION_CHARS = 1000
 const EXCERPT_CHARS = 240
@@ -23,15 +23,17 @@ export interface AskAvailability {
   embedded_chunks: number
 }
 
-/** Whether members can ask right now, and why not otherwise. */
-export async function askAvailability(eventId: string): Promise<AskAvailability> {
+/** Whether the viewer (at `tier`) can ask right now, and why not otherwise. Counts only what the tier may read. */
+export async function askAvailability(eventId: string, tier: ReadTier): Promise<AskAvailability> {
   const chat = chatConfig()
   const embeddings = embeddingsConfig()
   const [counts] = await sql<{ transcripts: number; embedded: number }[]>`
-    select (select count(*) from session_transcripts where event_id = ${eventId} and replaced_at is null and status = 'ready') as transcripts,
+    select (select count(*) from session_transcripts t join events e on e.id = t.event_id
+              where t.event_id = ${eventId} and t.replaced_at is null and t.status = 'ready' ${tierPredicate(tier)}) as transcripts,
            (select count(*) from transcript_chunks c
               join session_transcripts t on t.id = c.transcript_id and t.replaced_at is null
-              where c.event_id = ${eventId} and c.embedding is not null and c.embedding_model = ${embeddings?.model ?? null}) as embedded
+              join events e on e.id = c.event_id
+              where c.event_id = ${eventId} and c.embedding is not null and c.embedding_model = ${embeddings?.model ?? null} ${tierPredicate(tier)}) as embedded
   `
   const base = { ready_transcripts: counts?.transcripts ?? 0, embedded_chunks: counts?.embedded ?? 0 }
   if (!chat) return { available: false, reason: 'chat', ...base }
@@ -94,15 +96,15 @@ export function validateQuestion(value: unknown): string | null {
   return q
 }
 
-/** Rank the sources for a question; `run` streams the answer over them. */
-export async function prepareAsk(event: { id: string; name: string; slug: string }, question: string): Promise<PreparedAsk> {
+/** Rank the sources the viewer's `tier` may read; `run` streams the answer over them. */
+export async function prepareAsk(event: { id: string; name: string; slug: string }, question: string, tier: ReadTier): Promise<PreparedAsk> {
   const chat = chatConfig()
   const embeddings = embeddingsConfig()
   if (!chat) return { status: 'unavailable', reason: 'chat' }
   if (!embeddings) return { status: 'unavailable', reason: 'embeddings' }
   const [vector] = await embedTexts([question], 'query', embeddings)
   if (!vector) return { status: 'unavailable', reason: 'embeddings' }
-  const ranked = await rankEventChunks(event.id, vector, { model: embeddings.model })
+  const ranked = await rankEventChunks(event.id, vector, { model: embeddings.model, tier })
   if (!ranked.length) return { status: 'no-sources', sources: [] }
   const sources = ranked.map((chunk, i) => toSource(chunk, i + 1, event.slug))
   const user = [

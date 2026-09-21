@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test'
 import { loadEnvConfig } from '@next/env'
 import postgres from 'postgres'
 import { strFromU8, unzipSync } from 'fflate'
-import { createTestAccount, createTestGathering, TEST_BASE_URL, type TestAccount, type TestGathering } from './helpers/gathering'
+import { createTestAccount, createTestGathering, withServerOnlyShim, TEST_BASE_URL, type TestAccount, type TestGathering } from './helpers/gathering'
 import { normalizeTranscript } from '../src/lib/knowledge/normalize'
 import { chunkParagraphs } from '../src/lib/knowledge/chunk'
 
@@ -252,6 +252,47 @@ test.describe('knowledge: transcripts, coverage, export, providers', () => {
     expect(counts.replaced).toBe(1)
   })
 
+  test('ask respects the reading tier: an organizers-only transcript is invisible to a member', async () => {
+    // The current transcript is organizers-only (previous test). Availability counts follow the tier…
+    const asMember = await jsonOf(await api(`/api/v1/events/${gathering.slug}/knowledge/ask`, { cookie: member.cookie }))
+    expect(asMember.ready_transcripts).toBe(0)
+    const asOwner = await jsonOf(await api(`/api/v1/events/${gathering.slug}/knowledge/ask`, { cookie: owner.cookie }))
+    expect(asOwner.ready_transcripts).toBe(1)
+
+    // …and so does ranking: give the only chunk an embedding identical to the query, then rank per tier.
+    const [current] = await sql<{ id: string }[]>`select id from session_transcripts where session_id = ${sessionId} and replaced_at is null`
+    await sql`update transcript_chunks set embedding = ${[1, 0, 0]}::real[], embedding_model = 'test-model' where transcript_id = ${current.id}`
+    const ranked = await withServerOnlyShim(async () => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const rank = require('../src/lib/knowledge/rank') as typeof import('../src/lib/knowledge/rank')
+      return {
+        member: await rank.rankEventChunks(gathering.id, [1, 0, 0], { model: 'test-model', tier: 'members' }),
+        organizer: await rank.rankEventChunks(gathering.id, [1, 0, 0], { model: 'test-model', tier: 'organizers' }),
+      }
+    })
+    expect(ranked.member).toEqual([]) // a member asking gets "nothing close enough", never the excerpt
+    expect(ranked.organizer.length).toBe(1)
+    expect(ranked.organizer[0].score).toBeCloseTo(1, 5)
+    expect(ranked.organizer[0].text).toContain('Organizer eyes only')
+
+    // The gathering-level setting hides a members transcript the same way.
+    await sql`update session_transcripts set visibility = 'members' where id = ${current.id}`
+    await sql`update events set transcripts_visibility = 'organizers' where id = ${gathering.id}`
+    try {
+      const gated = await withServerOnlyShim(async () => {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const rank = require('../src/lib/knowledge/rank') as typeof import('../src/lib/knowledge/rank')
+        return rank.rankEventChunks(gathering.id, [1, 0, 0], { model: 'test-model', tier: 'members' })
+      })
+      expect(gated).toEqual([])
+      const gatedAvailability = await jsonOf(await api(`/api/v1/events/${gathering.slug}/knowledge/ask`, { cookie: member.cookie }))
+      expect(gatedAvailability.ready_transcripts).toBe(0)
+    } finally {
+      await sql`update events set transcripts_visibility = 'members' where id = ${gathering.id}`
+      await sql`update session_transcripts set visibility = 'organizers' where id = ${current.id}`
+    }
+  })
+
   test('an organizer uploads a VTT file (multipart); markers survive; RLS lets members read chunks', async () => {
     const form = new FormData()
     form.append('file', new Blob([VTT], { type: 'text/vtt' }), 'compost.vtt')
@@ -325,6 +366,12 @@ test.describe('knowledge: transcripts, coverage, export, providers', () => {
     const out = await jsonOf(req)
     expect(out.sessions).toBe(1)
     expect(out.notified).toBe(1)
+    expect(out.skipped).toBe(0)
+    // A second request within 24 hours sends nothing and reports the skip.
+    const again = await jsonOf(await api(`/api/v1/events/${gathering.slug}/knowledge/coverage`, { method: 'POST', cookie: owner.cookie, json: { action: 'request' } }))
+    expect(again).toMatchObject({ sessions: 0, notified: 0, skipped: 1 })
+    const [stamp] = await sql<{ transcripts_requested_at: string | null }[]>`select transcripts_requested_at from sessions where id = ${bareSessionId}`
+    expect(stamp.transcripts_requested_at).toBeTruthy()
     const notes = await sql<{ type: string; title: string; action_url: string }[]>`
       select type, title, action_url from notifications where user_id = ${host.id} and event_id = ${gathering.id} and type = 'admin_announcement'
     `

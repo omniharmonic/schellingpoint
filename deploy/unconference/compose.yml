@@ -112,6 +112,12 @@ services:
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
       ENS_RPC_URL: ${ENS_RPC_URL:-}
+      # Knowledge harvest (design §10.3); all optional, nothing runs without them.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      AI_CHAT_MODEL: ${AI_CHAT_MODEL:-}
+      EMBEDDINGS_PROVIDER: ${EMBEDDINGS_PROVIDER:-}
+      EMBEDDINGS_MODEL: ${EMBEDDINGS_MODEL:-}
+      EMBEDDINGS_API_KEY: ${EMBEDDINGS_API_KEY:-}
       UPLOADS_DIR: /data/uploads
       # The app is reachable only through Caddy, which overwrites X-Forwarded-For with the real peer:
       # trust its left-most entry for per-IP sign-in limits (src/lib/auth/client-ip.ts).
@@ -158,6 +164,7 @@ services:
           job /api/jobs/publish
           [ $$((n % 5)) -eq 0 ] && job /api/notifications/dispatch
           [ $$((n % 60)) -eq 0 ] && job /api/atproto/sync
+          [ $$((n % 60)) -eq 30 ] && job /api/jobs/profile-refresh
           [ $$((n % 5)) -eq 0 ] && job /api/jobs/knowledge
           [ $$((n % 1440)) -eq 0 ] && job /api/jobs/retention
           n=$$((n + 1))

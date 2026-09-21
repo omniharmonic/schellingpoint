@@ -77,26 +77,29 @@ export function workspaceLabel(pathname: string | null, eventSlug: string): stri
 // Credit Gauge — compact sidebar widget
 // ============================================================================
 
-function CreditGauge({ eventSlug }: { eventSlug: string }) {
-  const voting = useVoting(eventSlug)
+function CreditGauge({ eventSlug, round = 'pre' }: { eventSlug: string; round?: 'pre' | 'attendance' }) {
+  const voting = useVoting(eventSlug, round)
+  // The attendance gauge (design §11) shows only while that round accepts votes.
   if (!voting.signedIn || voting.status !== 'open' || voting.loading) return null
+  if (round === 'attendance' && !voting.canVote) return null
   const { budget, spent, remaining, mechanism } = voting
   const pct = budget > 0 ? (remaining / budget) * 100 : 0
-  const noun = mechanism === 'approval' ? 'Approvals' : 'Voting credits'
+  const noun = round === 'attendance' ? 'Attendance credits' : mechanism === 'approval' ? 'Approvals' : 'Voting credits'
+  const gaugeId = `credit-gauge-${round}-${eventSlug}`
 
   return (
     <div className="px-4 py-3 border-t border-border">
       <div className="flex items-baseline justify-between mb-1.5">
-        <span className="text-xs text-muted-foreground" id={`credit-gauge-${eventSlug}`}>
+        <span className="text-xs text-muted-foreground" id={gaugeId}>
           {noun}
         </span>
         <span className="text-sm font-bold tabular-nums text-primary">
           {remaining}<span className="text-muted-foreground font-normal">/{budget}</span>
         </span>
       </div>
-      <Progress value={pct} className="h-1.5" aria-labelledby={`credit-gauge-${eventSlug}`} aria-valuetext={`${remaining} of ${budget} left, ${spent} used`} />
+      <Progress value={pct} className="h-1.5" aria-labelledby={gaugeId} aria-valuetext={`${remaining} of ${budget} left, ${spent} used`} />
       <p className="text-xs text-muted-foreground mt-1">
-        {voting.canVote ? 'Support the ideas you want to see.' : voting.reason}
+        {round === 'attendance' ? 'Fresh credits for the sessions you attend.' : voting.canVote ? 'Support the ideas you want to see.' : voting.reason}
       </p>
     </div>
   )
@@ -219,6 +222,7 @@ function DashboardShell({ children }: DashboardLayoutProps) {
 
         {/* Credit gauge */}
         {user && <CreditGauge eventSlug={event.slug} />}
+        {user && <CreditGauge eventSlug={event.slug} round="attendance" />}
 
         {/* User section */}
         <div className="p-3 border-t border-border">{userBlock(true)}</div>
@@ -255,6 +259,7 @@ function DashboardShell({ children }: DashboardLayoutProps) {
             {user && (
               <div className="mt-2">
                 <CreditGauge eventSlug={event.slug} />
+                <CreditGauge eventSlug={event.slug} round="attendance" />
               </div>
             )}
             <div className="pt-2 border-t border-border mt-2">{userBlock(false)}</div>

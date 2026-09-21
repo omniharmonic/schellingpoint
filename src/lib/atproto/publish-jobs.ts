@@ -41,7 +41,11 @@ export interface PublishJob {
   createdAt: string
   startedAt: string | null
   finishedAt: string | null
-  results: Array<Pick<PublishResult, 'kind' | 'id' | 'uri' | 'error' | 'skipped'>>
+  /**
+   * Per-record results, plus `{ kind: 'feed', id }` markers: sessions whose slot this job FIRST
+   * published, persisted per chunk so a resumed job still flushes ONE feed digest at the end.
+   */
+  results: Array<Pick<PublishResult, 'kind' | 'id' | 'uri' | 'error' | 'skipped'> | { kind: 'feed'; id: string }>
 }
 
 interface JobRow {
@@ -238,8 +242,10 @@ async function runClaimed(row: JobRow, deadline: number, opts: RunJobsOptions): 
         select id from sessions where event_id = ${row.event_id} and id = any(${slice}::uuid[]) and status = 'scheduled' and time_slot_id is not null
       `
       const ids = slice.filter((id) => still.some((s) => s.id === id))
+      // Feed (design §7.4): first-published sessions accumulate across chunks; flushed once below.
+      const feedBatch: string[] = []
       const { results } = ids.length
-        ? await publishSchedule({ eventId: row.event_id, callerUserId: row.requested_by, sessionIds: ids }, opts.deps)
+        ? await publishSchedule({ eventId: row.event_id, callerUserId: row.requested_by, sessionIds: ids, feedBatch }, opts.deps)
         : { results: [] as PublishResult[] }
 
       const limited = results.filter((r) => typeof r.retryAfterMs === 'number')
@@ -261,12 +267,16 @@ async function runClaimed(row: JobRow, deadline: number, opts: RunJobsOptions): 
         update publish_jobs set
           position = ${position},
           published = published + ${t.published}, failed = failed + ${t.failed}, skipped = skipped + ${t.skipped},
-          results = (case when jsonb_array_length(results) >= ${MAX_STORED_RESULTS} then results else results || ${sql.json(stored as never)}::jsonb end),
+          results = (case when jsonb_array_length(results) >= ${MAX_STORED_RESULTS} then results else results || ${sql.json(stored as never)}::jsonb end)
+                    || ${sql.json(feedBatch.map((id) => ({ kind: 'feed', id })) as never)}::jsonb,
           locked_at = now(), last_error = null, updated_at = now()
         where id = ${row.id}
       `
       opts.onProgress?.({ id: row.id, position, total })
     }
+    // Feed (design §7.4): ONE flush for the whole job, from the markers persisted per chunk (so a
+    // resumed job loses nothing). Claim-before-write in the ledger makes a repeated flush a no-op.
+    await flushFeedMarkers(row.id, row.event_id, row.requested_by)
     await sql`update publish_jobs set status = 'succeeded', finished_at = now(), locked_at = null, updated_at = now() where id = ${row.id}`
     return summary('succeeded')
   } catch (e) {
@@ -292,13 +302,25 @@ async function runClaimed(row: JobRow, deadline: number, opts: RunJobsOptions): 
  * limit lifts; any other thrown error backs off like a schedule job. Per-row failures are recorded
  * on the rows themselves (organisers retry from the Feed section) and never fail the job.
  */
+/**
+ * Flush the schedule job's persisted `{ kind: 'feed', id }` markers as ONE `session-scheduled`
+ * enqueue (a digest when over the threshold). Idempotent: rows already claimed insert nothing.
+ */
+async function flushFeedMarkers(jobId: string, eventId: string, callerUserId: string | null): Promise<void> {
+  const [row] = await sql<{ results: PublishJob['results'] }[]>`select results from publish_jobs where id = ${jobId}`
+  const ids = Array.from(new Set((row?.results ?? []).filter((r) => r.kind === 'feed').map((r) => r.id)))
+  if (!ids.length) return
+  const { enqueueSessionPosts } = await import('./feed')
+  await enqueueSessionPosts({ eventId, kind: 'session-scheduled', sessionIds: ids, callerUserId })
+}
+
 async function runFeedClaimed(
   row: JobRow,
   deadline: number,
   summary: (status: PublishJobStatus, error?: string) => RunJobsResult['jobs'][number],
 ): Promise<RunJobsResult['jobs'][number]> {
-  const { deliverQueuedPosts } = await import('./feed')
   try {
+    const { deliverQueuedPosts } = await import('./feed')
     let posted = 0
     let failed = 0
     for (let pass = 0; pass < 100; pass++) {

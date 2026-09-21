@@ -410,6 +410,8 @@ function dueRounds(t: Sql, eventId?: string) {
         r.closes_at <= now()
         or (r.phase = 'pre-event' and e.status not in ${t(KEEP_OPEN_STATUSES['pre-event'] as string[])})
         or (r.phase = 'attendance' and e.status not in ${t(KEEP_OPEN_STATUSES.attendance as string[])})
+        -- An organizer switching attendance voting off seals the round rather than pausing it.
+        or (r.phase = 'attendance' and not coalesce(e.attendance_voting_enabled, false))
       )
     order by r.closes_at
   `
@@ -446,16 +448,18 @@ async function closeDueForEvent(eventId: string): Promise<void> {
 }
 
 /**
- * The event's current round: the earliest unfinalized round if there is one
- * ('upcoming' or 'open'), else the most recently finalized ('closed'), else 'none'.
- * Rounds that are due are finalized first, so a round past its window never reads as open.
+ * The event's current round of `phase` (default 'pre-event'): the earliest unfinalized
+ * round if there is one ('upcoming' or 'open'), else the most recently finalized
+ * ('closed'), else 'none'. Rounds that are due are finalized first, so a round past its
+ * window never reads as open. The phases never mix: an attendance round is invisible to a
+ * pre-event reader and vice versa.
  */
-export async function roundState(eventId: string): Promise<RoundStateResult> {
+export async function roundState(eventId: string, phase: RoundPhase = 'pre-event'): Promise<RoundStateResult> {
   if (!isUuid(eventId)) return { round: null, status: 'none' }
   await closeDueForEvent(eventId)
   const [open] = await sql<RoundRow[]>`
     select ${ROUND_COLUMNS(sql)} from vote_rounds r
-    where r.event_id = ${eventId} and r.finalized_at is null
+    where r.event_id = ${eventId} and r.phase = ${phase} and r.finalized_at is null
     order by r.opens_at asc limit 1
   `
   if (open) {
@@ -464,7 +468,7 @@ export async function roundState(eventId: string): Promise<RoundStateResult> {
   }
   const [closed] = await sql<RoundRow[]>`
     select ${ROUND_COLUMNS(sql)} from vote_rounds r
-    where r.event_id = ${eventId} and r.finalized_at is not null
+    where r.event_id = ${eventId} and r.phase = ${phase} and r.finalized_at is not null
     order by r.finalized_at desc limit 1
   `
   return closed ? { round: toRoundInfo(closed), status: 'closed' } : { round: null, status: 'none' }
@@ -485,22 +489,29 @@ export async function getRound(eventId: string, roundId: string): Promise<RoundI
  * Throws `RoundOpenError` when `roundId` (or, without one, any round of the event) is
  * open — an upcoming round with no votes yet does not hide an earlier finalized one.
  */
-async function resolveClosedRound(eventId: string, roundId?: string): Promise<RoundInfo | null> {
+async function resolveClosedRound(eventId: string, roundId?: string, phase: RoundPhase = 'pre-event'): Promise<RoundInfo | null> {
   if (roundId) {
     const round = await getRound(eventId, roundId)
     if (!round) throw new VotingError('Voting round not found', 404, 'NotFound')
     if (round.status !== 'closed') throw new RoundOpenError(round.id)
     return round
   }
-  const state = await roundState(eventId)
+  const state = await roundState(eventId, phase)
   if (state.status === 'open' && state.round) throw new RoundOpenError(state.round.id)
   if (state.status === 'closed') return state.round
   const [closed] = await sql<RoundRow[]>`
     select ${ROUND_COLUMNS(sql)} from vote_rounds r
-    where r.event_id = ${eventId} and r.finalized_at is not null
+    where r.event_id = ${eventId} and r.phase = ${phase} and r.finalized_at is not null
     order by r.finalized_at desc limit 1
   `
   return closed ? toRoundInfo(closed) : null
+}
+
+/** Options shared by the outcome readers: a specific finalized round, or the latest of a phase. */
+export interface ReadRoundOptions {
+  roundId?: string
+  /** Which phase's latest finalized round to read when `roundId` is absent; default 'pre-event'. */
+  phase?: RoundPhase
 }
 
 /**
@@ -508,8 +519,8 @@ async function resolveClosedRound(eventId: string, roundId?: string): Promise<Ro
  * voters/votes/credits, most votes first. Throws `RoundOpenError` while open. Callers
  * must have authorized the organizer; this function does not know who is asking.
  */
-export async function organizerResults(eventId: string, options: { roundId?: string } = {}): Promise<SessionResult[]> {
-  const round = await resolveClosedRound(eventId, options.roundId)
+export async function organizerResults(eventId: string, options: ReadRoundOptions = {}): Promise<SessionResult[]> {
+  const round = await resolveClosedRound(eventId, options.roundId, options.phase)
   if (!round) return []
   const rows = await sql<{ session_id: string; voters: number; votes: number; credits: number }[]>`
     select session_id, voters, votes, credits from vote_round_results
@@ -524,8 +535,8 @@ export async function organizerResults(eventId: string, options: { roundId?: str
  * tokens (hex) that named it, for Jaccard overlap. Tokens link a participant's entries to
  * each other and to nobody. Throws `RoundOpenError` while open.
  */
-export async function schedulingInputs(eventId: string, options: { roundId?: string } = {}): Promise<SchedulingInputs> {
-  const round = await resolveClosedRound(eventId, options.roundId)
+export async function schedulingInputs(eventId: string, options: ReadRoundOptions = {}): Promise<SchedulingInputs> {
+  const round = await resolveClosedRound(eventId, options.roundId, options.phase)
   const bySession = new Map<string, { votes: number; tokens: Set<string> }>()
   if (!round) return { roundId: null, bySession }
   const rows = await sql<{ session_id: string; votes: number; token: string }[]>`
@@ -561,9 +572,9 @@ export function suppressEntries(results: readonly SessionResult[], k: number): T
 export async function publicTally(
   eventId: string,
   k?: number,
-  options: { roundId?: string } = {},
+  options: ReadRoundOptions = {},
 ): Promise<PublicTally | null> {
-  const round = await resolveClosedRound(eventId, options.roundId)
+  const round = await resolveClosedRound(eventId, options.roundId, options.phase)
   if (!round) return null
   const threshold = k ?? (await eventK(eventId))
   const [results, [ballots]] = await Promise.all([

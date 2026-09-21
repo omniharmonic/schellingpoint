@@ -98,6 +98,8 @@ test.describe('gathering feed', () => {
     host = await createTestAccount('feed-host', { sql: raw, base })
     stranger = await createTestAccount('feed-stranger', { sql: raw, base })
     await raw`insert into event_members (event_id, user_id, role) values (${gathering.id}, ${owner.id}, 'owner'), (${gathering.id}, ${host.id}, 'attendee')`
+    // The job-path test needs 30 sessions from two people: lift the per-person proposal cap (0 = unlimited).
+    await raw`update events set max_proposals_per_user = 0 where id = ${gathering.id}`
     const rows = await raw<{ id: string; venue_id: string }[]>`
       select id, venue_id from time_slots where event_id = ${gathering.id} and venue_id is not null and coalesce(is_break, false) = false order by start_time, id
     `
@@ -116,7 +118,8 @@ test.describe('gathering feed', () => {
   })
 
   async function newSession(title: string, hostId: string): Promise<string> {
-    const slot = slots[slotAt++]!
+    // Slots are reused round-robin: nothing here depends on one session per slot.
+    const slot = slots[slotAt++ % slots.length]!
     // The insert trigger sets the status itself (approved/pending); scheduling is a separate update, as in the app.
     const [row] = await raw<{ id: string }[]>`
       insert into sessions (event_id, title, description, format, duration, host_id, status, topic_tags)
@@ -321,6 +324,51 @@ test.describe('gathering feed', () => {
     expect(listed.body.posts.filter((p) => p.status === 'posted').every((p) => p.bskyUrl?.startsWith('https://bsky.app/profile/'))).toBe(true)
     // Only organisers read the ledger.
     expect((await api(host, 'GET', feedPath())).status).toBe(403)
+  })
+
+  test('a 30-session schedule published through the job path yields exactly ONE digest post', async () => {
+    const before = (await ledger()).filter((r) => r.kind === 'schedule-digest').length
+    const ids: string[] = []
+    for (let i = 0; i < 30; i++) ids.push(await newSession(`Job digest ${i} ${RUN}`, i % 2 ? host.id : owner.id))
+    const [thresholdRow] = await raw<{ feed_digest_threshold: number }[]>`select feed_digest_threshold from events where id = ${gathering.id}`
+    expect(thresholdRow!.feed_digest_threshold).toBeLessThan(30)
+
+    // More than JOB_THRESHOLD_SESSIONS (25): the route queues a resumable job and runs it after the response.
+    const queued = await api<{ jobId?: string }>(owner, 'POST', `/api/v1/events/${gathering.slug}/admin/atproto/publish`, { what: 'schedule' })
+    expect(queued.status, JSON.stringify(queued.body)).toBe(200)
+    expect(queued.body.jobId).toBeTruthy()
+    type JobView = { status: string; position: number; total: number; failed: number }
+    let job: JobView | null = null
+    for (let tries = 0; tries < 120; tries++) {
+      const res = await api<{ job: JobView | null }>(owner, 'GET', `/api/v1/events/${gathering.slug}/admin/atproto/publish?jobId=${queued.body.jobId}`)
+      job = res.body.job
+      if (job && (job.status === 'succeeded' || job.status === 'failed' || job.status === 'cancelled')) break
+      await new Promise((r) => setTimeout(r, 1000))
+    }
+    expect(job, JSON.stringify(job)).toMatchObject({ status: 'succeeded', failed: 0 })
+    expect(job!.position).toBe(job!.total)
+
+    const rows = await ledger()
+    const perSession = rows.filter((r) => r.subject_id && ids.includes(r.subject_id))
+    expect(perSession).toHaveLength(30)
+    expect(perSession.every((r) => r.status === 'digested')).toBe(true)
+    const digests = rows.filter((r) => r.kind === 'schedule-digest')
+    expect(digests).toHaveLength(before + 1)
+
+    await deliver()
+    const [digest] = (await ledger()).filter((r) => r.kind === 'schedule-digest').slice(-1)
+    expect(digest!.status).toBe('posted')
+    expect(digest!.text).toContain('30 sessions were added to the schedule')
+
+    // Re-running the job path claims nothing new and writes no second digest.
+    const again = await api<{ jobId?: string }>(owner, 'POST', `/api/v1/events/${gathering.slug}/admin/atproto/publish`, { what: 'schedule' })
+    expect(again.status).toBe(200)
+    for (let tries = 0; tries < 120 && again.body.jobId; tries++) {
+      const res = await api<{ job: { status: string } | null }>(owner, 'GET', `/api/v1/events/${gathering.slug}/admin/atproto/publish?jobId=${again.body.jobId}`)
+      if (res.body.job && res.body.job.status !== 'queued' && res.body.job.status !== 'running') break
+      await new Promise((r) => setTimeout(r, 1000))
+    }
+    expect((await ledger()).filter((r) => r.kind === 'schedule-digest')).toHaveLength(before + 1)
   })
 
   test('the privacy audit passes with posts present', async () => {

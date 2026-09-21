@@ -7,6 +7,18 @@ import 'server-only'
 import { sql } from '@/lib/db'
 import { firstMarker } from './chunk'
 
+/** The viewer's reading tier (see `readTier` in ./store): organizers see every transcript. */
+export type ReadTier = 'organizers' | 'members'
+
+/**
+ * SQL predicate mirroring `canReadTranscript`: a member sees a chunk only when both the
+ * gathering's setting and the transcript's own tier are 'members'. Aliases: t = the transcript,
+ * e = the gathering.
+ */
+export function tierPredicate(tier: ReadTier) {
+  return tier === 'organizers' ? sql`` : sql`and t.visibility = 'members' and e.transcripts_visibility = 'members'`
+}
+
 /** Below this cosine score a chunk is not offered as a source (`KNOWLEDGE_MIN_SCORE` overrides). */
 export const DEFAULT_MIN_SCORE = 0.3
 export const DEFAULT_TOP_K = 8
@@ -49,11 +61,11 @@ interface ChunkRow {
   embedding: number[] | null
 }
 
-/** Top `limit` chunks of the gathering embedded with `model`, best first, above `threshold`. */
+/** Top `limit` chunks of the gathering embedded with `model` that `tier` may read, best first, above `threshold`. */
 export async function rankEventChunks(
   eventId: string,
   query: readonly number[],
-  options: { model: string; limit?: number; threshold?: number },
+  options: { model: string; tier: ReadTier; limit?: number; threshold?: number },
 ): Promise<RankedChunk[]> {
   const limit = options.limit ?? DEFAULT_TOP_K
   const threshold = options.threshold ?? minScore()
@@ -62,7 +74,9 @@ export async function rankEventChunks(
     from transcript_chunks c
     join session_transcripts t on t.id = c.transcript_id and t.replaced_at is null and t.status = 'ready'
     join sessions s on s.id = c.session_id
+    join events e on e.id = c.event_id
     where c.event_id = ${eventId} and c.embedding is not null and c.embedding_model = ${options.model}
+      ${tierPredicate(options.tier)}
   `
   const scored: RankedChunk[] = []
   for (const row of rows) {

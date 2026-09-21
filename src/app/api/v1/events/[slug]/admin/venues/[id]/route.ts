@@ -11,7 +11,32 @@
 import { asAccount } from '@/lib/db'
 import { errorResponse, fail, isUuid, json, readBody, requireOrganizer, rolesWith } from '@/lib/scheduling/admin-api'
 import { parseVenue, type VenueInput } from '@/lib/scheduling/inputs'
-import { loadEvent, selectVenues, syncProgramRecords } from '@/lib/scheduling/program'
+import { loadEvent, selectVenues, syncProgramRecords, type NetworkSyncResult } from '@/lib/scheduling/program'
+import { JOB_THRESHOLD_SESSIONS } from '@/lib/atproto/publish-jobs'
+
+/**
+ * A room's point or private-residence flag is also carried by every published calendar event in
+ * that room (spec §8.1). After the venue record, refresh those events (non-destructive CAS
+ * rewrite); more than `JOB_THRESHOLD_SESSIONS` of them go through a publish job.
+ */
+async function refreshRoomSessions(event: Awaited<ReturnType<typeof loadEvent>>, venueId: string, callerUserId: string): Promise<NetworkSyncResult & { queued?: boolean; jobId?: string }> {
+  if (!event.actor_did || !event.atproto_published_at) return { attempted: false, results: [] }
+  try {
+    const publish = await import('@/lib/atproto/publish')
+    const ids = await publish.publishedSessionIdsInVenue(event.id, venueId)
+    if (!ids.length) return { attempted: false, results: [] }
+    if (ids.length > JOB_THRESHOLD_SESSIONS) {
+      const { enqueueSchedulePublish } = await import('@/lib/atproto/publish-jobs')
+      const { job } = await enqueueSchedulePublish({ eventId: event.id, callerUserId, sessionIds: ids })
+      return { attempted: true, results: [], queued: true, jobId: job.id }
+    }
+    const out = await publish.refreshSessionEvents({ eventId: event.id, callerUserId, sessionIds: ids })
+    return { attempted: true, results: out.results.map((r) => ({ kind: r.kind, id: r.id, uri: r.uri, error: r.error })) }
+  } catch (e) {
+    console.error('[admin] session refresh after venue change failed:', e instanceof Error ? e.message : e)
+    return { attempted: true, results: [], error: 'The room is saved, but its sessions’ network copies could not be refreshed. Re-publish from the Network page.' }
+  }
+}
 
 export const dynamic = 'force-dynamic'
 
@@ -28,6 +53,7 @@ export async function PATCH(request: Request, { params }: Params) {
   if (body instanceof Response) return body
 
   try {
+    let geoChanged = false
     const venue = await asAccount(ctx.viewer.accountId, async (tx) => {
       const [current] = await tx<VenueInput[]>`
         select name, slug, capacity, coalesce(features, '{}') as features, style, address, locality, region,
@@ -39,6 +65,10 @@ export async function PATCH(request: Request, { params }: Params) {
       `
       if (!current) return null
       const next = parseVenue(body, current)
+      geoChanged =
+        (next.latitude ?? null) !== (current.latitude ?? null)
+        || (next.longitude ?? null) !== (current.longitude ?? null)
+        || next.is_private_residence !== current.is_private_residence
       if (next.is_primary && !current.is_primary) {
         await tx`update venues set is_primary = false where event_id = ${ctx.event.id} and is_primary and id <> ${id}`
       }
@@ -47,8 +77,10 @@ export async function PATCH(request: Request, { params }: Params) {
       return updated
     })
     if (!venue) return fail(404, 'Room not found')
-    const network = await syncProgramRecords('venues', await loadEvent(ctx.event.id), ctx.viewer.accountId)
-    return json({ venue, network })
+    const event = await loadEvent(ctx.event.id)
+    const network = await syncProgramRecords('venues', event, ctx.viewer.accountId)
+    const sessions = geoChanged ? await refreshRoomSessions(event, id, ctx.viewer.accountId) : undefined
+    return json({ venue, network: sessions ? { ...network, sessions } : network })
   } catch (e) {
     return errorResponse(e, 'update venue')
   }

@@ -13,6 +13,7 @@ import { publishGatheringRecords, publishPolicyRecord, type NetworkWrite } from 
 import { isHiddenEvent, type EventRecord } from '@/lib/events'
 import { notify } from '@/lib/notifications'
 import { openRound } from '@/lib/voting/rounds'
+import { openAttendanceRound } from '@/lib/voting/attendance'
 import { isVotingError } from '@/lib/voting/errors'
 import type { EventRoleName, EventStatus, EventTheme } from '@/types/event'
 
@@ -168,6 +169,8 @@ const ALLOWED_KEYS = new Set([
   'map',
   // Feed (design §7.2): the gathering-level gate and the digest threshold. Off by default.
   'feed_posts', 'feed_digest_threshold',
+  // Attendance voting (design §11): opt-in, with its own fresh credit budget. Off by default.
+  'attendance_voting_enabled', 'attendance_credits',
 ])
 
 /**
@@ -295,6 +298,15 @@ function buildUpdate(body: Body, current: EventRecord): EventUpdate {
     if (!Number.isInteger(n) || (n as number) < 1 || (n as number) > 100) fail('The digest threshold must be a whole number from 1 to 100.', 'feed_digest_threshold')
     update.feed_digest_threshold = n
   }
+  if ('attendance_voting_enabled' in body) {
+    if (typeof body.attendance_voting_enabled !== 'boolean') fail('Attendance voting must be on or off.', 'attendance_voting_enabled')
+    update.attendance_voting_enabled = body.attendance_voting_enabled
+  }
+  if ('attendance_credits' in body) {
+    const credits = body.attendance_credits
+    if (!Number.isInteger(credits) || (credits as number) <= 0 || (credits as number) > 2147483647) fail('Attendance credits must be a positive whole number.', 'attendance_credits')
+    update.attendance_credits = credits
+  }
 
   if ('theme' in body) update.theme = mergeTheme(current.theme, body.theme)
   if ('map' in body) {
@@ -375,6 +387,9 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ ev
 
   const enteringVoting = statusChanged && nextStatus === 'voting_open'
   const leavingVoting = statusChanged && current.status === 'voting_open'
+  // Attendance voting (design §11) opens when the gathering goes live, or when an organizer
+  // switches it on while already live. `openAttendanceRound` opens nothing when it is off.
+  const openingAttendance = nextStatus === 'live' && (statusChanged || update.attendance_voting_enabled === true)
 
   let saved: EventRecord | undefined
   let notified = 0
@@ -417,6 +432,21 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ ev
           actionUrl: `/e/${row.slug}`,
           data: {},
         })
+      }
+      if (openingAttendance) {
+        const attendanceRound = await openAttendanceRound(t, row.id)
+        // Members hear about it once, when the gathering goes live (re-enabling is idempotent).
+        if (attendanceRound && attendanceRound.status === 'open' && statusChanged) {
+          notified += await notify(t, {
+            eventId: row.id,
+            userIds: await members(t, row.id),
+            type: 'voting_opened',
+            title: `Attendance voting is open for ${row.name}`,
+            body: `You have ${attendanceRound.credits} fresh credits. Vote for a session while you are in it, from My schedule or the session page.`,
+            actionUrl: `/e/${row.slug}/my-schedule`,
+            data: { round: 'attendance', closes_at: attendanceRound.closesAt },
+          })
+        }
       }
       return row
     })

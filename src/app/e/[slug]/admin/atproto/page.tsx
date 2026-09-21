@@ -59,7 +59,7 @@ interface Status {
     sessionsCancelled: number
     approvalsPending: number
   }
-  flagged: Array<{ id: string; title: string; kind: 'cid-drift' | 'withdrawn' | 'author-inactive'; since: string; proposalUri: string | null }>
+  flagged: Array<{ id: string; title: string; kind: 'cid-drift' | 'withdrawn' | 'author-inactive' | 'location-changed'; since: string; proposalUri: string | null }>
   peers: Array<{ peer_did: string; label: string | null; cross_listing_enabled: boolean; created_at: string }>
   listings: Array<{ id: string; session_id: string | null; subject_uri: string; record_uri: string | null; origin: 'own' | 'peer'; status: 'listed' | 'removed'; tags: string[]; updated_at: string }>
   recentAudit: AuditRow[]
@@ -159,6 +159,7 @@ const FLAG_LABEL: Record<Status['flagged'][number]['kind'], { label: string; bad
   'cid-drift': { label: 'Edited', badge: 'amber' },
   withdrawn: { label: 'Withdrawn', badge: 'destructive' },
   'author-inactive': { label: 'Proposer inactive', badge: 'muted' },
+  'location-changed': { label: 'Location changed — re-publish', badge: 'amber' },
 }
 
 function when(iso: string | null | undefined): string {
@@ -531,6 +532,10 @@ export default function AdminAtprotoPage() {
                       {f.kind === 'cid-drift' ? (
                         <Button size="sm" variant="outline" loading={busy === `republish:${f.id}`} disabled={busy !== null && busy !== `republish:${f.id}`} onClick={() => act(`republish:${f.id}`, () => apiFetch(`${apiBase}/sessions/${f.id}`, { method: 'POST', json: { action: 'republish' } }), 'Re-published with the proposer’s current version.')}>
                           Adopt and re-publish
+                        </Button>
+                      ) : f.kind === 'location-changed' ? (
+                        <Button size="sm" variant="outline" loading={busy === `republish:${f.id}`} disabled={busy !== null && busy !== `republish:${f.id}`} onClick={() => act(`republish:${f.id}`, () => apiFetch(`${apiBase}/sessions/${f.id}`, { method: 'POST', json: { action: 'republish' } }), 'Re-published with the current location.')}>
+                          Re-publish
                         </Button>
                       ) : null}
                       <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" disabled={busy !== null} onClick={() => setReasonFor({ kind: 'cancel', id: f.id })}>

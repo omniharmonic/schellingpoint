@@ -104,8 +104,13 @@ export default function AdminKnowledgePage() {
     setWorking(kind)
     try {
       if (kind === 'request') {
-        const r = await apiFetch<{ sessions: number; notified: number }>(`${base}/coverage`, { method: 'POST', json: { action: 'request' } })
-        toast({ title: r.sessions ? `Asked the hosts of ${plural(r.sessions, 'session')}` : 'Every scheduled session already has a transcript', description: r.notified ? `${plural(r.notified, 'notification')} sent.` : undefined, variant: 'success' })
+        const r = await apiFetch<{ sessions: number; notified: number; skipped: number }>(`${base}/coverage`, { method: 'POST', json: { action: 'request' } })
+        const skippedNote = r.skipped ? `${plural(r.skipped, 'session')} asked in the last 24 hours skipped.` : ''
+        toast({
+          title: r.sessions ? `Asked the hosts of ${plural(r.sessions, 'session')}` : r.skipped ? 'Already asked today' : 'Every scheduled session already has a transcript',
+          description: [r.notified ? `${plural(r.notified, 'notification')} sent.` : '', skippedNote].filter(Boolean).join(' ') || undefined,
+          variant: 'success',
+        })
         setConfirmRequest(false)
       } else {
         const r = await apiFetch<{ configured: boolean; queued: boolean; message?: string }>(`${base}/${kind}`, { method: 'POST' })

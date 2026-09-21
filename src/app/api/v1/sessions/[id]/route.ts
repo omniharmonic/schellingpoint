@@ -235,9 +235,26 @@ export async function PATCH(request: Request, { params }: Params) {
   if (timePreference) {
     timeOutcome = await reconcileTimePreference(id, viewer.accountId, timePreference)
   }
+  // A self-hosted pin is app-side, but its COARSE point rides on the gathering's calendar event
+  // (spec §8.1): once that event is on the network, refresh it (non-destructive CAS rewrite; the
+  // exact point never leaves the app). Runs as the system: the host's edit is authorised above,
+  // and the gathering actor's steward check would otherwise refuse a host.
+  let network: AtprotoOutcome | undefined
+  const locationChanged = ['location_lat', 'location_lng', 'public_geo'].some((k) => k in fields)
+  if (locationChanged && rel.calendar_event_uri) {
+    try {
+      const { refreshSessionEvents } = await import('@/lib/atproto/publish')
+      const out = await refreshSessionEvents({ eventId: access.event.id, callerUserId: null, sessionIds: [id] })
+      const event = out.results.find((r) => r.kind === 'session-event' && r.id === id)
+      network = event?.error ? { error: event.error } : event?.skipped ? { skipped: event.skipped } : { uri: event?.uri ?? rel.calendar_event_uri, ...(event?.cid ? { cid: event.cid } : {}) }
+    } catch (e) {
+      console.error('[sessions] calendar event refresh after location change failed:', e instanceof Error ? e.message : e)
+      network = { error: 'The location is saved, but the published schedule could not be refreshed yet.' }
+    }
+  }
 
   const session = await getSession(access, id)
-  return json({ session, ...(atproto ? { atproto } : {}), ...(timeOutcome ? { time_preference: timeOutcome } : {}) })
+  return json({ session, ...(atproto ? { atproto } : {}), ...(timeOutcome ? { time_preference: timeOutcome } : {}), ...(network ? { network } : {}) })
 }
 
 /**

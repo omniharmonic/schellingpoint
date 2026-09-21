@@ -73,6 +73,9 @@ interface AtIdentity {
   kind: 'custodial' | 'oauth' | null
   owned: boolean
   publishProposals: boolean
+  /** Custodial opt-in: an `app.bsky.actor.profile` record in the person's own repo (design §5.5). */
+  publishProfile: boolean
+  profileRecordUri: string | null
 }
 
 /** Shape of GET/PATCH /api/me/profile → profile. */
@@ -317,6 +320,8 @@ export function AccountPanel({ gathering, onDirtyChange, onCancel, active = true
   const [confirmOwnership, setConfirmOwnership] = React.useState(false)
   const [resyncBusy, setResyncBusy] = React.useState(false)
   const [resyncMessage, setResyncMessage] = React.useState<{ type: 'success' | 'error'; text: string } | null>(null)
+  const [profileRecordBusy, setProfileRecordBusy] = React.useState(false)
+  const [profileRecordMessage, setProfileRecordMessage] = React.useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
   const loadAtIdentity = React.useCallback(async () => {
     try {
@@ -461,6 +466,31 @@ export function AccountPanel({ gathering, onDirtyChange, onCancel, active = true
       console.error('Error updating publish_proposals:', err)
       setAtInfo(previous)
       setAtMessage({ type: 'error', text: 'Could not save that setting. Please try again.' })
+    }
+  }
+
+  const handlePublishProfileToggle = async (publish: boolean) => {
+    if (!atInfo) return
+    const previous = atInfo
+    setAtInfo({ ...atInfo, publishProfile: publish })
+    setProfileRecordMessage(null)
+    setProfileRecordBusy(true)
+    try {
+      setAtInfo(await apiFetch<AtIdentity>('/api/atproto/me', { method: 'PATCH', json: { publish_profile: publish } }))
+      toast({ title: publish ? 'Your profile is now published to the network' : 'Your profile record was deleted', variant: 'success' })
+    } catch (err) {
+      console.error('Error updating publish_profile:', err)
+      setAtInfo(previous)
+      const code = err instanceof ApiError ? err.code : undefined
+      setProfileRecordMessage({
+        type: 'error',
+        text:
+          code === 'pds_unavailable'
+            ? (publish ? 'Your repository couldn’t be written right now. Nothing was published; try again in a moment.' : 'Your repository couldn’t be reached right now. Your profile is still published; try again in a moment.')
+            : err instanceof Error ? err.message : 'Could not save that setting. Please try again.',
+      })
+    } finally {
+      setProfileRecordBusy(false)
     }
   }
 
@@ -739,6 +769,42 @@ export function AccountPanel({ gathering, onDirtyChange, onCancel, active = true
                 </span>
               </label>
             </div>
+
+            {atInfo.kind === 'custodial' && !atInfo.owned && (
+              <WarningBox title="Publish my profile to the network" data-testid="publish-profile">
+                <p className="text-xs text-muted-foreground">
+                  Off by default. Turning this on writes your display name and bio as a profile record in your own
+                  repository on the open network, so anyone can read them and other services may keep copies even
+                  after you turn it off. Your photo, email and everything else stay here. Turning it off deletes the
+                  record from your repository.
+                </p>
+                <div className="mt-3 flex items-start justify-between gap-4">
+                  <label htmlFor={`${tabId}-publish-profile`} className="text-xs cursor-pointer">
+                    <span className="font-medium text-foreground">
+                      {atInfo.publishProfile ? 'Published: your name and bio are world-readable.' : 'Not published.'}
+                    </span>
+                    {atInfo.publishProfile && atInfo.profileRecordUri && (
+                      <span className="block font-mono text-muted-foreground break-all mt-0.5">{atInfo.profileRecordUri}</span>
+                    )}
+                  </label>
+                  <Switch
+                    id={`${tabId}-publish-profile`}
+                    checked={atInfo.publishProfile}
+                    onCheckedChange={handlePublishProfileToggle}
+                    disabled={profileRecordBusy}
+                    aria-label="Publish my profile to the network"
+                  />
+                </div>
+                <StatusLine message={profileRecordMessage} />
+              </WarningBox>
+            )}
+
+            {atInfo.kind === 'custodial' && atInfo.owned && atInfo.publishProfile && (
+              <p className="text-xs text-muted-foreground">
+                Your published profile record stays in your repository; since you own this identity now, manage it
+                from your PDS.
+              </p>
+            )}
 
             {atInfo.kind === 'custodial' && !atInfo.owned && (
               <WarningBox title="Take ownership of this identity" data-testid="take-ownership">

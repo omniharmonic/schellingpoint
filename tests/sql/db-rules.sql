@@ -218,7 +218,36 @@ BEGIN
     RAISE EXCEPTION 'Co-host row accepted a foreign event_id';
   EXCEPTION WHEN check_violation THEN NULL;
   END;
-  RAISE NOTICE 'PASS: proposal approval/cap/format/self-authorship, session guard, event pinning, ticket lockout, roster administration, server-only secrets and ballots, co-host backfill';
+
+  -- Attendance voting (migration 0026): off by default, a positive fresh budget, and the
+  -- attendance round shares the pre-event round's tables and key lifecycle.
+  IF (SELECT attendance_voting_enabled FROM public.events WHERE id = eid) THEN
+    RAISE EXCEPTION 'events.attendance_voting_enabled must default to false';
+  END IF;
+  IF (SELECT attendance_credits FROM public.events WHERE id = eid) <> 100 THEN
+    RAISE EXCEPTION 'events.attendance_credits must default to 100';
+  END IF;
+  BEGIN
+    UPDATE public.events SET attendance_credits = 0 WHERE id = eid;
+    RAISE EXCEPTION 'events.attendance_credits accepted 0';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+  INSERT INTO public.vote_rounds(event_id, phase, mechanism, credits, opens_at, closes_at)
+    VALUES (eid, 'attendance', 'quadratic', 100, now(), now() + interval '1 day');
+  BEGIN
+    INSERT INTO public.vote_rounds(event_id, phase, mechanism, credits, opens_at, closes_at)
+      VALUES (eid, 'attendance', 'quadratic', 100, now(), now() + interval '1 day');
+    RAISE EXCEPTION 'A second open attendance round was accepted for one event';
+  EXCEPTION WHEN unique_violation THEN NULL;
+  END;
+  -- A pre-event round may still be open alongside it: the index is per (event, phase).
+  INSERT INTO public.vote_rounds(event_id, phase, mechanism, credits, opens_at, closes_at)
+    VALUES (eid, 'pre-event', 'quadratic', 100, now(), now() + interval '1 day');
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name IN ('vote_entries', 'vote_ballots')
+             AND column_name IN ('account_id', 'user_id', 'did', 'voter_id')) THEN
+    RAISE EXCEPTION 'ballot tables grew an identifying column';
+  END IF;
+  RAISE NOTICE 'PASS: proposal approval/cap/format/self-authorship, session guard, event pinning, ticket lockout, roster administration, server-only secrets and ballots, co-host backfill, attendance voting defaults';
 END $$;
 
 ROLLBACK;

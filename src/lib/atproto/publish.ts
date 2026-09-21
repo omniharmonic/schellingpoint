@@ -1192,6 +1192,12 @@ async function writeSession(ctx: PublishContext, bundle: SessionBundle, results:
 export interface PublishScheduleInput extends PublishInput {
   /** Restrict to these sessions; otherwise every `scheduled` session with a time slot. */
   sessionIds?: string[]
+  /**
+   * Feed (design §7.4): when supplied, the ids of sessions whose slot was FIRST published in this
+   * call are appended here and NOT flushed — the caller (the chunked schedule job) flushes them
+   * once, so one big publish yields one digest instead of one per chunk. Absent → flushed here.
+   */
+  feedBatch?: string[]
 }
 
 /** True when a published slot and the app row disagree on time or venue: a MOVE, not a republish. */
@@ -1213,7 +1219,8 @@ function differsFromPublished(live: SlotRecord, bundle: SessionBundle): boolean 
 export async function publishSchedule(input: PublishScheduleInput, deps?: PublishDeps): Promise<PublishOutput> {
   const ctx = await loadPublishContext(input, deps)
   // Feed: collect first-published sessions for one flush (a big publish → one digest post).
-  ctx.feedBatch = []
+  // The caller's accumulator, when given, is flushed by the caller (chunked job); else here.
+  ctx.feedBatch = input.feedBatch ?? []
   const results: PublishResult[] = []
   const bundles = await loadSessionBundles(ctx, input.sessionIds)
   for (const group of chunk(bundles, SCHEDULE_BATCH_SESSIONS)) {
@@ -1261,7 +1268,7 @@ export async function publishSchedule(input: PublishScheduleInput, deps?: Publis
   }
   const firstPublished = ctx.feedBatch
   ctx.feedBatch = undefined
-  if (firstPublished?.length) await feedEnqueueSessions(ctx, 'session-scheduled', firstPublished)
+  if (!input.feedBatch && firstPublished?.length) await feedEnqueueSessions(ctx, 'session-scheduled', firstPublished)
   return { results }
 }
 
@@ -1415,6 +1422,37 @@ export interface SessionInput extends PublishInput {
   sessionId: string
   /** Organiser approvals backing a destructive write (`approvals.ts` collects them). */
   approvals?: Approval[]
+}
+
+/**
+ * Refresh the calendar events of sessions that are ALREADY on the network after app-side content
+ * they carry changed (spec §8.1: a self-hosted pin, a venue's point or its private-residence
+ * flag). Non-destructive: `publishSchedule` rewrites the calendar event and slot with CAS and no
+ * slot change (a moved slot is skipped with `requires-approval` as always). Sessions that are not
+ * published yet are left alone — a pin edit must never publish a session by itself.
+ */
+export async function refreshSessionEvents(input: PublishInput & { sessionIds: string[] }, deps?: PublishDeps): Promise<PublishOutput> {
+  if (!input.sessionIds.length) return { results: [] }
+  const rows = await sql<{ id: string }[]>`
+    select id from sessions
+    where event_id = ${input.eventId} and id in ${sql(input.sessionIds)}
+      and calendar_event_uri is not null and slot_uri is not null and cancelled_at is null
+      and status = 'scheduled' and time_slot_id is not null
+  `
+  if (!rows.length) return { results: [] }
+  return publishSchedule({ eventId: input.eventId, callerUserId: input.callerUserId, sessionIds: rows.map((r) => r.id) }, deps)
+}
+
+/** Published sessions whose calendar event carries `venueId`'s location (by session or by slot). */
+export async function publishedSessionIdsInVenue(eventId: string, venueId: string): Promise<string[]> {
+  const rows = await sql<{ id: string }[]>`
+    select s.id from sessions s
+    left join time_slots t on t.id = s.time_slot_id and t.event_id = s.event_id
+    where s.event_id = ${eventId} and s.calendar_event_uri is not null and s.cancelled_at is null
+      and coalesce(s.venue_id, t.venue_id) = ${venueId}
+    order by s.created_at, s.id
+  `
+  return rows.map((r) => r.id)
 }
 
 /** `publishSchedule` for one session. */

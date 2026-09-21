@@ -20,6 +20,7 @@ import {
   type RoundPhase,
   type VotingMechanism,
 } from './mechanism'
+import { isHappeningNow } from './attendance'
 import { isUuid, roundState, toRoundInfo, WRITABLE_STATUS, type RoundInfo, type RoundStatus } from './rounds'
 
 export interface Eligibility {
@@ -121,24 +122,35 @@ async function pruneAllocation(db: Sql, eventId: string, allocated: unknown): Pr
   return out
 }
 
-function explainNotOpen(round: RoundInfo | null, status: RoundStatus, eventStatus: string | null): string {
-  if (!round || status === 'none') return 'Voting has not opened for this gathering.'
-  if (status === 'closed') return 'Voting has closed. Ballots are sealed.'
-  if (status === 'upcoming') return `Voting opens ${new Date(round.opensAt).toUTCString()}.`
-  if (eventStatus !== WRITABLE_STATUS[round.phase]) return 'Voting is paused right now.'
-  return 'Voting is not open right now.'
+function explainNotOpen(round: RoundInfo | null, status: RoundStatus, eventStatus: string | null, phase: RoundPhase = 'pre-event'): string {
+  const what = phase === 'attendance' ? 'Attendance voting' : 'Voting'
+  if (!round || status === 'none') {
+    return phase === 'attendance' ? 'Attendance voting opens when the gathering is live.' : 'Voting has not opened for this gathering.'
+  }
+  if (status === 'closed') return `${what} has closed. Ballots are sealed.`
+  if (status === 'upcoming') return `${what} opens ${new Date(round.opensAt).toUTCString()}.`
+  if (eventStatus !== WRITABLE_STATUS[round.phase]) return `${what} is paused right now.`
+  return `${what} is not open right now.`
 }
 
-/** The viewer's own allocation and budget for the event's current round. */
-export async function getAllocation(eventId: string, accountId: string): Promise<AllocationView> {
-  const state = await roundState(eventId)
-  const [eventRow] = await sql<{ status: string; vote_credits_per_user: number | null }[]>`
-    select status, vote_credits_per_user from events where id = ${eventId}
+/**
+ * The budget a voter has in a round. Pre-event rounds honour the member's or ticket tier's
+ * override; the attendance round is the same fresh amount for everyone (PRD §2.3).
+ */
+function budgetFor(phase: RoundPhase, roundCredits: number, override: number | null): number {
+  return phase === 'attendance' ? roundCredits : (positiveOrNull(override) ?? roundCredits)
+}
+
+/** The viewer's own allocation and budget for the event's current round of `phase`. */
+export async function getAllocation(eventId: string, accountId: string, phase: RoundPhase = 'pre-event'): Promise<AllocationView> {
+  const state = await roundState(eventId, phase)
+  const [eventRow] = await sql<{ status: string; vote_credits_per_user: number | null; attendance_credits: number | null }[]>`
+    select status, vote_credits_per_user, attendance_credits from events where id = ${eventId}
   `
   const eligibility = await checkEligibility(sql, eventId, accountId)
   const round = state.round
-  const baseCredits = round?.credits ?? eventRow?.vote_credits_per_user ?? 0
-  const budget = positiveOrNull(eligibility.override) ?? baseCredits
+  const baseCredits = round?.credits ?? (phase === 'attendance' ? eventRow?.attendance_credits : eventRow?.vote_credits_per_user) ?? 0
+  const budget = budgetFor(phase, baseCredits, eligibility.override)
 
   let allocation: Record<string, number> = {}
   if (round && round.status !== 'closed') {
@@ -151,7 +163,7 @@ export async function getAllocation(eventId: string, accountId: string): Promise
   const writable = !!round && state.status === 'open' && eventRow?.status === WRITABLE_STATUS[round.phase]
   const canVote = writable && eligibility.eligible
   const reason = !writable
-    ? explainNotOpen(round, state.status, eventRow?.status ?? null)
+    ? explainNotOpen(round, state.status, eventRow?.status ?? null, phase)
     : eligibility.eligible ? null : (eligibility.reason ?? 'You cannot vote in this gathering.')
 
   return {
@@ -178,6 +190,7 @@ export async function setAllocation(
   accountId: string,
   sessionId: string,
   votes: number,
+  phase: RoundPhase = 'pre-event',
 ): Promise<AllocationView> {
   if (!isUuid(eventId)) throw new VotingError('Event not found', 404, 'NotFound')
   if (!isUuid(accountId)) throw new VotingError('Sign in to vote', 401, 'NotEligible')
@@ -186,8 +199,8 @@ export async function setAllocation(
     throw new VotingError('votes must be a whole number of 0 or more', 400, 'InvalidVotes', 'votes')
   }
 
-  await tx((t) => setAllocationIn(t, eventId, accountId, sessionId, votes))
-  return getAllocation(eventId, accountId)
+  await tx((t) => setAllocationIn(t, eventId, accountId, sessionId, votes, phase))
+  return getAllocation(eventId, accountId, phase)
 }
 
 async function setAllocationIn(
@@ -196,14 +209,15 @@ async function setAllocationIn(
   accountId: string,
   sessionId: string,
   votes: number,
+  phase: RoundPhase,
 ): Promise<void> {
-  // The round, locked against a concurrent close.
+  // The round of this phase, locked against a concurrent close.
   const rounds = await t<LockedRound[]>`
     select r.id, r.event_id, r.phase, r.mechanism, r.credits, r.opens_at, r.closes_at, r.finalized_at,
            e.status as event_status, now() as now
     from vote_rounds r
     join events e on e.id = r.event_id
-    where r.event_id = ${eventId} and r.finalized_at is null
+    where r.event_id = ${eventId} and r.phase = ${phase} and r.finalized_at is null
     order by r.opens_at asc
     for share of r
   `
@@ -217,12 +231,12 @@ async function setAllocationIn(
   )
   if (!open) {
     const first = rounds[0]
-    if (!first) throw new VotingError('Voting has not opened for this gathering.', 409, 'NoRound')
+    if (!first) throw new VotingError(explainNotOpen(null, 'none', null, phase), 409, 'NoRound')
     const info = toRoundInfo(first, now)
     if (now >= new Date(first.closes_at).getTime()) {
-      throw new VotingError('Voting has closed. Ballots are sealed.', 409, 'RoundClosed')
+      throw new VotingError(explainNotOpen(info, 'closed', first.event_status, phase), 409, 'RoundClosed')
     }
-    throw new VotingError(explainNotOpen(info, info.status, first.event_status), 409, 'RoundNotOpen')
+    throw new VotingError(explainNotOpen(info, info.status, first.event_status, phase), 409, 'RoundNotOpen')
   }
   const mechanism = open.mechanism as VotingMechanism
 
@@ -251,6 +265,16 @@ async function setAllocationIn(
     if (!['approved', 'scheduled'].includes(session.status) || session.is_votable === false) {
       throw new VotingError('This session is not open for voting.', 403, 'SessionNotVotable', 'sessionId')
     }
+    // Attendance votes name only what is happening: the slot ± grace, checked on the
+    // server's clock (design §11). Removing a vote is always allowed.
+    if (phase === 'attendance' && !(await isHappeningNow(t, eventId, sessionId))) {
+      throw new VotingError(
+        'This session is not happening right now. Attendance votes open 15 minutes before a session starts and close 15 minutes after it ends.',
+        403,
+        'SessionNotHappening',
+        'sessionId',
+      )
+    }
   }
 
   // Serialize this voter's writes: create the row if needed, then lock it.
@@ -270,7 +294,7 @@ async function setAllocationIn(
   if (votes === 0) delete after[sessionId]
   else after[sessionId] = votes
 
-  const budget = positiveOrNull(eligibility.override) ?? open.credits
+  const budget = budgetFor(phase, open.credits, eligibility.override)
   const oldCost = allocationCost(before, mechanism)
   const newCost = allocationCost(after, mechanism)
   // A reduction is always allowed, even if an organizer lowered the budget below the spend.

@@ -24,6 +24,32 @@ export function isPhase(value: unknown): value is RoundPhase {
   return typeof value === 'string' && (PHASES as readonly string[]).includes(value)
 }
 
+/**
+ * The short name a round goes by on the wire (`?round=pre|attendance`, `useVoting(slug, 'attendance')`).
+ * `RoundPhase` is the database value; `RoundKey` is what routes and the browser say.
+ */
+export type RoundKey = 'pre' | 'attendance'
+
+export const ROUND_KEYS: readonly RoundKey[] = ['pre', 'attendance']
+
+export function isRoundKey(value: unknown): value is RoundKey {
+  return typeof value === 'string' && (ROUND_KEYS as readonly string[]).includes(value)
+}
+
+export function phaseOf(key: RoundKey): RoundPhase {
+  return key === 'attendance' ? 'attendance' : 'pre-event'
+}
+
+export function keyOf(phase: RoundPhase): RoundKey {
+  return phase === 'attendance' ? 'attendance' : 'pre'
+}
+
+/** Minutes either side of a session's slot during which attendance votes for it are accepted (design §11). */
+export const ATTENDANCE_GRACE_MINUTES = 15
+
+/** Below this share of the budget, one more attendance vote asks for confirmation (PRD §4.6 interstitial). */
+export const LOW_CREDIT_SHARE = 0.25
+
 /** Credits that `votes` on one session cost. Zero votes cost nothing. */
 export function voteCost(votes: number, mechanism: VotingMechanism): number {
   if (!Number.isFinite(votes) || votes <= 0) return 0

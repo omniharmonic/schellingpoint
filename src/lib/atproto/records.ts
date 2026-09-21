@@ -177,6 +177,30 @@ export function buildGatheringProfileRecord(input: GatheringProfileInput): Actor
   })
 }
 
+export interface PersonProfileInput {
+  displayName?: string | null
+  bio?: string | null
+  createdAt?: string | Date | null
+}
+
+/**
+ * A custodial PERSON's `app.bsky.actor.profile` at `self` in their OWN repo (release design §5.5,
+ * opt-in): display name and bio, clamped to the lexicon's limits. Text only — no avatar blob (the
+ * PDS would need the person's own upload, and a mirrored copy of a third-party image is not ours
+ * to publish; the gathering profile skips it for the same reason), no banner, labels or pinned
+ * post. Never the gathering's name or any DID.
+ */
+export function buildPersonProfileRecord(input: PersonProfileInput): ActorProfileRecord {
+  const name = text(input.displayName)
+  const bio = text(input.bio)
+  return compact({
+    $type: NSID.actorProfile,
+    displayName: name ? clampGraphemes(name, 64, 640).trim() || undefined : undefined,
+    description: bio ? clampGraphemes(bio, 256, 2560).trim() || undefined : undefined,
+    createdAt: input.createdAt ? toIso(input.createdAt) : undefined,
+  })
+}
+
 export interface GatheringCalendarEventInput {
   name: string
   /** PUBLIC description only. */

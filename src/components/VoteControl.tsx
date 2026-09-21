@@ -1,12 +1,17 @@
 'use client'
 
 /**
- * `<VoteControl eventSlug sessionId compact? />` — the only way anyone casts a vote (plan §7.2).
+ * `<VoteControl eventSlug sessionId compact? round? />` — the only way anyone casts a vote (plan §7.2).
  *
  * Shows the viewer's OWN votes for one session, what they cost ("3 votes = 9 credits"), and
  * what the next vote would cost. Never shows anyone else's votes or any total. When voting
  * is not possible — signed out, window not open, not eligible, out of credits — the buttons
  * are disabled and the reason is written next to them.
+ *
+ * `round="attendance"` is the during-event tap-to-vote (design §11, PRD §4.6): the session
+ * must be inside its slot ± 15 min (the server decides), and when one more vote would leave
+ * less than a quarter of the fresh budget, an inline confirmation asks first
+ * ("Vote anyway" / "Save credits").
  *
  * Safe inside a link or a clickable card: clicks do not propagate. Buttons stay enabled while
  * a write is in flight (writes are queued in order), so keyboard focus is never dropped.
@@ -16,8 +21,9 @@ import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { Check, Loader2, Minus, Plus } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { ConfirmInline } from '@/components/ui/confirm-inline'
 import { useVoting } from '@/hooks/useVoting'
-import { costLabel, maxVotesFor, voteCost } from '@/lib/voting/mechanism'
+import { ATTENDANCE_GRACE_MINUTES, costLabel, LOW_CREDIT_SHARE, maxVotesFor, voteCost, type RoundKey } from '@/lib/voting/mechanism'
 import { plural } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
@@ -29,6 +35,8 @@ export interface VoteControlProps {
   className?: string
   /** Accessible name of the session, e.g. its title, used in button labels. */
   sessionTitle?: string
+  /** Which round to vote in: the pre-event round (default) or the attendance round. */
+  round?: RoundKey
 }
 
 function stop(e: React.SyntheticEvent) {
@@ -39,24 +47,32 @@ function stop(e: React.SyntheticEvent) {
 /** One width for the helper text under the control, in both layouts. */
 const NOTE_WIDTH = 'max-w-[16rem]'
 
-export function VoteControl({ eventSlug, sessionId, compact = false, className, sessionTitle }: VoteControlProps) {
-  const voting = useVoting(eventSlug)
+export function VoteControl({ eventSlug, sessionId, compact = false, className, sessionTitle, round = 'pre' }: VoteControlProps) {
+  const voting = useVoting(eventSlug, round)
   const pathname = usePathname()
   const describedBy = React.useId()
   const votes = voting.allocation[sessionId] ?? 0
   const mechanism = voting.mechanism ?? 'quadratic'
   const busy = voting.pending.has(sessionId)
   const name = sessionTitle ? ` for ${sessionTitle}` : ''
+  const attendance = round === 'attendance'
 
   const nextCost = voteCost(votes + 1, mechanism) - voteCost(votes, mechanism)
   const atMax = votes >= maxVotesFor(mechanism)
   const affordable = nextCost <= voting.remaining
-  const canAdd = voting.canVote && !atMax && affordable
+  // Attendance votes name only what is happening (the server enforces the same window).
+  const happening = !attendance || voting.votableNow.has(sessionId)
+  const canAdd = voting.canVote && !atMax && affordable && happening
   const canRemove = voting.canVote && votes > 0
+  // PRD §4.6: below a quarter of the fresh budget, one more attendance vote asks first.
+  const leftAfter = voting.remaining - nextCost
+  const needsConfirm = attendance && voting.budget > 0 && leftAfter < voting.budget * LOW_CREDIT_SHARE
 
   let note: React.ReactNode = null
   if (voting.loading) {
     note = null
+  } else if (voting.signedIn && voting.canVote && attendance && !happening) {
+    note = `Attendance votes open ${ATTENDANCE_GRACE_MINUTES} minutes before a session starts and close ${ATTENDANCE_GRACE_MINUTES} minutes after it ends.`
   } else if (!voting.signedIn) {
     note =
       voting.status === 'open' ? (
@@ -82,10 +98,27 @@ export function VoteControl({ eventSlug, sessionId, compact = false, className, 
 
   // Show a refusal next to the control that caused it, not on every card.
   const [acted, setActed] = React.useState(false)
+  const [confirming, setConfirming] = React.useState(false)
   const setVotes = (value: number) => {
     setActed(true)
+    setConfirming(false)
     void voting.setVotes(sessionId, value)
   }
+  const addVote = () => {
+    if (needsConfirm) setConfirming(true)
+    else setVotes(votes + 1)
+  }
+  const confirmBox = confirming ? (
+    <ConfirmInline
+      className={cn(NOTE_WIDTH, 'w-full')}
+      message={`You have ${plural(voting.remaining, 'credit')} remaining. Adding another vote here costs ${plural(nextCost, 'credit')}. You'll have ${plural(Math.max(0, leftAfter), 'credit')} left for the sessions still to come.`}
+      confirmLabel="Vote anyway"
+      cancelLabel="Save credits"
+      loading={busy}
+      onConfirm={() => setVotes(votes + 1)}
+      onCancel={() => setConfirming(false)}
+    />
+  ) : null
   const noteClass = cn('text-xs text-muted-foreground', NOTE_WIDTH, compact && 'text-right')
   const errorNote =
     acted && voting.error ? (
@@ -114,7 +147,8 @@ export function VoteControl({ eventSlug, sessionId, compact = false, className, 
           aria-busy={busy || undefined}
           onClick={(e) => {
             stop(e)
-            setVotes(approved ? 0 : 1)
+            if (approved) setVotes(0)
+            else addVote()
           }}
         >
           <span className="mr-1.5 inline-flex h-4 w-4 items-center justify-center" aria-hidden>
@@ -122,7 +156,8 @@ export function VoteControl({ eventSlug, sessionId, compact = false, className, 
           </span>
           {approved ? 'Approved' : 'Approve'}
         </Button>
-        {note && (
+        {confirmBox}
+        {note && !confirming && (
           <p id={describedBy} className={noteClass}>
             {note}
           </p>
@@ -168,17 +203,18 @@ export function VoteControl({ eventSlug, sessionId, compact = false, className, 
           size={compact ? 'icon-sm' : 'icon'}
           aria-label={`Add a vote${name}${canAdd ? ` (costs ${plural(nextCost, 'credit')})` : ''}`}
           aria-describedby={note ? describedBy : undefined}
-          disabled={!canAdd}
+          disabled={!canAdd || confirming}
           aria-busy={busy || undefined}
           onClick={(e) => {
             stop(e)
-            setVotes(votes + 1)
+            addVote()
           }}
         >
           {busy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Plus className="h-4 w-4" aria-hidden />}
         </Button>
       </div>
-      {note && (
+      {confirmBox}
+      {note && !confirming && (
         <p id={describedBy} className={noteClass}>
           {note}
         </p>

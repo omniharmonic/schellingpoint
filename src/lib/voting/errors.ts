@@ -12,6 +12,7 @@ export type VotingErrorCode =
   | 'NotMember'
   | 'TicketRequired'
   | 'SessionNotVotable'
+  | 'SessionNotHappening'
   | 'InvalidVotes'
   | 'OverBudget'
   | 'InvalidRound'

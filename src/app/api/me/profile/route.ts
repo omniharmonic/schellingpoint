@@ -1,7 +1,8 @@
-import { NextResponse } from 'next/server'
+import { NextResponse, after } from 'next/server'
 import { sql, dbErrorResponse } from '@/lib/db'
 import { assertSameOrigin, requireViewer, type Viewer } from '@/lib/auth/viewer'
 import { publicUrl } from '@/lib/atproto/config'
+import { syncPersonProfileRecord } from '@/lib/atproto/person-profile'
 import { validateProfilePatch } from './validate'
 
 /**
@@ -46,6 +47,8 @@ export interface OwnProfile {
   /** Which of display_name / avatar_url / bio still mirror the network profile (release design §5). */
   synced_fields: string[]
   profile_synced_at: string | null
+  /** Custodial opt-in: name and bio are mirrored to an `app.bsky.actor.profile` in the person's own repo (§5.5). */
+  publish_profile: boolean
 }
 
 async function loadOwnProfile(viewer: Viewer): Promise<OwnProfile | null> {
@@ -54,7 +57,8 @@ async function loadOwnProfile(viewer: Viewer): Promise<OwnProfile | null> {
            p.display_name, p.bio, p.avatar_url, p.affiliation, p.building, p.telegram, p.interests, p.looking_for,
            p.ens, p.ens_verified_at, p.show_ens,
            coalesce(p.onboarding_completed, false) as onboarding_completed,
-           p.publish_proposals, p.synced_fields, p.profile_synced_at
+           p.publish_proposals, p.synced_fields, p.profile_synced_at,
+           coalesce(p.publish_profile, false) as publish_profile
     from accounts a join profiles p on p.id = a.id
     where a.id = ${viewer.accountId}
   `
@@ -140,6 +144,14 @@ export async function PATCH(request: Request) {
     if (mapped) return mapped
     console.error('[profile] update failed:', e instanceof Error ? e.message : e)
     return NextResponse.json({ error: 'Could not save your profile' }, { status: 500, headers: NO_STORE })
+  }
+
+  // An opted-in custodial person's public profile record follows their name and bio (design §5.5):
+  // rewritten after the response, as them, only when one of those two actually changed.
+  const nameChanged = has('display_name') && (patch.display_name ?? null) !== current.display_name
+  const bioChanged = has('bio') && (patch.bio ?? null) !== current.bio
+  if (current.publish_profile && (nameChanged || bioChanged)) {
+    after(() => syncPersonProfileRecord(viewer.accountId))
   }
 
   return NextResponse.json({ profile: await loadOwnProfile(viewer) }, { headers: NO_STORE })

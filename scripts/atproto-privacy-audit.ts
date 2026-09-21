@@ -70,7 +70,7 @@ async function loadValidate(): Promise<Validate> {
   return (await import(pathToFileURL(path.join(outdir, 'validate.js')).href)) as Validate
 }
 
-type Check = 'foreign-did' | 'host-name' | 'exact-location' | 'vote-columns' | 'ballot-key' | 'event-scope' | 'borrowed' | 'tally-k' | 'geo'
+type Check = 'foreign-did' | 'host-name' | 'exact-location' | 'vote-columns' | 'ballot-key' | 'event-scope' | 'borrowed' | 'tally-k' | 'geo' | 'profile-optin'
 
 interface Finding {
   check: Check
@@ -399,6 +399,43 @@ async function main(): Promise<void> {
       }
     }
 
+    /* ───────────── custodial profile records (opt-in, design §5.5) ───────────── */
+    // A custodial person's `app.bsky.actor.profile` may exist in their repo on OUR PDS only when
+    // they opted in (`profiles.publish_profile`). One `getRecord` per custodial account, live —
+    // the record is not indexed — so it stays cheap; a repo our PDS no longer hosts is skipped.
+    if (pds) {
+      const custodial = await sql<{ did: string; publish_profile: boolean; owned: boolean }[]>`
+        select a.did, coalesce(p.publish_profile, false) as publish_profile, a.owned_at is not null as owned
+        from accounts a left join profiles p on p.id = a.id
+        where a.kind = 'custodial'
+      `
+      counts['custodial accounts checked'] = custodial.length
+      let present = 0
+      for (const a of custodial) {
+        const url = new URL(`${pds}/xrpc/com.atproto.repo.getRecord`)
+        url.searchParams.set('repo', a.did)
+        url.searchParams.set('collection', NSID.actorProfile)
+        url.searchParams.set('rkey', 'self')
+        const res = await fetch(url, { signal: AbortSignal.timeout(10_000) })
+        if (res.status === 400 || res.status === 404) continue // no record, or the repo left our PDS
+        if (!res.ok) throw new Error(`getRecord ${NSID.actorProfile} failed (${res.status})`)
+        const body = (await res.json()) as { uri: string; value: Record<string, unknown> }
+        const rec: Rec = { uri: body.uri, did: a.did, collection: NSID.actorProfile, record: body.value, source: 'live' }
+        present++
+        // Once custody ended the record is theirs alone (we can neither rewrite nor delete it).
+        if (!a.publish_profile && !a.owned) findings.push({ check: 'profile-optin', where: where(rec), detail: 'custodial profile record exists without publish_profile' })
+        if ('avatar' in body.value || 'banner' in body.value) findings.push({ check: 'profile-optin', where: where(rec), detail: 'custodial profile record carries a blob' })
+        try {
+          assertValidRecord(NSID.actorProfile, { ...body.value, $type: NSID.actorProfile })
+          assertNoUnknownFields(NSID.actorProfile, { ...body.value, $type: NSID.actorProfile })
+          assertNoForeignDid(body.value, a.did)
+        } catch (e) {
+          findings.push({ check: 'profile-optin', where: where(rec), detail: e instanceof Error ? e.message.replace(/did:[a-z]+:[A-Za-z0-9._:%-]+/g, 'did:…') : String(e) })
+        }
+      }
+      counts['custodial profile records'] = present
+    }
+
     /* ───────────── tallies ───────────── */
     const tallies = gatheringRecords.filter((r) => r.collection === NSID.tally)
     counts['tallies'] = tallies.length
@@ -423,7 +460,7 @@ async function main(): Promise<void> {
   for (const [k, v] of Object.entries(counts)) console.log(`  ${`${k}:`.padEnd(40)} ${v}`)
   const byCheck = new Map<Check, number>()
   for (const f of findings) byCheck.set(f.check, (byCheck.get(f.check) ?? 0) + 1)
-  for (const check of ['foreign-did', 'host-name', 'exact-location', 'vote-columns', 'ballot-key', 'event-scope', 'borrowed', 'tally-k', 'geo'] as Check[]) {
+  for (const check of ['foreign-did', 'host-name', 'exact-location', 'vote-columns', 'ballot-key', 'event-scope', 'borrowed', 'tally-k', 'geo', 'profile-optin'] as Check[]) {
     console.log(`  [${byCheck.get(check) ? 'FAIL' : ' ok '}] ${check}${byCheck.get(check) ? ` (${byCheck.get(check)})` : ''}`)
   }
   for (const f of findings.slice(0, 200)) console.log(`  ${f.check}: ${f.where} — ${f.detail}`)

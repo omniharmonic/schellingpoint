@@ -1,4 +1,5 @@
 import 'server-only'
+import { isLatLng, parseLatLng, roundCoarse } from '@/lib/geo/coarse'
 /**
  * The two conflicts the record model makes possible (spec §6 "Conflicts"):
  *
@@ -123,9 +124,72 @@ export async function flagProposalWithdrawn(input: { sessionId: string }): Promi
 export interface FlaggedSession {
   id: string
   title: string
-  kind: 'cid-drift' | 'withdrawn' | 'author-inactive'
+  kind: 'cid-drift' | 'withdrawn' | 'author-inactive' | 'location-changed'
   since: string
   proposalUri: string | null
+}
+
+interface LocationRow {
+  id: string
+  title: string
+  updated_at: string
+  is_self_hosted: boolean | null
+  public_geo: { lat: number; lng: number } | null
+  venue_latitude: number | null
+  venue_longitude: number | null
+  venue_private: boolean | null
+  venue_geocoded_at: string | null
+  record: Record<string, unknown> | null
+}
+
+/** The geo a published calendar event carries, as "lat,lng" strings (there is at most one). */
+function recordGeo(record: Record<string, unknown> | null): string | null {
+  const locations = Array.isArray(record?.locations) ? (record!.locations as Array<Record<string, unknown>>) : []
+  const geo = locations.find((l) => l.$type === NSID.locationGeo)
+  if (!geo) return null
+  const lat = Number(geo.latitude)
+  const lng = Number(geo.longitude)
+  return Number.isFinite(lat) && Number.isFinite(lng) ? `${lat},${lng}` : null
+}
+
+/** The geo the event SHOULD carry now (spec §8.1), same rules as `publish.ts`. */
+function expectedGeo(row: LocationRow): string | null {
+  if (row.is_self_hosted) {
+    const c = parseLatLng(row.public_geo)
+    if (!c) return null
+    const r = roundCoarse(c.lat, c.lng)
+    return `${r.lat},${r.lng}`
+  }
+  if (row.venue_private || !isLatLng(row.venue_latitude, row.venue_longitude)) return null
+  return `${row.venue_latitude},${row.venue_longitude}`
+}
+
+/**
+ * Published sessions whose indexed calendar event carries a different location than the app
+ * would publish now (a self-hosted pin corrected, a room's point moved, a private-residence flag
+ * flipped): the post-commit refresh failed or was never run. Organisers re-publish from the
+ * Network page.
+ */
+export async function locationChangedSessions(eventId: string): Promise<FlaggedSession[]> {
+  const rows = await sql<LocationRow[]>`
+    select s.id, s.title, s.updated_at, s.is_self_hosted, s.public_geo,
+           v.latitude::float8 as venue_latitude, v.longitude::float8 as venue_longitude,
+           v.is_private_residence as venue_private, v.geocoded_at as venue_geocoded_at,
+           r.record
+    from sessions s
+    left join time_slots t on t.id = s.time_slot_id and t.event_id = s.event_id
+    left join venues v on v.id = coalesce(s.venue_id, t.venue_id) and v.event_id = s.event_id
+    left join at_records r on r.uri = s.calendar_event_uri
+    where s.event_id = ${eventId} and s.calendar_event_uri is not null and s.cancelled_at is null and s.status = 'scheduled'
+  `
+  const out: FlaggedSession[] = []
+  for (const row of rows) {
+    if (!row.record) continue // not indexed yet: nothing to compare against
+    if (recordGeo(row.record) === expectedGeo(row)) continue
+    const since = row.venue_geocoded_at && row.venue_geocoded_at > row.updated_at ? row.venue_geocoded_at : row.updated_at
+    out.push({ id: row.id, title: row.title, kind: 'location-changed', since, proposalUri: null })
+  }
+  return out
 }
 
 /** For the admin ATProto page: sessions needing an organiser's review. */
@@ -139,11 +203,14 @@ export async function flaggedSessions(eventId: string): Promise<FlaggedSession[]
            or (author_inactive_at is not null and (status in ('approved', 'scheduled') or slot_uri is not null)))
     order by coalesce(proposal_withdrawn_at, author_inactive_at, proposal_drift_at) desc
   `
-  return rows.map((r) => ({
+  const flagged: FlaggedSession[] = rows.map((r) => ({
     id: r.id,
     title: r.title,
     kind: r.withdrawn_at ? 'withdrawn' : r.inactive_at ? 'author-inactive' : 'cid-drift',
     since: (r.withdrawn_at ?? r.inactive_at ?? r.drift_at)!,
     proposalUri: r.proposal_uri,
   }))
+  const seen = new Set(flagged.map((f) => f.id))
+  for (const f of await locationChangedSessions(eventId)) if (!seen.has(f.id)) flagged.push(f)
+  return flagged
 }

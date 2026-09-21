@@ -38,6 +38,7 @@ export {
   type CloseRoundResult,
   type OpenRoundOptions,
   type PublicTally,
+  type ReadRoundOptions,
   type RoundInfo,
   type RoundStateResult,
   type RoundStatus,
@@ -46,6 +47,14 @@ export {
   type TallyEntry,
 } from './rounds'
 export { checkEligibility, getAllocation, setAllocation, type AllocationView, type Eligibility } from './allocation'
+export {
+  attendanceClosesAt,
+  attendanceWindow,
+  isHappeningNow,
+  openAttendanceRound,
+  sessionsHappeningNow,
+  type AttendanceWindow,
+} from './attendance'
 export {
   closeDueFeedbackWindows,
   FEEDBACK_WINDOW_HOURS,
@@ -64,12 +73,18 @@ export {
 export { isVotingError, RoundOpenError, VotingError, type VotingErrorCode } from './errors'
 export {
   allocationCost,
+  ATTENDANCE_GRACE_MINUTES,
   costLabel,
   isMechanism,
   isPhase,
+  isRoundKey,
   isValidVoteCount,
+  keyOf,
+  LOW_CREDIT_SHARE,
   maxVotesFor,
+  phaseOf,
   voteCost,
+  type RoundKey,
   type RoundPhase,
   type VotingMechanism,
 } from './mechanism'

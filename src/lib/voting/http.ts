@@ -8,6 +8,7 @@ import { dbErrorResponse, sql } from '@/lib/db'
 import { eventRole, getViewer, type Viewer } from '@/lib/auth/viewer'
 import type { EventRoleName } from '@/types/event'
 import { RoundOpenError, VotingError } from './errors'
+import { isRoundKey, phaseOf, type RoundPhase } from './mechanism'
 
 export const NO_STORE = { 'Cache-Control': 'private, no-store' } as const
 
@@ -56,6 +57,17 @@ export function errorResponse(e: unknown, context: string): Response {
   if (mapped) return mapped
   console.error(`[voting] ${context} failed:`, e)
   return jsonError(500, 'Something went wrong. Please try again.')
+}
+
+/**
+ * Which round a request means: `round=pre|attendance` as a query parameter (reads) or body
+ * field (writes), default the pre-event round. Anything else is a 400.
+ */
+export function roundParam(request: Request, body?: Record<string, unknown>): RoundPhase | NextResponse {
+  const raw = body && 'round' in body ? body.round : new URL(request.url).searchParams.get('round')
+  if (raw === null || raw === undefined || raw === '') return 'pre-event'
+  if (!isRoundKey(raw)) return jsonError(400, 'round must be pre or attendance', { field: 'round' })
+  return phaseOf(raw)
 }
 
 /** Parse a JSON body into an object, or a 400. */

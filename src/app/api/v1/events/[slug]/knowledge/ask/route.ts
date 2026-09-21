@@ -16,8 +16,9 @@ import { readTier } from '@/lib/knowledge/store'
  *        event: error    data: { error }
  *        503 `{ code: 'NotAvailable', reason }` when the pipeline is not configured.
  *
- * Members only, organizers included; the question and the gathering's chunks go to the
- * configured providers and nowhere else. Nothing here is stored.
+ * Members only, organizers included, and only over the transcripts the viewer's reading tier
+ * may read (organizers-only transcripts never reach a member's answer, excerpts or sources); the
+ * question and those chunks go to the configured providers and nowhere else. Nothing is stored.
  */
 
 export const runtime = 'nodejs'
@@ -39,22 +40,23 @@ async function memberGate(request: Request, slug: string) {
   if (!access.viewer) return jsonError(401, 'Sign in to ask the gathering')
   const tier = readTier(access.role)
   if (!tier) return jsonError(403, 'Ask the gathering is for members of this gathering')
-  return access
+  return { access, tier }
 }
 
 export async function GET(request: Request, { params }: RouteParams) {
   const { slug } = await params
-  const access = await memberGate(request, slug)
-  if (access instanceof Response) return access
-  return json(await askAvailability(access.event.id))
+  const gate = await memberGate(request, slug)
+  if (gate instanceof Response) return gate
+  return json(await askAvailability(gate.access.event.id, gate.tier))
 }
 
 export async function POST(request: Request, { params }: RouteParams) {
   const bad = assertSameOrigin(request)
   if (bad) return bad
   const { slug } = await params
-  const access = await memberGate(request, slug)
-  if (access instanceof Response) return access
+  const gate = await memberGate(request, slug)
+  if (gate instanceof Response) return gate
+  const { access, tier } = gate
   const body = await readJsonObject(request)
   if (body instanceof Response) return body
   const question = validateQuestion(body.question)
@@ -62,7 +64,7 @@ export async function POST(request: Request, { params }: RouteParams) {
 
   let prepared: Awaited<ReturnType<typeof prepareAsk>>
   try {
-    prepared = await prepareAsk({ id: access.event.id, name: access.event.name, slug: access.event.slug }, question)
+    prepared = await prepareAsk({ id: access.event.id, name: access.event.name, slug: access.event.slug }, question, tier)
   } catch (e) {
     console.error('[knowledge:ask] preparing failed', e instanceof Error ? e.message : e)
     return jsonError(502, 'The embeddings provider did not answer. Try again in a moment.', { code: 'ProviderError' })

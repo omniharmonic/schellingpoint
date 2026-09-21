@@ -248,6 +248,65 @@ test.describe('map', () => {
     expect(text).not.toContain('Secret Lane')
   })
 
+  test('published geo never goes stale: a corrected self-hosted pin, a moved venue pin and a private-residence flip rewrite the calendar events', async () => {
+    // 1. The host corrects their pin after publication: the record's coarse point follows.
+    const corrected = await api(`/api/v1/sessions/${selfHostedId}`, { method: 'PATCH', cookie: attendee.cookie, json: { location_lat: 40.0812, location_lng: -105.1712 } })
+    expect(corrected.status, corrected.text).toBe(200)
+    expect(corrected.body.network, corrected.text).toMatchObject({ uri: expect.stringContaining('community.lexicon.calendar.event') })
+    expect(corrected.body.network.error).toBeUndefined()
+    const [selfRow] = await sql<{ calendar_event_uri: string }[]>`select calendar_event_uri from sessions where id = ${selfHostedId}`
+    const selfRecord = await getRecord(selfRow!.calendar_event_uri)
+    expect(geoLocations(selfRecord!.value)).toEqual([{ $type: 'community.lexicon.location.geo', latitude: '40.08', longitude: '-105.17' }])
+    expect(JSON.stringify(selfRecord!.value)).not.toContain('40.0812')
+
+    // 2. A published session in the public room: moving the room's pin rewrites its event.
+    const proposed = await api('/api/v1/sessions', {
+      method: 'POST', cookie: attendee.cookie,
+      json: { event_slug: gathering.slug, title: `Hall talk ${RUN}`, format: 'talk', duration: 30 },
+    })
+    expect(proposed.status, proposed.text).toBe(201)
+    const hallId = proposed.body.id as string
+    const [otherSlot] = await sql<{ id: string }[]>`
+      select id from time_slots where event_id = ${gathering.id} and venue_id = ${publicVenueId} and coalesce(is_break, false) = false and id <> ${slotId} order by start_time limit 1
+    `
+    await sql`update sessions set status = 'scheduled', time_slot_id = ${otherSlot!.id}, venue_id = ${publicVenueId} where id = ${hallId}`
+    const published = await api(`/api/v1/events/${gathering.slug}/admin/atproto/publish`, { method: 'POST', cookie: owner.cookie, json: { what: 'schedule' } })
+    expect(published.status, published.text).toBe(200)
+    const [hallRow] = await sql<{ calendar_event_uri: string }[]>`select calendar_event_uri from sessions where id = ${hallId}`
+    expect(geoLocations((await getRecord(hallRow!.calendar_event_uri))!.value)).toEqual([{ $type: 'community.lexicon.location.geo', latitude: '40.0176', longitude: '-105.2797' }])
+
+    const moved = await api(`/api/v1/events/${gathering.slug}/admin/venues/${publicVenueId}`, { method: 'PATCH', cookie: owner.cookie, json: { latitude: 40.0251, longitude: -105.2913 } })
+    expect(moved.status, moved.text).toBe(200)
+    expect(moved.body.network.sessions, moved.text).toMatchObject({ attempted: true })
+    expect(moved.body.network.sessions.results.filter((r: any) => r.error)).toEqual([])
+    expect(moved.body.network.sessions.results.some((r: any) => r.kind === 'session-event' && r.id === hallId)).toBe(true)
+    expect(geoLocations((await getRecord(hallRow!.calendar_event_uri))!.value)).toEqual([{ $type: 'community.lexicon.location.geo', latitude: '40.0251', longitude: '-105.2913' }])
+
+    // 3. Flipping the room to a private residence removes the geo from the venue record AND the event.
+    const flipped = await api(`/api/v1/events/${gathering.slug}/admin/venues/${publicVenueId}`, { method: 'PATCH', cookie: owner.cookie, json: { is_private_residence: true, locality: 'Boulder' } })
+    expect(flipped.status, flipped.text).toBe(200)
+    expect(flipped.body.network.sessions.results.filter((r: any) => r.error)).toEqual([])
+    expect(geoLocations((await getRecord(hallRow!.calendar_event_uri))!.value)).toEqual([])
+    const [venueRow] = await sql<{ at_uri: string }[]>`select at_uri from venues where id = ${publicVenueId}`
+    expect(geoLocations((await getRecord(venueRow!.at_uri))!.value)).toEqual([])
+    // Nothing flagged: the refreshes kept the index in step with the app.
+    const status = await api(`/api/v1/events/${gathering.slug}/admin/atproto`, { cookie: owner.cookie })
+    expect(status.status, status.text).toBe(200)
+    expect(status.body.flagged.filter((f: any) => f.kind === 'location-changed')).toEqual([])
+    // Back to a public room for the checks that follow.
+    await api(`/api/v1/events/${gathering.slug}/admin/venues/${publicVenueId}`, { method: 'PATCH', cookie: owner.cookie, json: { is_private_residence: false } })
+
+    // 4. When a refresh is missed (the app row changes behind the route), the Network page flags it.
+    await sql`update sessions set public_geo = ${sql.json({ lat: 40.09, lng: -105.16 })}, updated_at = now() where id = ${selfHostedId}`
+    const stale = await api(`/api/v1/events/${gathering.slug}/admin/atproto`, { cookie: owner.cookie })
+    expect(stale.body.flagged).toEqual(expect.arrayContaining([expect.objectContaining({ id: selfHostedId, kind: 'location-changed' })]))
+    const republished = await api(`/api/v1/events/${gathering.slug}/admin/atproto/sessions/${selfHostedId}`, { method: 'POST', cookie: owner.cookie, json: { action: 'republish' } })
+    expect(republished.status, republished.text).toBe(200)
+    expect(geoLocations((await getRecord(selfRow!.calendar_event_uri))!.value)).toEqual([{ $type: 'community.lexicon.location.geo', latitude: '40.09', longitude: '-105.16' }])
+    const clear = await api(`/api/v1/events/${gathering.slug}/admin/atproto`, { cookie: owner.cookie })
+    expect(clear.body.flagged.filter((f: any) => f.kind === 'location-changed')).toEqual([])
+  })
+
   test('map reads follow membership: a private gathering is 404 to strangers, readable to members', async () => {
     const list = `/api/v1/events/${privateGathering.slug}/sessions?status=scheduled&timed=1&sort=time`
     expect((await api(list)).status).toBe(404)

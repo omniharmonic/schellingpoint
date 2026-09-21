@@ -365,7 +365,7 @@ Admin → **Knowledge** page (new admin nav item):
 ## 11. Attendance voting (Wave A, opt-in)
 
 PRD §2.3: fresh credits during the event, tap-to-vote per session, unlinkable. Implemented as a
-second ballot-key round `kind='attendance'` opened at event start and closed at end + 1 h, credits
+second ballot-key round (`vote_rounds.phase = 'attendance'`; migration 0002 already discriminates rounds by phase, so no `kind` column) opened at event start and closed at end + 1 h, credits
 `attendance_credits` (default 100), sessions eligible only while `now` is within their slot ± 15
 min ("happening now" list in My schedule). Tallies are k-suppressed like pre-votes. No payouts; the
 tally feeds the analytics page and a public `schellingpoint.draft.tally` per session after close.
@@ -382,6 +382,8 @@ Enabled per gathering in Voting settings. Everything else in PRD Phase 2/3 stays
 6. **Attendance voting is a later wave** and opt-in per gathering; no payouts.
 7. **Check-in moves under the organizer workspace.**
 
+**Status (2026-09-21):** every wave in §1 is implemented on the `atproto` branch, including A; open items are listed in §14.
+
 ## 13. Testing
 
 - Unit: scheduler (cost, hill-climb, score, constraints), post builder (truncation, facet
@@ -393,3 +395,12 @@ Enabled per gathering in Voting settings. Everything else in PRD Phase 2/3 stays
   `feed_posts` server-only.
 - Privacy audit: posts and venue geo included; private-residence venues publish no geo.
 - Visual: screenshot sweep of 30 surfaces at two widths before/after Wave P, attached to the PR.
+
+## 14. Open items after implementation
+
+- Avatar blobs for the gathering's and custodial people's profile records (needs an audited blob
+  upload path and JSON→lex blob handling in `validate.ts`).
+- A UI for `delete-post` (the destructive port action exists; two organizers must approve).
+- "Open at start_date" for attendance rounds relies on the manual `live` transition; a status job
+  would make it automatic.
+- Production release of this branch (a release restarts the app; decide the moment).

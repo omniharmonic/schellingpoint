@@ -98,6 +98,9 @@ export interface EventRow {
   transcripts_visibility?: 'members' | 'organizers';
   /** Migration 0023: organizer-chosen map view, app-side only. */
   map?: EventMapView | null;
+  /** Migration 0026: attendance voting (design §11), off by default; fresh credits per member. */
+  attendance_voting_enabled?: boolean;
+  attendance_credits?: number;
   created_at: string;
   updated_at: string;
 }
@@ -148,6 +151,9 @@ export interface Event {
   transcriptsVisibility?: 'members' | 'organizers';
   /** The organizer's chosen map view (spec §8.1), or null when the map area is not set. */
   map: EventMapView | null;
+  /** Attendance voting (design §11): opt-in per gathering, with its own fresh credit budget. */
+  attendanceVotingEnabled: boolean;
+  attendanceCredits: number;
 }
 
 // Event member relationship
@@ -197,6 +203,8 @@ export function transformEventRow(row: EventRow): Event {
     ticketingEnabled: row.ticketing_enabled,
     stripeAccountId: row.stripe_account_id,
     map: row.map ?? null,
+    attendanceVotingEnabled: row.attendance_voting_enabled ?? false,
+    attendanceCredits: row.attendance_credits ?? 100,
     // No hardcoded fallback — topics are organizer-defined.
     // Events created before organizer topics existed may have legacy defaults in the DB.
     suggestedTopics: row.suggested_topics || [],

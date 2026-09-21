@@ -4,11 +4,15 @@
  * The browser's view of the signed-in participant's own ballot (plan §7.2).
  *
  *   const { round, allocation, spent, remaining, loading, error, setVotes, refresh } = useVoting(eventSlug)
+ *   const attendance = useVoting(eventSlug, 'attendance')   // the during-event round (design §11)
  *
- * One store per event slug, shared by every component that calls the hook, so the credit
- * gauge, the session cards and My Votes always agree and the allocation is fetched once
- * per event. `VotingProvider` (mounted by `DashboardLayout`) warms the store; the hook
- * works without it too.
+ * One store per (event slug, round), shared by every component that calls the hook, so the
+ * credit gauge, the session cards and My Votes always agree and the allocation is fetched
+ * once per event and round. `VotingProvider` (mounted by `DashboardLayout`) warms the
+ * pre-event store; the hook works without it too.
+ *
+ * The attendance store also carries `votableNow`: the sessions inside their slot ± 15 min
+ * on the server's clock — the only ones an attendance vote may name.
  *
  * `setVotes` updates optimistically, sends writes in order, and on refusal rolls the
  * session back to the server's last confirmed value and exposes the server's message in
@@ -23,6 +27,7 @@ import {
   allocationCost,
   isValidVoteCount,
   maxVotesFor,
+  type RoundKey,
   type RoundPhase,
   type VotingMechanism,
 } from '@/lib/voting/mechanism'
@@ -62,11 +67,20 @@ interface MineResponse {
   sealed: boolean
   eligibility: { eligible: boolean; code?: string; reason?: string }
   sessions: VotedSession[]
+  attendance?: AttendanceBlock
+}
+
+/** The attendance round as every read describes it: open or not, and what is votable now. */
+interface AttendanceBlock {
+  open: boolean
+  votable_now: string[]
+  credits_remaining?: number | null
 }
 
 interface CurrentResponse {
   round: VotingRound | null
   status: RoundStatus
+  attendance?: AttendanceBlock
 }
 
 interface Confirmed {
@@ -80,6 +94,10 @@ interface Confirmed {
   sealed: boolean
   eligible: boolean
   sessions: VotedSession[]
+  /** Session ids inside their attendance window right now (server clock). */
+  votableNow: string[]
+  /** The attendance round accepts votes right now. */
+  attendanceOpen: boolean
 }
 
 interface Snapshot {
@@ -93,8 +111,14 @@ interface Snapshot {
 }
 
 export interface VotingState {
+  /** Which round this store describes. */
+  roundKey: RoundKey
   round: VotingRound | null
   status: RoundStatus
+  /** Sessions inside their attendance window right now; empty unless the attendance round is open. */
+  votableNow: ReadonlySet<string>
+  /** The attendance round accepts votes right now (also present on the pre-event store). */
+  attendanceOpen: boolean
   /** The round's mechanism; null before any round exists. */
   mechanism: VotingMechanism | null
   /** session id → the viewer's own votes. Empty once the round is closed (ballots are sealed). */
@@ -131,6 +155,8 @@ const EMPTY_CONFIRMED: Confirmed = {
   sealed: false,
   eligible: false,
   sessions: [],
+  votableNow: [],
+  attendanceOpen: false,
 }
 
 const STALE_MS = 60_000
@@ -147,16 +173,28 @@ function fromMine(r: MineResponse): Confirmed {
     sealed: r.sealed,
     eligible: !!r.eligibility?.eligible,
     sessions: r.sessions ?? [],
+    votableNow: r.attendance?.votable_now ?? [],
+    attendanceOpen: !!r.attendance?.open,
   }
 }
 
-function fromCurrent(r: CurrentResponse): Confirmed {
+function fromCurrent(r: CurrentResponse, roundKey: RoundKey): Confirmed {
+  const what = roundKey === 'attendance' ? 'Attendance voting' : 'Voting'
   const reason =
     r.status === 'open' ? 'Sign in to vote.'
-      : r.status === 'upcoming' && r.round ? `Voting opens ${new Date(r.round.opensAt).toLocaleString()}.`
-        : r.status === 'closed' ? 'Voting has closed. Ballots are sealed.'
-          : 'Voting has not opened for this gathering.'
-  return { ...EMPTY_CONFIRMED, round: r.round, status: r.status, mechanism: r.round?.mechanism ?? null, reason, sealed: r.status === 'closed' }
+      : r.status === 'upcoming' && r.round ? `${what} opens ${new Date(r.round.opensAt).toLocaleString()}.`
+        : r.status === 'closed' ? `${what} has closed. Ballots are sealed.`
+          : roundKey === 'attendance' ? 'Attendance voting opens when the gathering is live.' : 'Voting has not opened for this gathering.'
+  return {
+    ...EMPTY_CONFIRMED,
+    round: r.round,
+    status: r.status,
+    mechanism: r.round?.mechanism ?? null,
+    reason,
+    sealed: r.status === 'closed',
+    votableNow: r.attendance?.votable_now ?? [],
+    attendanceOpen: !!r.attendance?.open,
+  }
 }
 
 function merged(allocation: Record<string, number>, overlay: Record<string, number>): Record<string, number> {
@@ -186,7 +224,15 @@ class VotingStore {
   private pendingIds = new Set<string>()
   private boundaryTimer: ReturnType<typeof setTimeout> | null = null
 
-  constructor(private readonly slug: string) {}
+  constructor(
+    private readonly slug: string,
+    readonly roundKey: RoundKey,
+  ) {}
+
+  /** `?round=` / body `round` for this store; the pre-event round is the server default. */
+  private get roundQuery(): string {
+    return this.roundKey === 'attendance' ? '?round=attendance' : ''
+  }
 
   subscribe = (listener: () => void) => {
     this.listeners.add(listener)
@@ -231,8 +277,8 @@ class VotingStore {
       if (!this.snap.loaded) this.set({ loading: true })
       try {
         const confirmed = viewer
-          ? fromMine(await apiFetch<MineResponse>(`${base}/votes/mine`, { cache: 'no-store' }))
-          : fromCurrent(await apiFetch<CurrentResponse>(`${base}/rounds/current`, { cache: 'no-store' }))
+          ? fromMine(await apiFetch<MineResponse>(`${base}/votes/mine${this.roundQuery}`, { cache: 'no-store' }))
+          : fromCurrent(await apiFetch<CurrentResponse>(`${base}/rounds/current${this.roundQuery}`, { cache: 'no-store' }), this.roundKey)
         if (viewer !== this.viewer) return
         this.loadedAt = Date.now()
         this.set({ confirmed, loading: false, loaded: true, error: null })
@@ -309,7 +355,7 @@ class VotingStore {
     const viewer = this.viewer
     const run = async () => {
       try {
-        const res = await apiFetch<MineResponse>(`${base}/votes/mine`, { method: 'PUT', json: { sessionId, votes } })
+        const res = await apiFetch<MineResponse>(`${base}/votes/mine`, { method: 'PUT', json: { sessionId, votes, round: this.roundKey } })
         if (viewer !== this.viewer) return
         this.loadedAt = Date.now()
         this.settle(sessionId, seq, { confirmed: fromMine(res) })
@@ -343,18 +389,19 @@ class VotingStore {
 
 const stores = new Map<string, VotingStore>()
 
-function storeFor(slug: string): VotingStore {
-  let s = stores.get(slug)
+function storeFor(slug: string, roundKey: RoundKey): VotingStore {
+  const key = `${slug} ${roundKey}`
+  let s = stores.get(key)
   if (!s) {
-    s = new VotingStore(slug)
-    stores.set(slug, s)
+    s = new VotingStore(slug, roundKey)
+    stores.set(key, s)
   }
   return s
 }
 
-export function useVoting(eventSlug: string): VotingState {
+export function useVoting(eventSlug: string, roundKey: RoundKey = 'pre'): VotingState {
   const { user, isLoading: authLoading } = useAuth()
-  const store = storeFor(eventSlug)
+  const store = storeFor(eventSlug, roundKey)
   const snap = React.useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
 
   React.useEffect(() => {
@@ -367,8 +414,11 @@ export function useVoting(eventSlug: string): VotingState {
     const allocation = merged(c.allocation, snap.overlay)
     const spent = allocationCost(allocation, mechanism ?? 'quadratic')
     return {
+      roundKey,
       round: c.round,
       status: c.status,
+      votableNow: new Set(c.votableNow),
+      attendanceOpen: c.attendanceOpen,
       mechanism,
       allocation,
       spent,
@@ -387,7 +437,7 @@ export function useVoting(eventSlug: string): VotingState {
       refresh: store.refresh,
       clearError: store.clearError,
     }
-  }, [snap, store, authLoading])
+  }, [snap, store, authLoading, roundKey])
 }
 
 /** Mounted by `DashboardLayout`: loads the event's ballot once for every consumer below it. */
