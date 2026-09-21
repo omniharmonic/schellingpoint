@@ -45,7 +45,7 @@ export function PublishJobProgress({ statusUrl, onDone }: { statusUrl: string; o
           return
         }
       } catch {
-        if (!stopped) setError('Could not read the publish progress; retrying.')
+        if (!stopped) setError('Could not read the publish progress.')
       }
       if (!stopped) timer = setTimeout(tick, POLL_MS)
     }
@@ -73,7 +73,7 @@ export function PublishJobProgress({ statusUrl, onDone }: { statusUrl: string; o
         </span>
       </div>
       {job && total > 0 ? <Progress value={pct} aria-label={`${pct}% published`} /> : null}
-      {error ? <p className="text-xs text-muted-foreground">{error}</p> : null}
+      {error ? <p className="text-xs text-destructive">{error} Retrying…</p> : null}
     </div>
   )
 }

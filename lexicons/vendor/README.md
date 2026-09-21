@@ -76,3 +76,19 @@ Copied unmodified from Free School `packages/lexicons/lexicons/freeschool/draft/
 
 Never extended: records we write under these NSIDs carry only the fields defined here
 (`assertNoUnknownFields` at write time, `npm run atproto:audit` after).
+
+## `app.bsky.*` — borrowed verbatim (unconference.events)
+
+| File | NSID | Used for |
+|---|---|---|
+| `bsky/app.bsky.actor.profile.json` | `app.bsky.actor.profile` | the gathering account's own profile (`displayName` = gathering name, `description` = tagline), written at `self` by `publishGathering` through the port action `publish-profile`; read from a person's own PDS at sign-in (`fetchActorProfile`) |
+
+- **Source:** the schema shipped in `@atproto/api` (`schemaDict.AppBskyActorProfile`, generated
+  from `bluesky-social/atproto` `lexicons/app/bsky/actor/profile.json`), written out with the
+  generator's `lex:` ref prefix removed so it reads like the upstream JSON file. Fetched 2026-09-21.
+- `../atproto/com.atproto.label.defs.json` is vendored the same way (from `ComAtprotoLabelDefs`)
+  because `labels` refs `com.atproto.label.defs#selfLabels` and `lexicons:validate` resolves every
+  ref; `pinnedPost` / `joinedViaStarterPack` resolve against the existing strongRef shim.
+- Text fields only are written (no avatar/banner blob, labels or pinned post): the app-side record
+  builder never carries a DID or a person's name, and `assertNoUnknownFields` applies (`app.bsky.`
+  is in `BORROWED_PREFIXES`).

@@ -1,8 +1,13 @@
 /**
- * Auto-scheduling (greedy).
+ * Auto-scheduling: greedy seed, then local search (release design §9.2).
  *
  * Places approved, unscheduled sessions into free time slots. Sessions are processed most
- * votes first, and each takes its highest-scoring free slot.
+ * votes first, and each takes its highest-scoring free slot. That seed is then improved by
+ * `hillClimb` (improve.ts) against the placement objective (objective.ts): audience
+ * conflicts over ballot-token overlap, capacity, hard constraints (host blackouts, pinned
+ * rooms, required features, room formats) and balance across time rows. Hand-placed
+ * sessions are fixed. The result carries a quality report (quality.ts) and the five PRD
+ * progress stages.
  *
  * Scoring (the original scorer, which spec §6 keeps, plus the hosts' availability windows):
  *   duration match      +8 (±15 min: +4, else +1)
@@ -24,6 +29,12 @@
  * Pure: no I/O, safe to unit test.
  */
 
+import { DEFAULT_POLICY_THRESHOLDS } from '@/lib/events/policy'
+import { KEEP_APART_THRESHOLD, keepApartPairs } from './clusters'
+import { hillClimb, type HillClimbStats } from './improve'
+import { buildObjectiveContext, concurrentOverlaps, type Placement as SlotPlacement } from './objective'
+import { qualityScore, type QualityReport } from './quality'
+
 export interface SchedulerSession {
   id: string
   title: string
@@ -35,6 +46,10 @@ export interface SchedulerSession {
   /** Legacy half-day preferences such as `friday_am`. */
   time_preferences: string[] | null
   required_features: string[] | null
+  /** Session format (`talk`, `workshop`, ...); rooms may restrict formats. */
+  format?: string | null
+  /** Organizer pin: this session must be in this room (migration 0018). */
+  pinned_venue_id?: string | null
   /** The host's availability (`time_preferences` table, spec §4.2): instants, preference 1 best. */
   windows?: ReadonlyArray<{ startsAt: string; endsAt: string; preference?: 1 | 2 | 3 }>
   blackouts?: ReadonlyArray<{ startsAt: string; endsAt: string }>
@@ -47,6 +62,7 @@ export interface SchedulerTimeSlot {
   is_break: boolean
   venue_id: string | null
   day_date: string | null
+  label?: string | null
 }
 
 export interface SchedulerVenue {
@@ -55,6 +71,8 @@ export interface SchedulerVenue {
   capacity: number | null
   is_primary: boolean
   features: string[] | null
+  /** Formats this room may host; null or empty = all (migration 0018). */
+  allowed_formats?: string[] | null
 }
 
 /** Per session: total votes and the ballot tokens that named it (from `schedulingInputs`). */
@@ -69,6 +87,22 @@ export interface ScheduleAssignment {
   warnings: string[]
 }
 
+/** The five stages the PRD's progress view shows (§4.7 step 5). Computed synchronously. */
+export interface SchedulerStage {
+  key: 'clusters' | 'venues' | 'slots' | 'conflicts' | 'validation'
+  name: string
+  status: 'done'
+  detail: string
+}
+
+export const SCHEDULER_STAGE_NAMES: ReadonlyArray<{ key: SchedulerStage['key']; name: string }> = [
+  { key: 'clusters', name: 'Analyzing voter clusters' },
+  { key: 'venues', name: 'Calculating venue requirements' },
+  { key: 'slots', name: 'Optimizing time slot assignments' },
+  { key: 'conflicts', name: 'Resolving conflicts' },
+  { key: 'validation', name: 'Final validation' },
+]
+
 export interface AutoScheduleResult {
   assignments: ScheduleAssignment[]
   unassigned: { sessionId: string; sessionTitle: string; reason: string }[]
@@ -79,7 +113,15 @@ export interface AutoScheduleResult {
     averageScore: number
     /** Whether closed-round ballots informed ordering, capacity and overlap. */
     usedBallots: boolean
+    /** The k-threshold applied to overlap pairs. */
+    k: number
+    /** Comparable pairs at or above the keep-apart line, across the whole gathering. */
+    keepApartPairs: number
   }
+  /** Quality of the proposed schedule including sessions already placed by hand. */
+  quality: QualityReport
+  improvement: HillClimbStats
+  stages: SchedulerStage[]
 }
 
 const DAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']
@@ -231,16 +273,38 @@ function scoreSlot(
   // 7. Primary venue for sessions many people voted for
   if (venue.is_primary && votes > 20) score += 2
 
+  // 8. Hard constraints the organizer set (objective.ts charges these ×1000; the greedy
+  //    seed simply avoids them).
+  if (session.pinned_venue_id && session.pinned_venue_id !== venue.id) {
+    score -= 50
+    warnings.push('Pinned to another room')
+  }
+  const allowed = venue.allowed_formats ?? []
+  if (allowed.length > 0 && session.format && !allowed.includes(session.format)) {
+    score -= 50
+    warnings.push(`${venue.name} does not host ${session.format} sessions`)
+  }
+
   return { score, warnings }
+}
+
+export interface AutoScheduleOptions {
+  ballots?: BallotInputs
+  timezone: string
+  /** The gathering's `feedbackK`; pairs with fewer tokens on either side are not constrained. */
+  k?: number
+  /** Local-search settings, or `false` to return the greedy seed only. */
+  improve?: false | { budgetMs?: number; maxPasses?: number }
 }
 
 export function autoSchedule(
   sessions: readonly SchedulerSession[],
   timeSlots: readonly SchedulerTimeSlot[],
   venues: readonly SchedulerVenue[],
-  options: { ballots?: BallotInputs; timezone: string },
+  options: AutoScheduleOptions,
 ): AutoScheduleResult {
   const ballots: BallotInputs = options.ballots ?? new Map()
+  const k = options.k ?? DEFAULT_POLICY_THRESHOLDS.feedbackK
   const votesOf = (id: string) => ballots.get(id)?.votes ?? 0
   const queue = sessions
     .filter((s) => s.status === 'approved' && !s.time_slot_id)
@@ -296,16 +360,92 @@ export function autoSchedule(
     })
   }
 
-  const average = assignments.length ? assignments.reduce((sum, a) => sum + a.score, 0) / assignments.length : 0
+  // Local search over the greedy seed, with hand-placed sessions fixed.
+  const ctx = buildObjectiveContext(sessions, timeSlots, venues, { ballots, k, timezone: options.timezone })
+  const seed = new Map<string, SlotPlacement>(ctx.fixed)
+  for (const a of assignments) seed.set(a.sessionId, { slotId: a.slotId, venueId: a.venueId })
+  const improved = options.improve === false
+    ? hillClimb(seed, ctx, { budgetMs: 0, maxPasses: 0 })
+    : hillClimb(seed, ctx, { budgetMs: options.improve?.budgetMs ?? 2000, maxPasses: options.improve?.maxPasses })
+
+  // Re-score every proposed placement where it ended up, against everything else placed.
+  const final = improved.assignments
+  const sessionById = new Map(sessions.map((s) => [s.id, s]))
+  const keepApartNotes = new Map<string, string[]>()
+  for (const { a, b, pair } of concurrentOverlaps(final, ctx)) {
+    if (pair.coefficient < KEEP_APART_THRESHOLD) continue
+    const pct = Math.round(pair.coefficient * 100)
+    keepApartNotes.set(a, [...(keepApartNotes.get(a) ?? []), `Keep apart: ${pct}% voter overlap with "${sessionById.get(b)?.title ?? 'a session'}" at the same time`])
+    keepApartNotes.set(b, [...(keepApartNotes.get(b) ?? []), `Keep apart: ${pct}% voter overlap with "${sessionById.get(a)?.title ?? 'a session'}" at the same time`])
+  }
+  const rescored: ScheduleAssignment[] = []
+  for (const a of assignments) {
+    const p = final.get(a.sessionId)!
+    const slot = slotById.get(p.slotId)!
+    const venue = venueById.get(p.venueId)!
+    const others: Placement = { occupied: new Set(), tracksAtTime: new Map(), sessionsAtTime: new Map() }
+    for (const [otherId, op] of final) {
+      if (otherId === a.sessionId) continue
+      const os = slotById.get(op.slotId)
+      if (!os) continue
+      const key = `${os.start_time}|${os.end_time}`
+      others.sessionsAtTime.set(key, [...(others.sessionsAtTime.get(key) ?? []), otherId])
+      const track = sessionById.get(otherId)?.track_id
+      if (track) others.tracksAtTime.set(key, new Set([...(others.tracksAtTime.get(key) ?? []), track]))
+    }
+    const { score, warnings } = scoreSlot(sessionById.get(a.sessionId)!, slot, venue, others, ballots, options.timezone)
+    rescored.push({
+      sessionId: a.sessionId,
+      sessionTitle: a.sessionTitle,
+      slotId: p.slotId,
+      venueId: p.venueId,
+      score,
+      warnings: [...warnings, ...(keepApartNotes.get(a.sessionId) ?? [])],
+    })
+  }
+
+  const quality = qualityScore(final, ctx)
+  const keepApart = keepApartPairs(ctx.matrix).length
+  const freeSlots = candidates.length - ctx.fixed.size
+  const fmt = (n: number) => (Number.isInteger(n) ? String(n) : n.toFixed(1))
+  const stages: SchedulerStage[] = [
+    {
+      ...SCHEDULER_STAGE_NAMES[0], status: 'done',
+      detail: `${ctx.matrix.comparableSessions.length} sessions compared, ${keepApart} keep-apart pair${keepApart === 1 ? '' : 's'}, ${ctx.matrix.suppressedCount} pair${ctx.matrix.suppressedCount === 1 ? '' : 's'} below k=${k}`,
+    },
+    {
+      ...SCHEDULER_STAGE_NAMES[1], status: 'done',
+      detail: `${queue.length} session${queue.length === 1 ? '' : 's'} to place, ${venues.length} room${venues.length === 1 ? '' : 's'}, ${freeSlots} open slot${freeSlots === 1 ? '' : 's'}`,
+    },
+    {
+      ...SCHEDULER_STAGE_NAMES[2], status: 'done',
+      detail: `Seed placed ${assignments.length} of ${queue.length}${unassigned.length ? `; ${unassigned.length} left unplaced` : ''}`,
+    },
+    {
+      ...SCHEDULER_STAGE_NAMES[3], status: 'done',
+      detail: `${improved.stats.moves} move${improved.stats.moves === 1 ? '' : 's'} and ${improved.stats.swaps} swap${improved.stats.swaps === 1 ? '' : 's'} in ${improved.stats.passes} pass${improved.stats.passes === 1 ? '' : 'es'} (cost ${fmt(improved.stats.seedCost.total)} → ${fmt(improved.cost.total)}, ${improved.stats.stoppedBy})`,
+    },
+    {
+      ...SCHEDULER_STAGE_NAMES[4], status: 'done',
+      detail: `Quality ${quality.score}/100, ${quality.keepApartConflicts} keep-apart conflict${quality.keepApartConflicts === 1 ? '' : 's'}, ${quality.violations.length} violation${quality.violations.length === 1 ? '' : 's'}, ${quality.warnings.length} warning${quality.warnings.length === 1 ? '' : 's'}`,
+    },
+  ]
+
+  const average = rescored.length ? rescored.reduce((sum, a) => sum + a.score, 0) / rescored.length : 0
   return {
-    assignments,
+    assignments: rescored,
     unassigned,
     stats: {
       totalSessions: queue.length,
-      assigned: assignments.length,
+      assigned: rescored.length,
       unassigned: unassigned.length,
       averageScore: Math.round(average * 100) / 100,
       usedBallots: ballots.size > 0,
+      k,
+      keepApartPairs: keepApart,
     },
+    quality,
+    improvement: improved.stats,
+    stages,
   }
 }

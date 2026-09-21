@@ -30,6 +30,8 @@ import * as React from 'react'
 import { Plus, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
+import { Input } from '@/components/ui/input'
+import { Select } from '@/components/ui/select'
 import { apiFetch } from '@/lib/api/client'
 import { parseTimeInTimezone } from '@/lib/events/timezone'
 
@@ -103,8 +105,8 @@ function toInstant(day: string, time: string, timezone: string): string | null {
   }
 }
 
-function dayLabel(day: string, timezone: string): string {
-  return new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric' }).format(new Date(`${day}T12:00:00Z`)) + (timezone ? '' : '')
+function dayLabel(day: string): string {
+  return new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric' }).format(new Date(`${day}T12:00:00Z`))
 }
 
 interface RowProps {
@@ -135,8 +137,8 @@ function WindowRow({ window: w, days, timezone, disabled, withPreference, onChan
   return (
     <li className="space-y-1">
       <div className="flex flex-wrap items-center gap-2" role="group" aria-label={label}>
-        <select
-          className="h-9 rounded-md border bg-background px-2 text-sm"
+        <Select
+          wrapperClassName="w-auto min-w-[9rem] flex-1 sm:flex-none"
           value={start.day}
           disabled={disabled}
           onChange={(e) => update(e.target.value, start.time, end.time)}
@@ -144,16 +146,32 @@ function WindowRow({ window: w, days, timezone, disabled, withPreference, onChan
         >
           {days.map((d) => (
             <option key={d} value={d}>
-              {dayLabel(d, timezone)}
+              {dayLabel(d)}
             </option>
           ))}
-        </select>
-        <input type="time" className="h-9 rounded-md border bg-background px-2 text-sm" value={start.time} step={900} disabled={disabled} aria-label="From" onChange={(e) => update(start.day, e.target.value, end.time)} />
+        </Select>
+        <Input
+          type="time"
+          className="w-auto"
+          value={start.time}
+          step={900}
+          disabled={disabled}
+          aria-label="From"
+          onChange={(e) => update(start.day, e.target.value, end.time)}
+        />
         <span className="text-sm text-muted-foreground">to</span>
-        <input type="time" className="h-9 rounded-md border bg-background px-2 text-sm" value={end.time} step={900} disabled={disabled} aria-label="Until" onChange={(e) => update(start.day, start.time, e.target.value)} />
+        <Input
+          type="time"
+          className="w-auto"
+          value={end.time}
+          step={900}
+          disabled={disabled}
+          aria-label="Until"
+          onChange={(e) => update(start.day, start.time, e.target.value)}
+        />
         {withPreference ? (
-          <select
-            className="h-9 rounded-md border bg-background px-2 text-sm"
+          <Select
+            wrapperClassName="w-auto min-w-[8rem]"
             value={w.preference ?? 2}
             disabled={disabled}
             aria-label="Preference"
@@ -162,13 +180,13 @@ function WindowRow({ window: w, days, timezone, disabled, withPreference, onChan
             <option value={1}>Preferred</option>
             <option value={2}>Works</option>
             <option value={3}>Last resort</option>
-          </select>
+          </Select>
         ) : null}
-        <Button type="button" variant="ghost" size="sm" onClick={onRemove} disabled={disabled} aria-label={`Remove ${label}`}>
+        <Button type="button" variant="ghost" size="icon-sm" onClick={onRemove} disabled={disabled} aria-label={`Remove ${label}`} title="Remove">
           <Trash2 className="h-4 w-4" aria-hidden />
         </Button>
       </div>
-      {error ? <p className="text-xs text-destructive">{error}</p> : null}
+      {error ? <p className="text-xs text-destructive" role="alert">{error}</p> : null}
     </li>
   )
 }
@@ -187,11 +205,11 @@ export function TimePreferences({ value, onChange, timezone, startDate, endDate,
     return s && e ? { startsAt: s, endsAt: e, ...(preference ? { preference } : {}) } : null
   }
 
-  const section = (kind: 'windows' | 'blackouts', title: string, hint: string) => {
+  const section = (kind: 'windows' | 'blackouts', title: string, hint: string, addLabel: string) => {
     const list = value[kind]
     return (
       <fieldset className="space-y-2" disabled={disabled}>
-        <legend className="text-sm font-medium">{title}</legend>
+        <legend className="text-sm font-medium leading-none">{title}</legend>
         <p className="text-xs text-muted-foreground">{hint}</p>
         {list.length ? (
           <ul className="space-y-2">
@@ -221,24 +239,30 @@ export function TimePreferences({ value, onChange, timezone, startDate, endDate,
           }}
         >
           <Plus className="mr-1.5 h-3.5 w-3.5" aria-hidden />
-          Add
+          {addLabel}
         </Button>
       </fieldset>
     )
   }
 
+  const empty = value.windows.length === 0 && value.blackouts.length === 0
+
   return (
     <div className="space-y-5">
-      <p className="text-xs text-muted-foreground">Times are in the gathering’s timezone ({timezone}).</p>
-      {section('windows', 'When you can be there', 'Organisers use this to schedule your session. Mark the times you prefer.')}
-      {section('blackouts', 'When you cannot', 'Optional: times that do not work at all.')}
+      <p className="text-xs text-muted-foreground">
+        {empty ? 'Nothing added yet: organizers will assume any time works. ' : ''}
+        Times are in the gathering’s timezone ({timezone}).
+      </p>
+      {section('windows', 'When you can be there', 'Organizers use this to schedule your session. Mark the times you prefer.', 'Add a window')}
+      {section('blackouts', 'When you can’t be there', 'Optional: times that do not work at all.', 'Add a blackout')}
       {showPublish ? (
-        <div className="flex items-start gap-2 rounded-md border p-3">
+        <div className="flex items-start gap-3 rounded-xl border p-3">
           <Checkbox
             id={publishId}
             checked={value.publish === true}
             disabled={disabled}
             onCheckedChange={(checked) => onChange({ ...value, publish: checked === true })}
+            className="mt-0.5"
           />
           <div className="space-y-1">
             <label htmlFor={publishId} className="text-sm font-medium">

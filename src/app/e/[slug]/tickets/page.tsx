@@ -1,15 +1,18 @@
 'use client'
 
 import * as React from 'react'
+import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { Loader2, Ticket, Check, Clock, AlertCircle } from 'lucide-react'
+import { Loader2, Ticket, Check, Clock, AlertCircle, ArrowLeft } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
+import { PageHeader } from '@/components/PageHeader'
 import { useAuth } from '@/hooks/useAuth'
 import { useEvent } from '@/contexts/EventContext'
 import { formatPrice } from '@/lib/payments/format'
 import { apiFetch, ApiError } from '@/lib/api/client'
+import { plural } from '@/lib/format'
 
 interface TicketTier {
   id: string
@@ -35,6 +38,15 @@ interface UserTicket {
   status: string
 }
 
+/** Human labels for ticket statuses; the API value is never shown raw. */
+const TICKET_STATUS: Record<string, string> = {
+  pending: 'Pending',
+  confirmed: 'Confirmed',
+  checked_in: 'Checked in',
+  refund_needed: 'Refund due',
+  cancelled: 'Cancelled',
+}
+
 export default function TicketsPage() {
   const router = useRouter()
   const { user, isLoading: authLoading } = useAuth()
@@ -45,6 +57,8 @@ export default function TicketsPage() {
   const [loading, setLoading] = React.useState(true)
   const [purchasing, setPurchasing] = React.useState<string | null>(null)
   const [error, setError] = React.useState<string | null>(null)
+
+  const loginHref = `/login?returnTo=${encodeURIComponent(`/e/${event.slug}/tickets`)}`
 
   // Tiers on sale and the viewer's own tickets
   React.useEffect(() => {
@@ -60,7 +74,7 @@ export default function TicketsPage() {
         setUserTickets(data.tickets)
         setError(null)
       } catch {
-        if (!cancelled) setError('Failed to load ticket information')
+        if (!cancelled) setError('Ticket information could not be loaded. Please try again.')
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -73,7 +87,7 @@ export default function TicketsPage() {
 
   const handlePurchase = async (tier: TicketTier) => {
     if (!user) {
-      router.push(`/login?redirect=${encodeURIComponent(`/e/${event.slug}/tickets`)}`)
+      router.push(loginHref)
       return
     }
 
@@ -94,10 +108,10 @@ export default function TicketsPage() {
       }
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
-        router.push(`/login?redirect=${encodeURIComponent(`/e/${event.slug}/tickets`)}`)
+        router.push(loginHref)
         return
       }
-      setError(err instanceof Error ? err.message : 'Failed to start checkout')
+      setError(err instanceof Error ? err.message : 'Checkout could not be started. Please try again.')
     } finally {
       setPurchasing(null)
     }
@@ -107,15 +121,15 @@ export default function TicketsPage() {
     const now = new Date()
 
     if (tier.sale_starts_at && new Date(tier.sale_starts_at) > now) {
-      return { status: 'upcoming', label: 'Coming Soon' }
+      return { status: 'upcoming', label: 'Coming soon' }
     }
 
     if (tier.sale_ends_at && new Date(tier.sale_ends_at) < now) {
-      return { status: 'ended', label: 'Sales Ended' }
+      return { status: 'ended', label: 'Sales ended' }
     }
 
     if (tier.quantity_total !== null && tier.quantity_reserved >= tier.quantity_total) {
-      return { status: 'soldout', label: 'Sold Out' }
+      return { status: 'soldout', label: 'Sold out' }
     }
 
     return { status: 'available', label: null }
@@ -125,11 +139,20 @@ export default function TicketsPage() {
     return userTickets.some(t => t.tier_id === tierId && (t.status === 'confirmed' || t.status === 'checked_in'))
   }
 
+  const backToGathering = (
+    <Button variant="outline" asChild>
+      <Link href={`/e/${event.slug}`}>
+        <ArrowLeft className="h-4 w-4 mr-2" aria-hidden="true" />
+        Back to {event.name}
+      </Link>
+    </Button>
+  )
+
   if (loading) {
     return (
-      <div className="container mx-auto px-4 py-8">
-        <div className="flex items-center justify-center py-12">
-          <Loader2 className="h-8 w-8 animate-spin" />
+      <div className="container mx-auto px-5 py-8">
+        <div className="flex items-center justify-center py-12" role="status" aria-label="Loading tickets">
+          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" aria-hidden="true" />
         </div>
       </div>
     )
@@ -137,14 +160,13 @@ export default function TicketsPage() {
 
   if (!event.ticketingEnabled) {
     return (
-      <div className="container mx-auto px-4 py-8">
+      <div className="container mx-auto px-5 py-8">
         <Card>
           <CardContent className="py-12 text-center">
-            <Ticket className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
+            <Ticket className="h-12 w-12 mx-auto mb-4 text-muted-foreground" aria-hidden="true" />
             <h1 className="text-xl font-semibold mb-2">Tickets aren’t available here</h1>
-            <p className="text-muted-foreground">
-              Ticket sales are not enabled for this event.
-            </p>
+            <p className="text-muted-foreground mb-6">Ticket sales are not enabled for this gathering.</p>
+            {backToGathering}
           </CardContent>
         </Card>
       </div>
@@ -152,18 +174,13 @@ export default function TicketsPage() {
   }
 
   return (
-    <div className="container mx-auto px-4 py-8">
+    <div className="container mx-auto px-5 py-8">
       <div className="max-w-4xl mx-auto">
-        <div className="text-center mb-8">
-          <h1 className="text-3xl font-bold mb-2">Get Your Ticket</h1>
-          <p className="text-muted-foreground">
-            Choose the ticket that&apos;s right for you
-          </p>
-        </div>
+        <PageHeader title="Get your ticket" subtitle="Choose the ticket that’s right for you." />
 
         {error && (
-          <div className="mb-6 p-4 bg-destructive/10 text-destructive rounded-lg flex items-center gap-2">
-            <AlertCircle className="h-5 w-5" />
+          <div role="alert" className="mb-6 p-4 bg-destructive/10 border border-destructive/20 text-destructive rounded-lg flex items-center gap-2">
+            <AlertCircle className="h-5 w-5 shrink-0" aria-hidden="true" />
             <span>{error}</span>
           </div>
         )}
@@ -171,11 +188,10 @@ export default function TicketsPage() {
         {tiers.length === 0 ? (
           <Card>
             <CardContent className="py-12 text-center">
-              <Ticket className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
-              <h2 className="text-xl font-semibold mb-2">No Tickets Available</h2>
-              <p className="text-muted-foreground">
-                Check back later for ticket sales.
-              </p>
+              <Ticket className="h-12 w-12 mx-auto mb-4 text-muted-foreground" aria-hidden="true" />
+              <h2 className="text-xl font-semibold mb-2">No tickets available</h2>
+              <p className="text-muted-foreground mb-6">Check back later for ticket sales.</p>
+              {backToGathering}
             </CardContent>
           </Card>
         ) : (
@@ -194,8 +210,8 @@ export default function TicketsPage() {
                 >
                   {hasTicket && (
                     <div className="absolute -top-3 -right-3">
-                      <Badge className="bg-green-600">
-                        <Check className="h-3 w-3 mr-1" />
+                      <Badge variant="success">
+                        <Check className="h-3 w-3 mr-1" aria-hidden="true" />
                         Purchased
                       </Badge>
                     </div>
@@ -219,28 +235,26 @@ export default function TicketsPage() {
 
                   <CardContent className="space-y-3">
                     {/* Permissions */}
-                    <div className="space-y-2 text-sm">
-                      <div className="flex items-center gap-2">
-                        <Check className={`h-4 w-4 ${tier.allows_proposals ? 'text-green-600' : 'text-muted-foreground'}`} />
+                    <ul className="space-y-2 text-sm">
+                      <li className="flex items-center gap-2">
+                        <Check className={`h-4 w-4 ${tier.allows_proposals ? 'text-success' : 'text-muted-foreground'}`} aria-hidden="true" />
                         <span className={tier.allows_proposals ? '' : 'text-muted-foreground line-through'}>
                           Propose sessions
                         </span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <Check className={`h-4 w-4 ${tier.allows_voting ? 'text-green-600' : 'text-muted-foreground'}`} />
+                      </li>
+                      <li className="flex items-center gap-2">
+                        <Check className={`h-4 w-4 ${tier.allows_voting ? 'text-success' : 'text-muted-foreground'}`} aria-hidden="true" />
                         <span className={tier.allows_voting ? '' : 'text-muted-foreground line-through'}>
                           Vote on sessions
                         </span>
-                      </div>
-                    </div>
+                      </li>
+                    </ul>
 
                     {/* Availability */}
                     {spotsLeft !== null && status === 'available' && (
                       <div className="text-sm text-muted-foreground">
                         {spotsLeft <= 10 ? (
-                          <span className="text-amber-600 font-medium">
-                            Only {spotsLeft} left!
-                          </span>
+                          <span className="text-signal-amber font-medium">Only {spotsLeft} left</span>
                         ) : (
                           <span>{spotsLeft} available</span>
                         )}
@@ -249,10 +263,8 @@ export default function TicketsPage() {
 
                     {status === 'upcoming' && tier.sale_starts_at && (
                       <div className="flex items-center gap-1 text-sm text-muted-foreground">
-                        <Clock className="h-4 w-4" />
-                        <span>
-                          Sales start {new Date(tier.sale_starts_at).toLocaleDateString()}
-                        </span>
+                        <Clock className="h-4 w-4" aria-hidden="true" />
+                        <span>Sales start {new Date(tier.sale_starts_at).toLocaleDateString()}</span>
                       </div>
                     )}
                   </CardContent>
@@ -260,8 +272,8 @@ export default function TicketsPage() {
                   <CardFooter>
                     {hasTicket ? (
                       <Button variant="outline" className="w-full" disabled>
-                        <Check className="h-4 w-4 mr-2" />
-                        Already Purchased
+                        <Check className="h-4 w-4 mr-2" aria-hidden="true" />
+                        Already purchased
                       </Button>
                     ) : status !== 'available' ? (
                       <Button variant="outline" className="w-full" disabled>
@@ -271,18 +283,10 @@ export default function TicketsPage() {
                       <Button
                         className="w-full"
                         onClick={() => handlePurchase(tier)}
-                        disabled={purchasing !== null}
+                        loading={purchasing === tier.id}
+                        disabled={purchasing !== null && purchasing !== tier.id}
                       >
-                        {purchasing === tier.id ? (
-                          <>
-                            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                            Processing...
-                          </>
-                        ) : tier.price_cents === 0 ? (
-                          'Get Free Ticket'
-                        ) : (
-                          'Buy Ticket'
-                        )}
+                        {tier.price_cents === 0 ? 'Get a free ticket' : 'Buy a ticket'}
                       </Button>
                     )}
                   </CardFooter>
@@ -294,36 +298,32 @@ export default function TicketsPage() {
 
         {/* User's tickets */}
         {userTickets.length > 0 && (
-          <div className="mt-12">
-            <h2 className="text-xl font-semibold mb-4">Your Tickets</h2>
+          <section className="mt-12" aria-labelledby="your-tickets-heading">
+            <h2 id="your-tickets-heading" className="text-xl font-semibold mb-4">Your {plural(userTickets.length, 'ticket').replace(/^\d+\s/, '')}</h2>
             <div className="space-y-4">
               {userTickets.map((ticket) => {
                 const tier = tiers.find(t => t.id === ticket.tier_id)
                 return (
                   <Card key={ticket.id}>
-                    <CardContent className="py-4 flex items-center justify-between">
-                      <div className="flex items-center gap-3">
-                        <Ticket className="h-5 w-5" />
-                        <div>
-                          <p className="font-medium">{tier?.name || 'Ticket'}</p>
+                    <CardContent className="py-4 flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <Ticket className="h-5 w-5 shrink-0" aria-hidden="true" />
+                        <div className="min-w-0">
+                          <p className="font-medium truncate">{tier?.name || 'Ticket'}</p>
                           <p className="text-sm text-muted-foreground">
-                            Status: {ticket.status}
+                            Status: {TICKET_STATUS[ticket.status] ?? 'Unknown'}
                           </p>
                         </div>
                       </div>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => router.push(`/e/${event.slug}/tickets/${ticket.id}`)}
-                      >
-                        View Ticket
+                      <Button variant="outline" size="sm" asChild>
+                        <Link href={`/e/${event.slug}/tickets/${ticket.id}`}>View ticket</Link>
                       </Button>
                     </CardContent>
                   </Card>
                 )
               })}
             </div>
-          </div>
+          </section>
         )}
       </div>
     </div>

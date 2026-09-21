@@ -2,11 +2,18 @@
 
 import * as React from 'react'
 import Link from 'next/link'
-import { AlertTriangle, ArrowUpRight, Beaker, FileText, Grid3X3, LayoutGrid, Loader2, Lock, Mail, Plus, Table, Trash2 } from 'lucide-react'
+import { AlertTriangle, ArrowUpRight, Beaker, CheckCircle2, FileText, Grid3X3, LayoutGrid, Loader2, Lock, Mail, Plus, Table, Trash2, UserPlus } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import { ConfirmInline } from '@/components/ui/confirm-inline'
+import { SegmentedControl } from '@/components/ui/segmented-control'
+import { useToast } from '@/components/ui/toast'
+import { PageHeader } from '@/components/PageHeader'
 import { useEvent, useEventRole } from '@/contexts/EventContext'
 import { apiFetch, ApiError } from '@/lib/api/client'
+import { SESSION_STATUS } from '@/lib/labels'
+import { plural } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { AdminStats } from '@/components/admin/AdminStats'
 import { SessionCard } from '@/components/admin/SessionCard'
@@ -18,6 +25,22 @@ import { hostLabel, type AdminSession, type AdminSessionsResponse, type AdminTim
 type Tab = 'all' | 'pending' | 'approved' | 'scheduled' | 'rejected'
 type ViewMode = 'table' | 'cards'
 type BatchAction = 'approve' | 'reject' | 'assign_track' | 'delete'
+
+const TABS: Tab[] = ['all', 'pending', 'approved', 'scheduled', 'rejected']
+const TAB_LABEL: Record<Tab, string> = {
+  all: 'All',
+  pending: SESSION_STATUS.pending.label,
+  approved: SESSION_STATUS.approved.label,
+  scheduled: SESSION_STATUS.scheduled.label,
+  rejected: SESSION_STATUS.rejected.label,
+}
+const TAB_EMPTY: Record<Tab, string> = {
+  all: 'No sessions yet.',
+  pending: 'Nothing is awaiting review.',
+  approved: 'No approved sessions yet.',
+  scheduled: 'Nothing is on the schedule yet.',
+  rejected: 'No sessions have been set aside.',
+}
 
 interface Overview {
   counts: { pending: number; approved: number; rejected: number; scheduled: number; total: number }
@@ -37,7 +60,8 @@ const errorText = (e: unknown, fallback: string) => (e instanceof ApiError ? e.m
 
 export default function AdminPage() {
   const event = useEvent()
-  const { can } = useEventRole()
+  const { can, isAdmin } = useEventRole()
+  const { toast } = useToast()
   const canReview = can('approveProposals')
   const canSchedule = can('manageSchedule')
 
@@ -56,14 +80,22 @@ export default function AdminPage() {
   const [sortDirection, setSortDirection] = React.useState<SortDirection>('desc')
   const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set())
   const [busy, setBusy] = React.useState(false)
+  /** Inline notice: errors, and successes that carry details (skipped rows). Plain successes go to a toast. */
   const [notice, setNotice] = React.useState<{ kind: 'success' | 'error'; text: string; details?: string[] } | null>(null)
   const [devConfirm, setDevConfirm] = React.useState<'seed' | 'clear' | null>(null)
+  const [justCreated, setJustCreated] = React.useState(false)
+  const tablistRef = React.useRef<HTMLDivElement>(null)
 
+  // The create wizard lands here with ?created=1.
   React.useEffect(() => {
-    if (notice?.kind !== 'success') return
-    const timer = window.setTimeout(() => setNotice(null), 6000)
-    return () => window.clearTimeout(timer)
-  }, [notice])
+    if (typeof window === 'undefined') return
+    const url = new URL(window.location.href)
+    if (url.searchParams.get('created') === '1') {
+      setJustCreated(true)
+      url.searchParams.delete('created')
+      window.history.replaceState(null, '', url.pathname + (url.search || '') + url.hash)
+    }
+  }, [])
 
   const base = `/api/v1/events/${event.slug}`
 
@@ -83,7 +115,7 @@ export default function AdminPage() {
       setTimeSlots(t.timeSlots)
       setTracks(tr.tracks)
     } catch (e) {
-      setLoadError(errorText(e, 'Unable to load the organizer workspace. Try again.'))
+      setLoadError(errorText(e, 'The organizer workspace could not be loaded. Try again.'))
     } finally {
       setIsLoading(false)
     }
@@ -144,6 +176,14 @@ export default function AdminPage() {
     }
   }
 
+  const succeed = (text: string, details?: string[]) => {
+    if (details && details.length > 0) setNotice({ kind: 'success', text, details })
+    else {
+      setNotice(null)
+      toast({ title: text, variant: 'success' })
+    }
+  }
+
   const runBatch = async (action: BatchAction, ids: string[], extra: { reason?: string; track_id?: string | null } = {}) => {
     setBusy(true)
     setNotice(null)
@@ -152,11 +192,9 @@ export default function AdminPage() {
         method: 'PATCH',
         json: { action, session_ids: ids, ...extra },
       })
-      setNotice({
-        kind: res.skipped.length && !res.affected ? 'error' : 'success',
-        text: res.message,
-        details: res.skipped.map((s) => `${s.title}: ${s.reason}`),
-      })
+      const details = res.skipped.map((s) => `${s.title}: ${s.reason}`)
+      if (res.skipped.length && !res.affected) setNotice({ kind: 'error', text: res.message, details })
+      else succeed(res.message, details)
       setSelectedIds(new Set())
       await load()
     } catch (e) {
@@ -171,7 +209,7 @@ export default function AdminPage() {
     setNotice(null)
     try {
       await apiFetch(`${base}/admin/sessions/${sessionId}/schedule`, { method: 'PUT', json: { time_slot_id: timeSlotId } })
-      setNotice({ kind: 'success', text: 'Scheduled; the host was notified. Publish the schedule to update the public calendar.' })
+      succeed('Scheduled; the host was notified. Publish the schedule to update the public calendar.')
       await load()
     } catch (e) {
       setNotice({ kind: 'error', text: errorText(e, 'The session could not be scheduled.') })
@@ -185,7 +223,7 @@ export default function AdminPage() {
     setNotice(null)
     try {
       await apiFetch(`${base}/admin/sessions/${sessionId}/schedule`, { method: 'DELETE' })
-      setNotice({ kind: 'success', text: 'Removed from the draft schedule.' })
+      succeed('Removed from the draft schedule.')
       await load()
     } catch (e) {
       setNotice({ kind: 'error', text: errorText(e, 'The session could not be unscheduled.') })
@@ -199,7 +237,7 @@ export default function AdminPage() {
     setNotice(null)
     try {
       const res = await apiFetch<{ sent: boolean; delivered?: boolean }>(`/api/sessions/${sessionId}/notify-host`, { method: 'POST' })
-      setNotice({ kind: 'success', text: res.delivered === false ? 'Mail is not configured here; the email was logged instead.' : 'Host emailed.' })
+      succeed(res.delivered === false ? 'Mail is not configured here; the email was logged instead.' : 'Host emailed.')
       await load()
     } catch (e) {
       setNotice({ kind: 'error', text: errorText(e, 'The host could not be emailed.') })
@@ -214,13 +252,20 @@ export default function AdminPage() {
     setNotice(null)
     try {
       const res = await apiFetch<{ message: string }>(`${base}/admin/seed-sessions`, { method: mode === 'seed' ? 'POST' : 'DELETE' })
-      setNotice({ kind: 'success', text: res.message })
+      succeed(res.message)
       await load()
     } catch (e) {
       setNotice({ kind: 'error', text: errorText(e, 'Test data could not be changed.') })
     } finally {
       setBusy(false)
     }
+  }
+
+  const reviewProposals = () => {
+    setActiveTab('pending')
+    setFilters(defaultFilters)
+    document.getElementById('session-review')?.scrollIntoView({ block: 'start' })
+    window.requestAnimationFrame(() => tablistRef.current?.querySelector<HTMLElement>('[data-tab="pending"]')?.focus())
   }
 
   const allowedBatchActions = (): BatchAction[] => {
@@ -241,15 +286,19 @@ export default function AdminPage() {
 
   if (!canReview && !canSchedule) {
     return (
-      <Card>
-        <CardContent className="py-10 text-center space-y-4">
-          <p className="text-muted-foreground">Proposal review and scheduling are for owners, admins and moderators.</p>
-          <div className="flex flex-wrap justify-center gap-2">
-            {can('viewAnalytics') && <Button asChild variant="outline"><Link href={`/e/${event.slug}/admin/analytics`}>Open analytics</Link></Button>}
-            {can('sendCommunications') && <Button asChild variant="outline"><Link href={`/e/${event.slug}/admin/communications`}>Open messages</Link></Button>}
-          </div>
-        </CardContent>
-      </Card>
+      <>
+        <PageHeader title="Overview & sessions" />
+        <Card>
+          <CardContent className="py-10 text-center space-y-4">
+            <p className="text-muted-foreground">Proposal review and scheduling are for owners, admins and moderators.</p>
+            <div className="flex flex-wrap justify-center gap-2">
+              {can('viewAnalytics') && <Button asChild variant="outline"><Link href={`/e/${event.slug}/admin/analytics`}>Open analytics</Link></Button>}
+              {can('sendCommunications') && <Button asChild variant="outline"><Link href={`/e/${event.slug}/admin/communications`}>Announcements & emails</Link></Button>}
+              {can('checkInAttendees') && <Button asChild variant="outline"><Link href={`/e/${event.slug}/admin/checkin`}>Check-in</Link></Button>}
+            </div>
+          </CardContent>
+        </Card>
+      </>
     )
   }
 
@@ -258,24 +307,37 @@ export default function AdminPage() {
   const unpublished = overview?.schedule.unpublishedChanges ?? 0
   const trackOptions = tracks.map((t) => ({ id: t.id, name: t.name, color: t.color }))
   const actions = allowedBatchActions()
+  const filtersActive = JSON.stringify(filters) !== JSON.stringify(defaultFilters)
 
   return (
     <>
       <div className="space-y-8">
-        <div className="page-heading organizer-welcome">
-          <div>
-            <h1 className="text-2xl font-display font-bold">Make space for good ideas.</h1>
-            <p className="text-muted-foreground">Your program takes shape here. Review ideas and help them find their place.</p>
-          </div>
-          {canSchedule && (
+        <PageHeader
+          title="Overview & sessions"
+          subtitle="Make space for good ideas. Review proposals and help them find their place."
+          actions={canSchedule && (
             <Button asChild>
               <Link href={`/e/${event.slug}/admin/sessions/new`}>
-                <Plus className="h-4 w-4 mr-2" />
+                <Plus className="h-4 w-4 mr-2" aria-hidden="true" />
                 Add a session
               </Link>
             </Button>
           )}
-        </div>
+        />
+
+        {justCreated && (
+          <Alert variant="success">
+            <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
+            <AlertTitle>Your gathering is ready</AlertTitle>
+            <AlertDescription className="flex flex-wrap items-center justify-between gap-3">
+              <span>Next: add rooms and times so sessions have somewhere to go.</span>
+              <span className="flex gap-2">
+                <Button asChild size="sm"><Link href={`/e/${event.slug}/admin/setup`}>Add rooms and times</Link></Button>
+                <Button size="sm" variant="ghost" onClick={() => setJustCreated(false)}>Dismiss</Button>
+              </span>
+            </AlertDescription>
+          </Alert>
+        )}
 
         {loadError && (
           <div role="alert" className="rounded-xl border border-destructive/30 bg-destructive/5 p-4 flex flex-wrap items-center justify-between gap-3">
@@ -285,28 +347,31 @@ export default function AdminPage() {
         )}
 
         {notice && (
-          <div role={notice.kind === 'error' ? 'alert' : 'status'} className={cn('sticky top-20 z-10 rounded-xl border bg-card p-4 text-sm', notice.kind === 'error' ? 'border-destructive/30 text-destructive' : 'border-primary/30')}>
-            <p>{notice.text}</p>
-            {notice.details && notice.details.length > 0 && (
-              <ul className="mt-2 list-disc pl-5 text-xs text-muted-foreground">
-                {notice.details.slice(0, 8).map((d) => <li key={d}>{d}</li>)}
-              </ul>
-            )}
-          </div>
+          <Alert variant={notice.kind === 'error' ? 'destructive' : 'success'}>
+            {notice.kind === 'error' ? <AlertTriangle className="h-4 w-4" aria-hidden="true" /> : <CheckCircle2 className="h-4 w-4" aria-hidden="true" />}
+            <AlertDescription>
+              <p>{notice.text}</p>
+              {notice.details && notice.details.length > 0 && (
+                <ul className="mt-2 list-disc pl-5 text-xs text-muted-foreground">
+                  {notice.details.slice(0, 8).map((d) => <li key={d}>{d}</li>)}
+                </ul>
+              )}
+            </AlertDescription>
+          </Alert>
         )}
 
         {event.status === 'draft' && (
           <section aria-labelledby="setup-title" className="overflow-hidden rounded-2xl border border-primary/25 bg-card">
             <div className="p-6 sm:p-8 bg-secondary/50">
-              <h2 id="setup-title" className="text-2xl font-semibold tracking-tight">Give your gathering a good start.</h2>
+              <h2 id="setup-title" className="text-2xl font-display font-semibold tracking-tight">Give your gathering a good start.</h2>
               <p className="mt-2 text-sm text-muted-foreground max-w-xl">Your draft is private. Set the essentials, preview the invitation, then publish when you’re ready.</p>
             </div>
             <div className="grid divide-y sm:grid-cols-3 sm:divide-y-0 sm:divide-x">
-              {[{ href: 'settings', title: 'Event details', detail: 'Dates, location and the invitation.' },
-                { href: 'setup', title: 'Rooms & time slots', detail: `${venues.length} rooms and ${timeSlots.filter(slot => !slot.is_break).length} session slots ready.` },
-                { href: event.ticketingEnabled ? 'tickets' : 'settings', title: 'Admission & publishing', detail: event.ticketingEnabled ? 'Set up ticket tiers and connect payouts.' : 'Review participation and publish your event.' }].map(item => (
+              {[{ href: 'settings', title: 'Gathering details', detail: 'Dates, location and the invitation.' },
+                { href: 'setup', title: 'Rooms & time slots', detail: `${plural(venues.length, 'room')} and ${plural(timeSlots.filter(slot => !slot.is_break).length, 'session slot')} ready.` },
+                { href: event.ticketingEnabled ? 'tickets' : 'settings', title: 'Admission & publishing', detail: event.ticketingEnabled ? 'Set up ticket types and connect payouts.' : 'Review participation and publish your gathering.' }].map(item => (
                 <Link key={item.title} href={`/e/${event.slug}/admin/${item.href}`} className="group p-5 hover:bg-muted/40 focus-visible:outline-primary">
-                  <span className="flex items-center justify-between gap-3 font-semibold">{item.title}<ArrowUpRight className="h-4 w-4" /></span>
+                  <span className="flex items-center justify-between gap-3 font-semibold">{item.title}<ArrowUpRight className="h-4 w-4" aria-hidden="true" /></span>
                   <span className="mt-2 block text-sm text-muted-foreground">{item.detail}</span>
                 </Link>
               ))}
@@ -315,10 +380,10 @@ export default function AdminPage() {
         )}
 
         {overview && overview.flagged.length > 0 && (
-          <section aria-labelledby="flagged-heading" className="rounded-2xl border border-amber-500/40 bg-amber-500/5 p-5">
+          <section aria-labelledby="flagged-heading" className="rounded-2xl border border-signal-amber/40 bg-signal-amber/5 p-5">
             <h2 id="flagged-heading" className="flex items-center gap-2 font-semibold">
-              <AlertTriangle className="h-5 w-5 text-amber-600" />
-              {overview.flagged.length} session{overview.flagged.length === 1 ? '' : 's'} changed on the network
+              <AlertTriangle className="h-5 w-5 text-signal-amber" aria-hidden="true" />
+              {plural(overview.flagged.length, 'session')} changed on the network
             </h2>
             <ul className="mt-3 space-y-2 text-sm">
               {overview.flagged.map((f) => (
@@ -327,10 +392,14 @@ export default function AdminPage() {
                     <Link href={`/e/${event.slug}/sessions/${f.id}`} className="font-medium hover:underline">{f.title}</Link>
                     <span className="text-muted-foreground"> — {f.message}</span>
                   </span>
-                  {canSchedule && <Link href={`/e/${event.slug}/admin/schedule`} className="text-primary text-xs font-medium">Open schedule builder</Link>}
                 </li>
               ))}
             </ul>
+            {canSchedule && (
+              <Button asChild variant="outline" size="sm" className="mt-3">
+                <Link href={`/e/${event.slug}/admin/schedule`}>Open schedule builder</Link>
+              </Button>
+            )}
           </section>
         )}
 
@@ -345,66 +414,72 @@ export default function AdminPage() {
 
         <section className="grid gap-4 lg:grid-cols-[1.35fr_1fr]" aria-label="Next steps">
           <div className="rounded-2xl border border-primary/25 bg-secondary p-6 sm:p-8">
-            <div className="flex items-center gap-2 text-primary text-sm font-medium mb-4"><FileText className="h-4 w-4" />Next up</div>
-            <h2 className="text-2xl sm:text-3xl font-semibold mb-3 leading-tight">
-              {pendingCount > 0 ? `${pendingCount} idea${pendingCount === 1 ? '' : 's'} waiting for a little attention` : 'You’re all caught up on reviews.'}
+            <div className="flex items-center gap-2 text-primary text-sm font-medium mb-4"><FileText className="h-4 w-4" aria-hidden="true" />Next up</div>
+            <h2 className="text-2xl sm:text-3xl font-display font-semibold tracking-tight mb-3 leading-tight text-balance">
+              {pendingCount > 0 ? `${plural(pendingCount, 'idea')} waiting for a little attention` : 'You’re all caught up on reviews.'}
             </h2>
             <p className="text-sm text-muted-foreground max-w-md mb-5">
               {pendingCount > 0 ? 'Review proposals so your community can discover and support them.' : 'New proposals will appear here. In the meantime, keep shaping your gathering.'}
             </p>
             {pendingCount > 0 ? (
-              <Button onClick={() => { setActiveTab('pending'); setFilters(defaultFilters); document.getElementById('session-review')?.scrollIntoView({ block: 'start' }) }}>Review proposals</Button>
+              <Button onClick={reviewProposals}>Review proposals</Button>
             ) : (
-              <Button asChild variant="outline"><Link href={`/e/${event.slug}`}>View event page<ArrowUpRight className="h-4 w-4 ml-2" /></Link></Button>
+              <Button asChild variant="outline"><Link href={`/e/${event.slug}`}>Gathering page<ArrowUpRight className="h-4 w-4 ml-2" aria-hidden="true" /></Link></Button>
             )}
           </div>
           <div className="rounded-2xl border bg-card p-6 flex flex-col">
-            <div className="flex items-center gap-2 text-muted-foreground text-sm mb-4"><LayoutGrid className="h-4 w-4" />Program progress</div>
-            <h2 className="text-xl font-semibold mb-2">{counts.scheduled} session{counts.scheduled === 1 ? '' : 's'} on the schedule</h2>
+            <div className="flex items-center gap-2 text-muted-foreground text-sm mb-4"><LayoutGrid className="h-4 w-4" aria-hidden="true" />Program progress</div>
+            <h2 className="text-xl font-semibold mb-2">{plural(counts.scheduled, 'session')} on the schedule</h2>
             <p className="text-sm text-muted-foreground mb-2">{counts.approved} approved and ready to place.</p>
             <p className="text-sm text-muted-foreground mb-4">
               {overview?.schedule.publishedAt
-                ? unpublished > 0 ? `${unpublished} change${unpublished === 1 ? '' : 's'} not yet published.` : 'Everything on the schedule is published.'
+                ? unpublished > 0 ? `${plural(unpublished, 'change')} not yet published.` : 'Everything on the schedule is published.'
                 : 'The schedule has not been published yet.'}
             </p>
             <div className="h-2 bg-muted rounded-full overflow-hidden mb-5" role="progressbar" aria-label="Approved sessions scheduled" aria-valuemin={0} aria-valuemax={counts.approved + counts.scheduled || 1} aria-valuenow={counts.scheduled}>
               <div className="h-full bg-primary rounded-full" style={{ width: `${(counts.scheduled / (counts.approved + counts.scheduled || 1)) * 100}%` }} />
             </div>
             {overview?.voting.status === 'open' && (
-              <p className="flex items-center gap-1.5 text-xs text-muted-foreground mb-4"><Lock className="h-3.5 w-3.5" />Voting in progress — results are sealed until the round closes.</p>
+              <p className="flex items-center gap-1.5 text-xs text-muted-foreground mb-4"><Lock className="h-3.5 w-3.5" aria-hidden="true" />Voting in progress — results are sealed until the round closes.</p>
             )}
-            {canSchedule && <Link href={`/e/${event.slug}/admin/schedule`} className="mt-auto inline-flex gap-2 items-center text-sm font-semibold text-primary">Open schedule builder<ArrowUpRight className="h-4 w-4" /></Link>}
+            {canSchedule && (
+              <Button asChild variant="outline" size="sm" className="mt-auto self-start">
+                <Link href={`/e/${event.slug}/admin/schedule`}>Open schedule builder<ArrowUpRight className="h-4 w-4 ml-2" aria-hidden="true" /></Link>
+              </Button>
+            )}
           </div>
         </section>
 
         {process.env.NODE_ENV === 'development' && canSchedule && (
           <details className="rounded-xl border p-4 text-sm">
             <summary className="cursor-pointer text-muted-foreground">Development tools</summary>
-            <Card className="mt-4 bg-amber-500/5 border-amber-500/20">
+            <Card className="mt-4 bg-signal-amber/5 border-signal-amber/20">
               <CardContent className="py-4 space-y-3">
                 <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
                   <div>
-                    <p className="font-medium flex items-center gap-2"><Beaker className="h-4 w-4 text-amber-600" aria-hidden />Test data</p>
+                    <p className="font-medium flex items-center gap-2"><Beaker className="h-4 w-4 text-signal-amber" aria-hidden="true" />Test data</p>
                     <p className="text-sm text-muted-foreground">
                       Host-less test sessions for trying the auto-scheduler
-                      {testSessionCount > 0 && <span className="ml-1 text-amber-600">({testSessionCount} exist)</span>}
+                      {testSessionCount > 0 && <span className="ml-1 text-signal-amber">({testSessionCount} exist)</span>}
                     </p>
                   </div>
                   <div className="flex gap-2">
-                    <Button variant="outline" size="sm" onClick={() => setDevConfirm('seed')} disabled={busy}><Beaker className="h-4 w-4 mr-1" />Generate test sessions</Button>
+                    <Button variant="outline" size="sm" onClick={() => setDevConfirm('seed')} disabled={busy}><Beaker className="h-4 w-4 mr-1" aria-hidden="true" />Generate test sessions</Button>
                     {testSessionCount > 0 && (
-                      <Button variant="outline" size="sm" onClick={() => setDevConfirm('clear')} disabled={busy} className="text-destructive hover:text-destructive"><Trash2 className="h-4 w-4 mr-1" />Clear test data</Button>
+                      <Button variant="outline" size="sm" onClick={() => setDevConfirm('clear')} disabled={busy} className="text-destructive hover:text-destructive"><Trash2 className="h-4 w-4 mr-1" aria-hidden="true" />Clear test data</Button>
                     )}
                   </div>
                 </div>
                 {devConfirm && (
-                  <div role="alertdialog" aria-label="Confirm test data change" className="flex flex-wrap items-center justify-between gap-2 rounded-md border bg-background p-3">
-                    <span>{devConfirm === 'seed' ? 'Create about 28 sessions prefixed with [TEST]?' : 'Delete every [TEST] session that is not published?'}</span>
-                    <div className="flex gap-2">
-                      <Button size="sm" variant="outline" onClick={() => setDevConfirm(null)}>Cancel</Button>
-                      <Button size="sm" variant={devConfirm === 'clear' ? 'destructive' : 'default'} onClick={() => devTools(devConfirm)}>Confirm</Button>
-                    </div>
-                  </div>
+                  <ConfirmInline
+                    layout="inline"
+                    destructive={devConfirm === 'clear'}
+                    message={devConfirm === 'seed' ? 'Create about 28 sessions prefixed with [TEST]?' : 'Delete every [TEST] session that is not published?'}
+                    confirmLabel={devConfirm === 'seed' ? 'Generate' : 'Delete'}
+                    loading={busy}
+                    onConfirm={() => void devTools(devConfirm)}
+                    onCancel={() => setDevConfirm(null)}
+                  />
                 )}
               </CardContent>
             </Card>
@@ -412,35 +487,42 @@ export default function AdminPage() {
         )}
 
         <div id="session-review" className="scroll-mt-24 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-          <div className="flex gap-1 sm:gap-2 border-b overflow-x-auto -mx-4 px-4 sm:mx-0 sm:px-0 sm:border-b-0" role="tablist" aria-label="Session status">
-            {(['all', 'pending', 'approved', 'scheduled', 'rejected'] as const).map((tab) => {
+          <div ref={tablistRef} className="flex gap-1 sm:gap-2 border-b overflow-x-auto -mx-4 px-4 sm:mx-0 sm:px-0 sm:border-b-0" role="tablist" aria-label="Session status">
+            {TABS.map((tab) => {
               const count = tab === 'all' ? sessions.length : counts[tab]
               return (
                 <button
                   key={tab}
+                  type="button"
                   role="tab"
+                  data-tab={tab}
                   aria-selected={activeTab === tab}
+                  tabIndex={activeTab === tab ? 0 : -1}
                   onClick={() => setActiveTab(tab)}
                   className={cn(
-                    'px-3 sm:px-4 py-2 text-sm font-medium border-b-2 sm:border-b-0 sm:rounded-md -mb-px sm:mb-0 transition-colors whitespace-nowrap capitalize',
+                    'min-h-10 px-3 sm:px-4 py-2 text-sm font-medium border-b-2 sm:border-b-0 sm:rounded-lg -mb-px sm:mb-0 transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
                     activeTab === tab ? 'border-primary text-primary sm:bg-primary/10' : 'border-transparent text-muted-foreground hover:text-foreground sm:hover:bg-muted',
                   )}
                 >
-                  {tab} ({count})
+                  {TAB_LABEL[tab]} <span className="tabular-nums">({count})</span>
                 </button>
               )
             })}
           </div>
-          <div className="flex items-center gap-2">
-            <div className="flex border rounded-md">
-              <Button variant={viewMode === 'table' ? 'secondary' : 'ghost'} size="sm" onClick={() => setViewMode('table')} aria-label="Table view" aria-pressed={viewMode === 'table'} className="rounded-r-none"><Table className="h-4 w-4" /></Button>
-              <Button variant={viewMode === 'cards' ? 'secondary' : 'ghost'} size="sm" onClick={() => setViewMode('cards')} aria-label="Card view" aria-pressed={viewMode === 'cards'} className="rounded-l-none"><Grid3X3 className="h-4 w-4" /></Button>
-            </div>
-          </div>
+          <SegmentedControl<ViewMode>
+            aria-label="View"
+            size="sm"
+            value={viewMode}
+            onValueChange={setViewMode}
+            options={[
+              { value: 'table', label: <span className="sr-only sm:not-sr-only">Table</span>, icon: <Table className="h-4 w-4" aria-hidden="true" /> },
+              { value: 'cards', label: <span className="sr-only sm:not-sr-only">Cards</span>, icon: <Grid3X3 className="h-4 w-4" aria-hidden="true" /> },
+            ]}
+          />
         </div>
 
         {data?.voting.status === 'open' && (
-          <p className="text-xs text-muted-foreground flex items-center gap-1.5"><Lock className="h-3.5 w-3.5" />Vote counts are sealed while voting is open, for organizers too. Sort by title, length or date until the round closes.</p>
+          <p className="text-xs text-muted-foreground flex items-center gap-1.5"><Lock className="h-3.5 w-3.5" aria-hidden="true" />Vote counts are sealed while voting is open, for organizers too. Sort by title, length or date until the round closes.</p>
         )}
 
         <SessionFilters
@@ -453,17 +535,39 @@ export default function AdminPage() {
         />
 
         {activeTab === 'scheduled' && sessions.some((s) => s.status === 'scheduled' && s.host_id && !s.host_notified_at) && can('sendCommunications') && (
-          <div className="flex flex-wrap gap-3 items-center justify-between bg-amber-500/10 border border-amber-500/20 rounded-lg p-3">
-            <p className="text-sm text-amber-700 dark:text-amber-400">Some hosts have not been emailed about their slot yet. Hosts are emailed once their slot is on the published schedule.</p>
-            <Button size="sm" asChild><Link href={`/e/${event.slug}/admin/communications`}><Mail className="h-4 w-4 mr-1" />Email hosts</Link></Button>
-          </div>
+          <Alert variant="warning" className="flex flex-wrap items-center justify-between gap-3 [&>svg~*]:pl-0">
+            <AlertDescription className="pl-7">Some hosts have not been emailed about their slot yet. Hosts are emailed once their slot is on the published schedule.</AlertDescription>
+            <Mail className="h-4 w-4" aria-hidden="true" />
+            <Button size="sm" asChild><Link href={`/e/${event.slug}/admin/communications`}>Email hosts</Link></Button>
+          </Alert>
         )}
 
         {filteredSessions.length === 0 ? (
           <Card>
-            <CardContent className="py-8 text-center text-muted-foreground">
-              {JSON.stringify(filters) !== JSON.stringify(defaultFilters) ? 'No sessions match your filters.' : `No ${activeTab === 'all' ? '' : activeTab} sessions yet.`}
-              <div className="mt-4"><Button variant="outline" onClick={() => { setFilters(defaultFilters); setActiveTab('all') }}>Show all sessions</Button></div>
+            <CardContent className="py-10 text-center text-muted-foreground">
+              {sessions.length === 0 ? (
+                <>
+                  <p>No sessions yet. Add one yourself, or invite people to propose their own.</p>
+                  <div className="mt-4 flex flex-wrap justify-center gap-2">
+                    {canSchedule && (
+                      <Button asChild><Link href={`/e/${event.slug}/admin/sessions/new`}><Plus className="h-4 w-4 mr-2" aria-hidden="true" />Add a session</Link></Button>
+                    )}
+                    {isAdmin && (
+                      <Button asChild variant="outline"><Link href={`/e/${event.slug}/admin/members`}><UserPlus className="h-4 w-4 mr-2" aria-hidden="true" />Invite people</Link></Button>
+                    )}
+                  </div>
+                </>
+              ) : filtersActive ? (
+                <>
+                  <p>No sessions match your filters.</p>
+                  <div className="mt-4"><Button variant="outline" onClick={() => setFilters(defaultFilters)}>Clear filters</Button></div>
+                </>
+              ) : (
+                <>
+                  <p>{TAB_EMPTY[activeTab]}</p>
+                  {activeTab !== 'all' && <div className="mt-4"><Button variant="outline" onClick={() => setActiveTab('all')}>Show all sessions</Button></div>}
+                </>
+              )}
             </CardContent>
           </Card>
         ) : viewMode === 'table' ? (

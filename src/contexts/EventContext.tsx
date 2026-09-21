@@ -306,7 +306,7 @@ export function JoinGatheringButton({ className, size = 'default', label = 'Join
   if (authLoading || isLoading || isMember) return null;
   if (!user) {
     const here = typeof window === 'undefined' ? `/e/${event.slug}` : `${window.location.pathname}${window.location.search}`;
-    return <Button asChild size={size} className={className}><Link href={`/login?redirect=${encodeURIComponent(here)}`}>Sign in to join</Link></Button>;
+    return <Button asChild size={size} className={className}><Link href={`/login?returnTo=${encodeURIComponent(here)}`}>Sign in to join</Link></Button>;
   }
   if (joinBlockedBy === 'ticket-required' || ticketsUrl) {
     return <Button asChild size={size} className={className}><Link href={ticketsUrl ?? `/e/${event.slug}/tickets`}>Get a ticket to join</Link></Button>;
@@ -323,8 +323,8 @@ export function JoinGatheringButton({ className, size = 'default', label = 'Join
   };
 
   return <span className="inline-flex flex-col items-start gap-1">
-    <Button type="button" size={size} className={className} onClick={onJoin} disabled={isJoining || joinable === null}>
-      {isJoining ? <Loader2 className="h-4 w-4 animate-spin mr-2" aria-hidden="true" /> : null}{label}
+    <Button type="button" size={size} className={className} onClick={onJoin} loading={isJoining} disabled={joinable === null}>
+      {label}
     </Button>
     {message ? <span role="alert" className="text-xs text-destructive">{message}</span> : null}
   </span>;

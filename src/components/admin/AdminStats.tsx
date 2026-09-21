@@ -8,6 +8,7 @@ import {
   MapPin,
   Clock,
 } from 'lucide-react'
+import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 
 interface AdminStatsProps {
@@ -19,7 +20,7 @@ interface AdminStatsProps {
   timeSlots: number
 }
 
-type Tone = 'neutral' | 'amber' | 'emerald' | 'primary' | 'muted'
+type Tone = 'neutral' | 'amber' | 'success' | 'primary' | 'muted'
 
 interface Stat {
   label: string
@@ -27,6 +28,15 @@ interface Stat {
   icon: React.ReactNode
   tone: Tone
   hint?: string
+}
+
+// Tokens only (spec §2.3): amber = --signal-amber, success = --success.
+const TONE: Record<Tone, { text: string; bg: string }> = {
+  neutral: { text: 'text-foreground', bg: 'bg-muted/30' },
+  amber: { text: 'text-signal-amber', bg: 'bg-signal-amber/10' },
+  success: { text: 'text-success', bg: 'bg-success/10' },
+  primary: { text: 'text-primary', bg: 'bg-primary/10' },
+  muted: { text: 'text-muted-foreground', bg: 'bg-transparent' },
 }
 
 export function AdminStats({
@@ -40,28 +50,28 @@ export function AdminStats({
   // Primary KPIs — most operationally relevant
   const primary: Stat[] = [
     {
-      label: 'Pending review',
+      label: 'Awaiting review',
       value: pending,
-      icon: <FileText className="h-4 w-4" />,
+      icon: <FileText className="h-4 w-4" aria-hidden="true" />,
       tone: pending > 0 ? 'amber' : 'muted',
       hint: pending > 0 ? 'Needs review' : undefined,
     },
     {
       label: 'Approved',
       value: approved,
-      icon: <CheckCircle2 className="h-4 w-4" />,
-      tone: approved > 0 ? 'emerald' : 'muted',
+      icon: <CheckCircle2 className="h-4 w-4" aria-hidden="true" />,
+      tone: approved > 0 ? 'success' : 'muted',
     },
     {
       label: 'Scheduled',
       value: scheduled,
-      icon: <Calendar className="h-4 w-4" />,
+      icon: <Calendar className="h-4 w-4" aria-hidden="true" />,
       tone: 'primary',
     },
     {
-      label: 'Rejected',
+      label: 'Not selected',
       value: rejected,
-      icon: <XCircle className="h-4 w-4" />,
+      icon: <XCircle className="h-4 w-4" aria-hidden="true" />,
       tone: 'muted',
     },
   ]
@@ -69,28 +79,26 @@ export function AdminStats({
   // Supporting stats — infrastructure metadata
   const secondary: Stat[] = [
     {
-      label: 'Venues',
+      label: 'Rooms',
       value: venues,
-      icon: <MapPin className="h-4 w-4" />,
+      icon: <MapPin className="h-4 w-4" aria-hidden="true" />,
       tone: 'neutral',
     },
     {
       label: 'Time slots',
       value: timeSlots,
-      icon: <Clock className="h-4 w-4" />,
+      icon: <Clock className="h-4 w-4" aria-hidden="true" />,
       tone: 'neutral',
     },
   ]
 
   return (
-    <section className="rounded-2xl border border-foreground/20 bg-card stats-card">
-      {/* Primary KPIs */}
+    <section aria-label="Program at a glance" className="rounded-2xl border border-foreground/20 bg-card stats-card">
       <div className="grid grid-cols-2 md:grid-cols-4 divide-y md:divide-y-0 md:divide-x divide-border">
         {primary.map((stat) => (
           <StatCell key={stat.label} {...stat} />
         ))}
       </div>
-      {/* Secondary row with venues / slots */}
       <div className="border-t grid grid-cols-2 divide-x divide-border">
         {secondary.map((stat) => (
           <StatCell key={stat.label} {...stat} compact />
@@ -108,34 +116,7 @@ function StatCell({
   hint,
   compact = false,
 }: Stat & { compact?: boolean }) {
-  const toneStyles: Record<Tone, { text: string; bg: string; dot: string }> = {
-    neutral: {
-      text: 'text-foreground',
-      bg: 'bg-muted/30',
-      dot: 'bg-muted-foreground/40',
-    },
-    amber: {
-      text: 'text-amber-600 dark:text-amber-400',
-      bg: 'bg-amber-500/5',
-      dot: 'bg-amber-500',
-    },
-    emerald: {
-      text: 'text-emerald-600 dark:text-emerald-400',
-      bg: 'bg-emerald-500/5',
-      dot: 'bg-emerald-500',
-    },
-    primary: {
-      text: 'text-primary',
-      bg: 'bg-primary/5',
-      dot: 'bg-primary',
-    },
-    muted: {
-      text: 'text-muted-foreground',
-      bg: 'bg-transparent',
-      dot: 'bg-muted-foreground/30',
-    },
-  }
-  const styles = toneStyles[tone]
+  const styles = TONE[tone]
 
   return (
     <div
@@ -155,29 +136,12 @@ function StatCell({
       </span>
       <div className="flex-1 min-w-0">
         <div className="flex flex-wrap items-center gap-2">
-          <span
-            className={cn(
-              'font-semibold tabular-nums',
-              compact ? 'text-2xl' : 'text-4xl tracking-tight'
-            )}
-          >
+          <span className={cn('font-semibold tabular-nums', compact ? 'text-2xl' : 'stat-value')}>
             {value}
           </span>
-          {hint && (
-            <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-xs font-medium tracking-wide text-amber-600 dark:text-amber-400">
-              <span className={cn('h-1.5 w-1.5 rounded-full', styles.dot)} />
-              {hint}
-            </span>
-          )}
+          {hint && <Badge variant="amber">{hint}</Badge>}
         </div>
-        <p
-          className={cn(
-            'text-xs text-muted-foreground truncate',
-            compact ? 'mt-0' : 'mt-0.5'
-          )}
-        >
-          {label}
-        </p>
+        <p className={cn('text-xs text-muted-foreground truncate', compact ? 'mt-0' : 'mt-0.5')}>{label}</p>
       </div>
     </div>
   )

@@ -131,6 +131,8 @@ export interface SessionView {
   updated_at: string
   /** A linked host, rendered from their own profile; null for a host-less session. */
   host: (PersonView & { bio?: string | null; affiliation?: string | null }) | null
+  /** `host.handle`, at the top level for cards and bylines (null when host-less or handle-less). */
+  host_handle: string | null
   /** Host-less: non-organizers render "Unclaimed proposal". */
   unclaimed: boolean
   /** Organizers only: the organizer-typed label for a host-less session. */
@@ -307,6 +309,7 @@ export function serializeSession(row: SessionRow, access: EventAccess, detail: b
           ...(detail && (isMember || isHost) ? { bio: row.host_bio, affiliation: row.host_affiliation } : {}),
         }
       : null,
+    host_handle: row.host_id ? row.host_handle : null,
     unclaimed: !row.host_id,
     cohosts: cohostRows.map((c) => ({
       id: c.id,

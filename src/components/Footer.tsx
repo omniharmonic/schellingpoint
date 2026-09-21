@@ -2,101 +2,149 @@
 
 import * as React from 'react'
 import Link from 'next/link'
-import { Send, Globe } from 'lucide-react'
+import { Link2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { Event } from '@/types/event'
 
-// X (Twitter) icon component
+// Brand glyphs are used only for Bluesky and X (social links contract); everything else gets
+// its label and a generic link icon.
 const XIcon = ({ className }: { className?: string }) => (
-  <svg viewBox="0 0 24 24" className={className} fill="currentColor">
+  <svg viewBox="0 0 24 24" className={className} fill="currentColor" aria-hidden="true">
     <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
   </svg>
 )
 
-const DiscordIcon = ({ className }: { className?: string }) => (
-  <svg viewBox="0 0 24 24" className={className} fill="currentColor">
-    <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z" />
+const BlueskyIcon = ({ className }: { className?: string }) => (
+  <svg viewBox="0 0 24 24" className={className} fill="currentColor" aria-hidden="true">
+    <path d="M12 10.8c-1.087-2.114-4.046-6.053-6.798-7.995C2.566.944 1.561 1.266.902 1.565.139 1.908 0 3.08 0 3.768c0 .69.378 5.65.624 6.479.815 2.736 3.713 3.66 6.383 3.364.136-.02.275-.039.415-.056-.138.022-.276.04-.415.056-3.912.58-7.387 2.005-2.83 7.078 5.013 5.19 6.87-1.113 7.823-4.308.953 3.195 2.05 9.271 7.733 4.308 4.267-4.308 1.172-6.498-2.74-7.078a8.741 8.741 0 0 1-.415-.056c.14.017.279.036.415.056 2.67.297 5.568-.628 6.383-3.364.246-.828.624-5.79.624-6.478 0-.69-.139-1.861-.902-2.206-.659-.298-1.664-.62-4.3 1.24C16.046 4.748 13.087 8.687 12 10.8Z" />
   </svg>
 )
 
-interface SocialLinks {
-  twitter?: string
-  telegram?: string
-  discord?: string
-  website?: string
+/** One displayable link, whatever key it was stored under. */
+export interface FooterLink {
+  label: string
+  url: string
+  glyph: 'bluesky' | 'x' | null
+}
+
+const MAX_LINKS = 8
+
+function isHttpUrl(value: unknown): value is string {
+  if (typeof value !== 'string') return false
+  try {
+    const u = new URL(value)
+    return u.protocol === 'https:' || u.protocol === 'http:'
+  } catch {
+    return false
+  }
+}
+
+function glyphFor(label: string, url: string): FooterLink['glyph'] {
+  const key = label.trim().toLowerCase()
+  let host = ''
+  try {
+    host = new URL(url).hostname.replace(/^www\./, '')
+  } catch {
+    host = ''
+  }
+  if (key === 'bluesky' || host === 'bsky.app' || host.endsWith('.bsky.app')) return 'bluesky'
+  if (key === 'x' || key === 'twitter' || host === 'x.com' || host === 'twitter.com') return 'x'
+  return null
+}
+
+/**
+ * Merge the legacy `theme.social.{twitter,telegram,discord,website}` keys and the repeatable
+ * `theme.social.links` into one list for display (social links contract). Legacy keys first,
+ * in a stable order; invalid or non-http URLs are dropped; at most eight links.
+ */
+type SocialInput = NonNullable<NonNullable<Event['theme']>['social']>
+
+export function socialLinksOf(social: SocialInput | null | undefined): FooterLink[] {
+  if (!social) return []
+  const out: FooterLink[] = []
+  const push = (label: string, url: unknown) => {
+    const trimmed = label.trim()
+    if (!trimmed || !isHttpUrl(url) || out.length >= MAX_LINKS) return
+    if (out.some((l) => l.url === url)) return
+    out.push({ label: trimmed, url, glyph: glyphFor(trimmed, url) })
+  }
+  push('X', social.twitter)
+  push('Telegram', social.telegram)
+  push('Discord', social.discord)
+  push('Website', social.website)
+  for (const link of social.links ?? []) {
+    if (link && typeof link === 'object') push(String(link.label ?? ''), link.url)
+  }
+  return out
+}
+
+function SocialLinks({ links, className }: { links: FooterLink[]; className?: string }) {
+  if (links.length === 0) return null
+  return (
+    <ul className={cn('flex flex-wrap items-center gap-x-4 gap-y-2', className)} aria-label="Gathering links">
+      {links.map((link) => (
+        <li key={link.url}>
+          <a
+            href={link.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex min-h-8 items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+          >
+            {link.glyph === 'bluesky' ? (
+              <BlueskyIcon className="h-4 w-4" />
+            ) : link.glyph === 'x' ? (
+              <XIcon className="h-3.5 w-3.5" />
+            ) : (
+              <Link2 className="h-4 w-4" strokeWidth={1.5} aria-hidden="true" />
+            )}
+            {link.label}
+          </a>
+        </li>
+      ))}
+    </ul>
+  )
 }
 
 interface FooterProps {
   className?: string
   variant?: 'default' | 'minimal'
-  event?: Pick<Event, 'name' | 'logoUrl' | 'tagline' | 'theme'> | null
-}
-
-interface FooterBranding {
-  name: string
-  logoUrl?: string | null
-  tagline?: string | null
-  social?: SocialLinks
-}
-
-const PLATFORM_BRANDING: FooterBranding = {
-  name: 'unconference',
-  tagline: 'Coordination protocol for unconferences',
-
-}
-
-function SocialIcons({ social, className }: { social?: SocialLinks; className?: string }) {
-  if (!social) return null
-
-  const links = [
-    { href: social.telegram, icon: <Send className="h-4 w-4" strokeWidth={1.5} />, label: 'Telegram' },
-    { href: social.twitter, icon: <XIcon className="h-4 w-4" />, label: 'X' },
-    { href: social.discord, icon: <DiscordIcon className="h-4 w-4" />, label: 'Discord' },
-    { href: social.website, icon: <Globe className="h-4 w-4" strokeWidth={1.5} />, label: 'Web' },
-  ].filter((link) => link.href)
-
-  if (links.length === 0) return null
-
-  return (
-    <div className={cn('flex items-center gap-1', className)}>
-      {links.map(({ href, icon, label }) => (
-        <a
-          key={label}
-          href={href}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="p-2 rounded-md text-muted-foreground hover:text-primary hover:bg-primary/5 transition-colors"
-          aria-label={label}
-        >
-          {icon}
-        </a>
-      ))}
-    </div>
-  )
+  /** When set, the footer carries the gathering's branding: "{name} · Powered by unconference.events". */
+  event?: (Pick<Event, 'name' | 'logoUrl' | 'tagline' | 'theme'> & { slug?: string }) | null
 }
 
 export function Footer({ className, variant = 'default', event }: FooterProps) {
   const isMinimal = variant === 'minimal'
-
-  const branding: FooterBranding = event
-    ? {
-        name: event.name,
-        logoUrl: event.logoUrl,
-        tagline: event.tagline,
-        social: event.theme?.social,
-      }
-    : PLATFORM_BRANDING
+  const links = socialLinksOf(event?.theme?.social)
 
   return (
     <footer className={cn('border-t bg-background', className)}>
       <div className={cn('container mx-auto px-5', isMinimal ? 'py-6' : 'py-10')}>
         <div className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <Link href="/" className="font-semibold tracking-tight">{event ? 'Powered by unconference' : 'unconference'}</Link>
-            {!isMinimal && <p className="text-sm text-muted-foreground mt-1">A little structure. A lot of possibility.</p>}
+          <div className="min-w-0">
+            {event ? (
+              <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+                {event.logoUrl && <img src={event.logoUrl} alt="" className="h-6 w-6 rounded object-contain" />}
+                {event.slug ? (
+                  <Link href={`/e/${event.slug}`} className="font-semibold tracking-tight hover:text-primary">{event.name}</Link>
+                ) : (
+                  <span className="font-semibold tracking-tight">{event.name}</span>
+                )}
+                <span className="whitespace-nowrap text-muted-foreground">
+                  <span aria-hidden="true">· </span>
+                  <Link href="/" className="hover:text-foreground">Powered by unconference.events</Link>
+                </span>
+              </p>
+            ) : (
+              <Link href="/" className="font-semibold tracking-tight">unconference</Link>
+            )}
+            {!isMinimal && (
+              <p className="mt-1 text-sm text-muted-foreground">
+                {event?.tagline || 'A little structure. A lot of possibility.'}
+              </p>
+            )}
           </div>
-          <div className="flex flex-wrap items-center gap-5 text-xs text-muted-foreground">
-            <SocialIcons social={branding.social} />
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm text-muted-foreground">
+            <SocialLinks links={links} />
             <Link href="/codeofconduct" className="hover:text-foreground">Code of conduct</Link>
             <Link href="/privacy" className="hover:text-foreground">Privacy</Link>
             <Link href="/terms" className="hover:text-foreground">Terms</Link>

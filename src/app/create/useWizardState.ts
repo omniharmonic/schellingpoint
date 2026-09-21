@@ -22,6 +22,7 @@ export interface WizardBasics {
   slug: string;
   eventType: EventType;
   visibility: EventVisibility;
+  /** Admission and platform contribution are edited in the Participation step; the API field names are unchanged. */
   ticketingEnabled?: boolean;
   platformFeePercent?: number;
 }
@@ -82,6 +83,8 @@ export interface WizardVoting {
 export interface WizardIdentity {
   /** The organizer has read that the gathering gets a public identity and permanent public records. */
   acknowledged: boolean;
+  /** Terms and privacy policy accepted on the Review step. Never restored from a draft. */
+  termsAccepted: boolean;
 }
 
 export interface WizardTheme {
@@ -91,11 +94,21 @@ export interface WizardTheme {
   mode: ThemeMode;
 }
 
+export interface WizardSocialLink {
+  label: string;
+  url: string;
+}
+
+/**
+ * Storage shape of `theme.social`: the four legacy keys plus `links` for everything else.
+ * The UI edits one list (see `socialToList` / `listToSocial` in the settings constants).
+ */
 export interface WizardSocial {
   twitter: string;
   telegram: string;
   discord: string;
   website: string;
+  links: WizardSocialLink[];
 }
 
 export interface WizardBranding {
@@ -153,19 +166,37 @@ export type WizardAction =
 // Constants
 // ============================================================================
 
+/**
+ * Step order mirrors the organizer settings IA (Network identity → Basics → Dates → … →
+ * Participation → Voting → Branding), so what an organizer meets five minutes later is familiar.
+ */
 export const WIZARD_STEPS = [
+  'identity',
   'basics',
   'dates',
   'venues',
   'schedule',
   'tracks',
+  'participation',
   'voting',
   'branding',
-  'identity',
   'review',
 ] as const;
 
 export type WizardStepName = (typeof WIZARD_STEPS)[number];
+
+export const STEP_LABELS: Record<WizardStepName, string> = {
+  identity: 'Identity',
+  basics: 'Basics',
+  dates: 'Dates',
+  venues: 'Venues',
+  schedule: 'Schedule',
+  tracks: 'Tracks',
+  participation: 'Participation',
+  voting: 'Voting',
+  branding: 'Branding',
+  review: 'Review',
+};
 
 export const INITIAL_STATE: WizardState = {
   currentStep: 0,
@@ -222,10 +253,12 @@ export const INITIAL_STATE: WizardState = {
       telegram: '',
       discord: '',
       website: '',
+      links: [],
     },
   },
   identity: {
     acknowledged: false,
+    termsAccepted: false,
   },
   validation: {},
 };
@@ -235,6 +268,9 @@ export const MAX_SLUG_LENGTH = 32;
 /** Longest slug the PDS accepts as the gathering's own handle label; longer slugs get a generated handle. */
 export const HANDLE_LABEL_MAX = 18;
 const SLUG_LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{1,30}[a-z0-9])?$/;
+
+/** Longest description we accept in the wizard (the column is unbounded; this keeps the review readable). */
+export const MAX_DESCRIPTION_LENGTH = 4000;
 
 // ============================================================================
 // Helper Functions
@@ -259,70 +295,29 @@ export function getNumberFromStep(stepName: WizardStepName): number {
 }
 
 /**
+ * `validateWizardState` (src/lib/events/validate-creation.ts) reports the failing area using
+ * the original step numbering (basics, dates, venues, schedule, tracks, voting, branding).
+ * Map that onto the current order so "Edit" lands on the right step.
+ */
+const VALIDATION_AREA_TO_STEP: WizardStepName[] = ['basics', 'dates', 'venues', 'schedule', 'tracks', 'voting', 'branding'];
+
+export function stepForValidationArea(area: number | undefined, error?: string): number {
+  const name = VALIDATION_AREA_TO_STEP[area ?? 0] ?? 'basics';
+  if (name === 'basics') {
+    // Name and URL now live on the Identity step; admission on Participation.
+    if (error && /name|URL|slug/i.test(error)) return getNumberFromStep('identity');
+    if (error && /admission|contribution/i.test(error)) return getNumberFromStep('participation');
+  }
+  if (name === 'voting' && error && /proposal|format|duration/i.test(error)) return getNumberFromStep('participation');
+  return getNumberFromStep(name);
+}
+
+/**
  * Basic validation for each step
  * Returns true if the step is valid, false otherwise
  */
 export function isStepValid(state: WizardState, step: number): boolean {
-  const stepName = getStepFromNumber(step);
-
-  switch (stepName) {
-    case 'basics':
-      return (
-        state.basics.name.trim().length > 0 &&
-        SLUG_LABEL_RE.test(state.basics.slug) &&
-        state.basics.eventType.length > 0 && validPlatformFeePercent(state.basics.platformFeePercent ?? 1)
-      );
-
-    case 'dates':
-      return (
-        state.dates.startDate.length > 0 &&
-        state.dates.endDate.length > 0 &&
-        state.dates.timezone.length > 0 &&
-        new Date(state.dates.startDate) <= new Date(state.dates.endDate)
-      );
-
-    case 'venues':
-      // Venues are optional for virtual events
-      if (state.dates.locationType === 'virtual') {
-        return true;
-      }
-      // For in-person or hybrid, at least one venue is recommended but not strictly required
-      return true;
-
-    case 'schedule':
-      // Schedule is optional, can be configured later
-      return true;
-
-    case 'tracks':
-      // Tracks are optional
-      return true;
-
-    case 'voting':
-      return (
-        state.voting.credits > 0 &&
-        // maxProposalsPerUser = 0 means unlimited (allowed)
-        state.voting.maxProposalsPerUser >= 0 &&
-        Array.isArray(state.voting.allowedFormats) &&
-        state.voting.allowedFormats.length > 0 &&
-        Array.isArray(state.voting.allowedDurations) &&
-        state.voting.allowedDurations.length > 0 &&
-        thresholdsValid(state.voting.policyThresholds)
-      );
-
-    case 'identity':
-      return state.identity.acknowledged;
-
-    case 'branding':
-      // Branding is optional, defaults are fine
-      return true;
-
-    case 'review':
-      // Review step just needs all previous steps to be valid
-      return true;
-
-    default:
-      return true;
-  }
+  return getStepValidationErrors(state, step).length === 0;
 }
 
 /**
@@ -333,64 +328,72 @@ export function getStepValidationErrors(state: WizardState, step: number): strin
   const errors: string[] = [];
 
   switch (stepName) {
-    case 'basics':
-      if (!validPlatformFeePercent(state.basics.platformFeePercent ?? 1)) errors.push('Choose a contribution between 1% and 100%');
+    case 'identity':
       if (!state.basics.name.trim()) {
-        errors.push('Event name is required');
+        errors.push('Give the gathering a name');
       }
       if (!state.basics.slug.trim()) {
-        errors.push('Event slug is required');
-      }
-      if (state.basics.slug && !/^[a-z0-9-]+$/.test(state.basics.slug)) {
-        errors.push('Slug can only contain lowercase letters, numbers, and hyphens');
-      } else if (state.basics.slug && !SLUG_LABEL_RE.test(state.basics.slug)) {
+        errors.push('Choose an event URL');
+      } else if (!/^[a-z0-9-]+$/.test(state.basics.slug)) {
+        errors.push('The URL can only contain lowercase letters, numbers and hyphens');
+      } else if (!SLUG_LABEL_RE.test(state.basics.slug)) {
         errors.push(`Use 3–${MAX_SLUG_LENGTH} characters that start and end with a letter or number`);
+      }
+      if (!state.identity.acknowledged) {
+        errors.push('Confirm you understand what becomes public before continuing');
+      }
+      break;
+
+    case 'basics':
+      if (!state.basics.eventType.trim()) {
+        errors.push('Choose or name an event type');
       }
       break;
 
     case 'dates':
       if (!state.dates.startDate) {
-        errors.push('Start date is required');
+        errors.push('Choose a start date');
       }
       if (!state.dates.endDate) {
-        errors.push('End date is required');
+        errors.push('Choose an end date');
       }
       if (
         state.dates.startDate &&
         state.dates.endDate &&
         new Date(state.dates.startDate) > new Date(state.dates.endDate)
       ) {
-        errors.push('End date must be after start date');
+        errors.push('The end date must be on or after the start date');
       }
       if (!state.dates.timezone) {
-        errors.push('Timezone is required');
+        errors.push('Choose a timezone');
+      }
+      break;
+
+    case 'participation':
+      if (!validPlatformFeePercent(state.basics.platformFeePercent ?? 1)) {
+        errors.push('Choose a platform contribution between 1% and 100%');
+      }
+      if (state.voting.maxProposalsPerUser < 0) {
+        errors.push('The proposal limit cannot be negative');
+      }
+      if (!Array.isArray(state.voting.allowedFormats) || state.voting.allowedFormats.length === 0) {
+        errors.push('Allow at least one session format');
+      }
+      if (!Array.isArray(state.voting.allowedDurations) || state.voting.allowedDurations.length === 0) {
+        errors.push('Allow at least one session length');
       }
       break;
 
     case 'voting':
-      if (state.voting.credits <= 0) {
-        errors.push('Vote credits must be greater than 0');
-      }
-      if (state.voting.maxProposalsPerUser < 0) {
-        errors.push('Max proposals per user cannot be negative');
-      }
-      if (!Array.isArray(state.voting.allowedFormats) || state.voting.allowedFormats.length === 0) {
-        errors.push('At least one session format must be allowed');
-      }
-      if (!Array.isArray(state.voting.allowedDurations) || state.voting.allowedDurations.length === 0) {
-        errors.push('At least one session duration must be allowed');
+      if (!Number.isInteger(state.voting.credits) || state.voting.credits <= 0) {
+        errors.push('Vote credits must be a whole number above 0');
       }
       if (!thresholdsValid(state.voting.policyThresholds)) {
         errors.push('Choose valid approval and privacy thresholds');
       }
       break;
 
-    case 'identity':
-      if (!state.identity.acknowledged) {
-        errors.push('Confirm you understand what becomes public before creating the gathering');
-      }
-      break;
-
+    // Venues, schedule, tracks and branding are optional; defaults are fine.
     default:
       break;
   }
@@ -406,6 +409,39 @@ function thresholdsValid(t: GatheringPolicyThresholds | undefined): boolean {
 // ============================================================================
 // Reducer
 // ============================================================================
+
+function mergeState(base: WizardState, partial: Partial<WizardState> | undefined, options: { restoreIdentity: boolean }): WizardState {
+  const p = partial ?? {};
+  return {
+    ...base,
+    ...p,
+    basics: { ...base.basics, ...p.basics },
+    dates: { ...base.dates, ...p.dates },
+    venues: Array.isArray(p.venues) ? p.venues : base.venues,
+    tracks: Array.isArray(p.tracks) ? p.tracks : base.tracks,
+    schedule: { ...base.schedule, ...p.schedule },
+    suggestedTopics: Array.isArray(p.suggestedTopics) ? p.suggestedTopics : base.suggestedTopics,
+    voting: {
+      ...base.voting,
+      ...p.voting,
+      policyThresholds: { ...base.voting.policyThresholds, ...p.voting?.policyThresholds },
+    },
+    identity: options.restoreIdentity
+      ? { ...base.identity, ...p.identity, termsAccepted: false }
+      : { ...base.identity },
+    branding: {
+      ...base.branding,
+      ...p.branding,
+      theme: { ...base.branding.theme, ...p.branding?.theme },
+      social: {
+        ...base.branding.social,
+        ...p.branding?.social,
+        links: Array.isArray(p.branding?.social?.links) ? p.branding!.social!.links : base.branding.social.links,
+      },
+    },
+    validation: {},
+  };
+}
 
 function wizardReducer(state: WizardState, action: WizardAction): WizardState {
   switch (action.type) {
@@ -627,48 +663,9 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
       return INITIAL_STATE;
 
     case 'LOAD_STATE':
-      return {
-        ...INITIAL_STATE,
-        ...action.payload,
-        // Ensure nested objects are properly merged
-        basics: {
-          ...INITIAL_STATE.basics,
-          ...action.payload.basics,
-        },
-        dates: {
-          ...INITIAL_STATE.dates,
-          ...action.payload.dates,
-        },
-        schedule: {
-          ...INITIAL_STATE.schedule,
-          ...action.payload.schedule,
-        },
-        suggestedTopics: action.payload.suggestedTopics || INITIAL_STATE.suggestedTopics,
-        voting: {
-          ...INITIAL_STATE.voting,
-          ...action.payload.voting,
-          policyThresholds: {
-            ...INITIAL_STATE.voting.policyThresholds,
-            ...action.payload.voting?.policyThresholds,
-          },
-        },
-        // Acknowledgement is never restored from a saved draft: it is given right before creating.
-        identity: { ...INITIAL_STATE.identity },
-        branding: {
-          ...INITIAL_STATE.branding,
-          ...action.payload.branding,
-          theme: {
-            ...INITIAL_STATE.branding.theme,
-            ...action.payload.branding?.theme,
-          },
-          social: {
-            ...INITIAL_STATE.branding.social,
-            ...action.payload.branding?.social,
-          },
-        },
-        // Keep validation empty on load
-        validation: {},
-      };
+      // The identity acknowledgement is the first step, so a resumed draft keeps it; the terms
+      // acceptance is given right before creating and is never restored.
+      return mergeState(INITIAL_STATE, action.payload, { restoreIdentity: true });
 
     default:
       return state;
@@ -682,34 +679,7 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
 export function useWizardState(initialState?: Partial<WizardState>) {
   const [state, dispatch] = useReducer(
     wizardReducer,
-    initialState
-      ? {
-          ...INITIAL_STATE,
-          ...initialState,
-          basics: { ...INITIAL_STATE.basics, ...initialState.basics },
-          dates: { ...INITIAL_STATE.dates, ...initialState.dates },
-          schedule: { ...INITIAL_STATE.schedule, ...initialState.schedule },
-          suggestedTopics: initialState.suggestedTopics || INITIAL_STATE.suggestedTopics,
-          voting: {
-            ...INITIAL_STATE.voting,
-            ...initialState.voting,
-            policyThresholds: { ...INITIAL_STATE.voting.policyThresholds, ...initialState.voting?.policyThresholds },
-          },
-          identity: { ...INITIAL_STATE.identity, ...initialState.identity },
-          branding: {
-            ...INITIAL_STATE.branding,
-            ...initialState.branding,
-            theme: {
-              ...INITIAL_STATE.branding.theme,
-              ...initialState.branding?.theme,
-            },
-            social: {
-              ...INITIAL_STATE.branding.social,
-              ...initialState.branding?.social,
-            },
-          },
-        }
-      : INITIAL_STATE
+    initialState ? mergeState(INITIAL_STATE, initialState, { restoreIdentity: true }) : INITIAL_STATE
   );
 
   // Convenience methods

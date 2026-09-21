@@ -2,6 +2,7 @@
 
 import { isParticipationOpen } from '@/lib/events/lifecycle'
 import * as React from 'react'
+import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import {
   ArrowLeft,
@@ -20,14 +21,16 @@ import {
   ExternalLink,
   Pencil,
   Trash2,
-  AlertTriangle,
   X,
-  Send,
+  MessageCircle,
   Lock,
 } from 'lucide-react'
-import { Card } from '@/components/ui/card'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { ConfirmInline } from '@/components/ui/confirm-inline'
+import { useToast } from '@/components/ui/toast'
+import { WarningBox } from '@/components/WarningBox'
 import { DashboardLayout } from '@/components/DashboardLayout'
 import { EditSessionModal } from '@/components/EditSessionModal'
 import { ManageCohostsSection } from '@/components/ManageCohostsSection'
@@ -41,8 +44,12 @@ import { setFavorite } from '@/components/SessionCard'
 import { useAuth } from '@/hooks/useAuth'
 import { useEvent } from '@/contexts/EventContext'
 import { apiFetch } from '@/lib/api/client'
+import { sessionStatusBadge } from '@/lib/labels'
+import { EN_DASH, truncate } from '@/lib/format'
+import { formatDescription, formatLabel } from '@/lib/sessions/constants'
 import { hostByline } from '@/app/api/v1/sessions/_lib/byline'
 import type { SessionView, PersonView } from '@/app/api/v1/sessions/_lib/read'
+import { cn } from '@/lib/utils'
 
 const formatIcons: Record<string, React.ComponentType<{ className?: string }>> = {
   talk: Mic,
@@ -50,14 +57,6 @@ const formatIcons: Record<string, React.ComponentType<{ className?: string }>> =
   discussion: MessageSquare,
   panel: Users,
   demo: Monitor,
-}
-
-const formatDescriptions: Record<string, string> = {
-  talk: 'A presentation by one speaker',
-  workshop: 'Hands-on interactive session',
-  discussion: 'Facilitated group conversation',
-  panel: 'Multiple speakers discuss a topic',
-  demo: 'Live demonstration of a project or tool',
 }
 
 interface SessionDetailClientProps {
@@ -71,22 +70,33 @@ function formatInZone(iso: string, timeZone: string, options: Intl.DateTimeForma
   return new Date(iso).toLocaleString('en-US', { timeZone, ...options })
 }
 
+/** A Bluesky compose intent: the viewer posts from their own account, nothing is written for them. */
+function blueskyComposeUrl(title: string, url: string): string {
+  return `https://bsky.app/intent/compose?text=${encodeURIComponent(`${title}\n${url}`)}`
+}
+
+function Separator() {
+  return <span className="text-muted-foreground/50" aria-hidden>·</span>
+}
+
 export function SessionDetailClient({ sessionId, initialSession }: SessionDetailClientProps) {
   const router = useRouter()
   const { user } = useAuth()
   const event = useEvent()
+  const { toast } = useToast()
   const votingOpen = isParticipationOpen(event, 'vote')
 
   const [session, setSession] = React.useState<SessionView | null>(initialSession ?? null)
   const [isLoading, setIsLoading] = React.useState(!initialSession)
   const [error, setError] = React.useState<string | null>(null)
   const [actionError, setActionError] = React.useState<string | null>(null)
-  const [showShareToast, setShowShareToast] = React.useState(false)
   const [showHostCard, setShowHostCard] = React.useState<string | null>(null)
   const [showEditModal, setShowEditModal] = React.useState(false)
   const [showWithdrawConfirm, setShowWithdrawConfirm] = React.useState(false)
   const [isWithdrawing, setIsWithdrawing] = React.useState(false)
+  const [pageUrl, setPageUrl] = React.useState('')
   const hostCardRef = React.useRef<HTMLDivElement>(null)
+  const rsvpRef = React.useRef<HTMLDivElement>(null)
 
   const endpoint = `/api/v1/events/${encodeURIComponent(event.slug)}/sessions/${sessionId}`
 
@@ -96,7 +106,7 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
       setSession(data.session)
       setError(null)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load session')
+      setError(err instanceof Error ? err.message : 'This session could not be loaded.')
     } finally {
       setIsLoading(false)
     }
@@ -106,6 +116,10 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
   React.useEffect(() => {
     refresh()
   }, [refresh, user?.id])
+
+  React.useEffect(() => {
+    setPageUrl(window.location.href)
+  }, [])
 
   React.useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -127,6 +141,11 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
     setSession({ ...session, is_favorite: next })
     try {
       await setFavorite(event.slug, sessionId, next)
+      toast({
+        title: next ? 'Saved to my schedule' : 'Removed from my schedule',
+        variant: 'success',
+        action: next ? { label: 'View my schedule', onClick: () => router.push(`/e/${event.slug}/my-schedule`) } : undefined,
+      })
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Your saved schedule could not be updated. Please try again.')
       setSession((s) => (s ? { ...s, is_favorite: !next } : s))
@@ -135,8 +154,8 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
 
   const handleShare = async () => {
     const shareUrl = window.location.href
-    const shareTitle = session?.title || 'Check out this session'
-    const shareText = session?.description ? `${shareTitle} - ${session.description.substring(0, 100)}...` : shareTitle
+    const shareTitle = session?.title || 'A session worth seeing'
+    const shareText = session?.description ? `${shareTitle} · ${truncate(session.description, 100)}` : shareTitle
     if (navigator.share) {
       try {
         await navigator.share({ title: shareTitle, text: shareText, url: shareUrl })
@@ -147,10 +166,9 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
     }
     try {
       await navigator.clipboard.writeText(shareUrl)
-      setShowShareToast(true)
-      setTimeout(() => setShowShareToast(false), 2000)
-    } catch (err) {
-      console.error('Failed to copy:', err)
+      toast({ title: 'Link copied', description: 'Paste it anywhere to share this session.', variant: 'success' })
+    } catch {
+      toast({ title: 'The link could not be copied', description: shareUrl, variant: 'destructive' })
     }
   }
 
@@ -160,6 +178,7 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
     try {
       const result = await apiFetch<{ deleted: boolean }>(`/api/v1/sessions/${sessionId}`, { method: 'DELETE' })
       setShowWithdrawConfirm(false)
+      toast({ title: 'Proposal withdrawn', variant: 'success' })
       if (result.deleted) router.push(`/e/${event.slug}/sessions?filter=mine`)
       else await refresh()
     } catch (err) {
@@ -170,10 +189,15 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
     }
   }
 
+  const focusRsvp = () => {
+    rsvpRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    rsvpRef.current?.querySelector<HTMLButtonElement>('button')?.focus({ preventScroll: true })
+  }
+
   if (isLoading) {
     return (
       <DashboardLayout>
-        <div className="flex items-center justify-center py-12">
+        <div className="flex items-center justify-center py-12" role="status" aria-label="Loading session">
           <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
         </div>
       </DashboardLayout>
@@ -184,13 +208,15 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
     return (
       <DashboardLayout>
         <div className="space-y-4">
-          <Button variant="ghost" onClick={() => router.back()} className="gap-2">
-            <ArrowLeft className="h-4 w-4" />
-            Back
+          <Button variant="ghost" asChild className="gap-2">
+            <Link href={`/e/${event.slug}/sessions`}>
+              <ArrowLeft className="h-4 w-4" aria-hidden />
+              Back to sessions
+            </Link>
           </Button>
-          <div className="text-center py-12">
-            <p className="text-destructive mb-4">{error || 'Session not found'}</p>
-            <Button onClick={() => router.push(`/e/${event.slug}/sessions`)}>View All Sessions</Button>
+          <div className="py-12 text-center">
+            <p role="alert" className="mb-4 text-destructive">{error || 'This session could not be found.'}</p>
+            <Button asChild><Link href={`/e/${event.slug}/sessions`}>View all sessions</Link></Button>
           </div>
         </div>
       </DashboardLayout>
@@ -205,90 +231,123 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
     ...(session.host ? [{ ...session.host, key: 'host', role: 'Host' }] : []),
     ...session.cohosts.map((c) => ({ ...c, key: c.id, role: 'Co-host' })),
   ]
+  // Handles are optional on both hosts and co-hosts; only render the ones present.
+  const hostHandles = hosts.map((h) => h.handle).filter((h): h is string => !!h)
   const confirmed = session.my_rsvp?.status === 'confirmed'
+  const status = sessionStatusBadge(session.status)
+  const shareUrl = pageUrl || `/e/${event.slug}/sessions/${session.id}`
+
+  const iconAction = (label: string, onClick: () => void, icon: React.ReactNode, extra?: { pressed?: boolean; className?: string }) => (
+    <Button
+      variant="ghost"
+      size="icon-sm"
+      onClick={onClick}
+      aria-label={label}
+      title={label}
+      aria-pressed={extra?.pressed}
+      className={extra?.className}
+    >
+      {icon}
+    </Button>
+  )
 
   return (
     <DashboardLayout>
-      <div className="space-y-6 overflow-hidden">
-        {actionError && <p role="alert" className="rounded-xl border p-4 text-sm text-destructive">{actionError}</p>}
-        <Button variant="ghost" onClick={() => router.back()} className="gap-2">
-          <ArrowLeft className="h-4 w-4" />
-          Back to Sessions
+      <div className="space-y-6">
+        <Button variant="ghost" asChild className="gap-2">
+          <Link href={`/e/${event.slug}/sessions`}>
+            <ArrowLeft className="h-4 w-4" aria-hidden />
+            Back to sessions
+          </Link>
         </Button>
 
+        {actionError && (
+          <p role="alert" className="rounded-lg border border-destructive/20 bg-destructive/10 p-3 text-sm text-destructive">{actionError}</p>
+        )}
+
         {viewer.is_organizer && session.proposal_withdrawn && (
-          <Card className="p-4 border-amber-500/40 bg-amber-500/5 text-sm">
+          <WarningBox title="Withdrawn by its proposer">
             The proposer withdrew this proposal from their repository. Review it on the schedule.
-          </Card>
+          </WarningBox>
         )}
 
         <div className="grid gap-6 lg:grid-cols-3">
-          <div className="lg:col-span-2 space-y-6">
-            <Card className="p-6 relative">
-              <div className="absolute top-4 right-4 flex gap-2">
-                {viewer.can_edit && (
-                  <Button variant="ghost" size="icon" onClick={() => setShowEditModal(true)} title="Edit session" aria-label="Edit session">
-                    <Pencil className="h-5 w-5" />
-                  </Button>
-                )}
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  onClick={handleToggleFavorite}
-                  className={session.is_favorite ? 'text-red-500' : ''}
-                  aria-label={session.is_favorite ? 'Remove from my schedule' : 'Save to my schedule'}
-                  aria-pressed={session.is_favorite}
-                >
-                  <Heart className={session.is_favorite ? 'fill-current' : ''} />
-                </Button>
-                <Button variant="ghost" size="icon" onClick={handleShare} aria-label="Share session">
-                  <Share2 className="h-5 w-5" />
-                </Button>
-              </div>
-
-              <div className="mb-4">
-                <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground mb-3 pr-28">
-                  <FormatIcon className="h-4 w-4 flex-shrink-0" />
-                  <span className="capitalize">{session.format}</span>
-                  <span className="text-muted-foreground/50 hidden sm:inline">-</span>
-                  <Clock className="h-4 w-4 flex-shrink-0" />
-                  <span>{session.duration} min</span>
-                  <span className="text-muted-foreground/50 hidden sm:inline">-</span>
-                  <Badge variant={session.status === 'scheduled' ? 'default' : 'secondary'}>{session.status}</Badge>
-                  {session.track && (
-                    <>
-                      <span className="text-muted-foreground/50 hidden sm:inline">-</span>
-                      <span className="flex items-center gap-1.5">
-                        {session.track.color && <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: session.track.color }} />}
-                        <span>{session.track.name}</span>
-                      </span>
-                    </>
-                  )}
+          <div className="space-y-6 lg:col-span-2">
+            <Card>
+              <CardContent className="p-4 pt-4 sm:p-6 sm:pt-6">
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex min-w-0 flex-wrap items-center gap-2 text-sm text-muted-foreground">
+                    <span className="flex items-center gap-1.5" title={formatDescription(session.format)}>
+                      <FormatIcon className="h-4 w-4 shrink-0" aria-hidden />
+                      {formatLabel(session.format)}
+                    </span>
+                    {session.duration != null && (
+                      <>
+                        <Separator />
+                        <span className="flex items-center gap-1.5">
+                          <Clock className="h-4 w-4 shrink-0" aria-hidden />
+                          {session.duration} min
+                        </span>
+                      </>
+                    )}
+                    <Separator />
+                    <Badge variant={status.badge}>{status.label}</Badge>
+                    {session.track && (
+                      <>
+                        <Separator />
+                        <span className="flex items-center gap-1.5">
+                          {session.track.color && <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: session.track.color }} aria-hidden />}
+                          <span>{session.track.name}</span>
+                        </span>
+                      </>
+                    )}
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1">
+                    {viewer.can_edit && iconAction('Edit session', () => setShowEditModal(true), <Pencil className="h-5 w-5" aria-hidden />)}
+                    {iconAction(
+                      session.is_favorite ? 'Remove from my schedule' : 'Save to my schedule',
+                      handleToggleFavorite,
+                      <Heart className={cn('h-5 w-5', session.is_favorite && 'fill-favorite')} aria-hidden />,
+                      { pressed: session.is_favorite, className: session.is_favorite ? 'text-favorite' : undefined }
+                    )}
+                    {iconAction('Share session', handleShare, <Share2 className="h-5 w-5" aria-hidden />)}
+                  </div>
                 </div>
 
-                <h1 className="text-2xl sm:text-3xl font-bold mb-4 break-words pr-28">{session.title}</h1>
+                <h1 className="page-title mb-4 break-words">{session.title}</h1>
 
                 {hosts.length === 0 ? (
-                  <p className="text-muted-foreground italic">{hostByline(session)}</p>
+                  <p className="italic text-muted-foreground">{hostByline(session)}</p>
                 ) : (
                   <div className="relative" ref={hostCardRef}>
                     <button
+                      type="button"
                       onClick={() => setShowHostCard(showHostCard ? null : hosts[0].key)}
-                      className="flex items-center gap-2 hover:opacity-80 transition-opacity group text-left"
+                      aria-expanded={!!showHostCard}
+                      className="group flex items-center gap-3 rounded-lg text-left transition-opacity hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
                     >
                       <div className="flex -space-x-2">
                         {hosts.map((host) => (
-                          <div key={host.key} className="h-8 w-8 rounded-full bg-muted flex items-center justify-center overflow-hidden ring-2 ring-background">
+                          <div key={host.key} className="flex h-9 w-9 items-center justify-center overflow-hidden rounded-full bg-muted ring-2 ring-background">
                             {host.avatar_url ? (
-                              <img src={host.avatar_url} alt={host.display_name || ''} className="h-full w-full object-cover" />
+                              <img src={host.avatar_url} alt="" className="h-full w-full object-cover" />
+                            ) : host.handle ? (
+                              <span className="text-sm font-medium uppercase text-muted-foreground">{host.handle.charAt(0)}</span>
                             ) : (
-                              <User className="h-4 w-4 text-muted-foreground" />
+                              <User className="h-4 w-4 text-muted-foreground" aria-hidden />
                             )}
                           </div>
                         ))}
                       </div>
-                      <span className="text-muted-foreground">
-                        {session.host ? `Hosted by ${hostByline(session)}` : hostByline(session)}
+                      <span className="min-w-0">
+                        <span className="block text-foreground">
+                          {session.host ? `Hosted by ${hostByline(session)}` : hostByline(session)}
+                        </span>
+                        {hostHandles.length > 0 && (
+                          <span className="block truncate text-sm text-muted-foreground">
+                            {hostHandles.map((h) => `@${h}`).join(' · ')}
+                          </span>
+                        )}
                       </span>
                     </button>
 
@@ -296,198 +355,220 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
                       const active = hosts.find((h) => h.key === showHostCard) || hosts[0]
                       return (
                         <>
-                          <div className="fixed inset-0 bg-black/50 z-40 md:hidden" onClick={() => setShowHostCard(null)} />
-                          <div className="fixed md:absolute inset-x-4 bottom-4 md:inset-x-auto md:bottom-auto md:left-0 md:top-full md:mt-2 md:w-80 bg-card border rounded-xl shadow-xl z-50 overflow-hidden">
-                            <button onClick={() => setShowHostCard(null)} className="absolute top-2 right-2 p-1.5 rounded-full hover:bg-muted transition-colors hidden md:flex" aria-label="Close">
-                              <X className="h-4 w-4 text-muted-foreground" />
-                            </button>
+                          <div className="fixed inset-0 z-40 bg-foreground/40 md:hidden" onClick={() => setShowHostCard(null)} />
+                          <div className="fixed inset-x-4 bottom-4 z-50 overflow-hidden rounded-xl border bg-card shadow-xl md:absolute md:inset-x-auto md:bottom-auto md:left-0 md:top-full md:mt-2 md:w-80">
+                            <Button
+                              variant="ghost"
+                              size="icon-sm"
+                              onClick={() => setShowHostCard(null)}
+                              className="absolute right-1 top-1 hidden md:inline-flex"
+                              aria-label="Close"
+                            >
+                              <X className="h-4 w-4" aria-hidden />
+                            </Button>
                             {hosts.length > 1 && (
-                              <div className="flex border-b">
+                              <div className="flex border-b pr-10">
                                 {hosts.map((host) => (
                                   <button
                                     key={host.key}
+                                    type="button"
                                     onClick={() => setShowHostCard(host.key)}
-                                    className={`flex-1 px-3 py-2 text-sm truncate transition-colors ${showHostCard === host.key ? 'border-b-2 border-primary font-medium' : 'text-muted-foreground hover:text-foreground'}`}
+                                    className={cn(
+                                      'flex-1 truncate px-3 py-2 text-sm transition-colors',
+                                      showHostCard === host.key ? 'border-b-2 border-primary font-medium' : 'text-muted-foreground hover:text-foreground'
+                                    )}
                                   >
-                                    {host.display_name || host.role}
+                                    {host.display_name || (host.handle ? `@${host.handle}` : host.role)}
                                   </button>
                                 ))}
                               </div>
                             )}
                             <div className="p-4 pr-10">
-                              <div className="flex items-start gap-3 mb-3">
-                                <div className="h-12 w-12 rounded-full bg-muted flex items-center justify-center overflow-hidden shrink-0">
+                              <div className="mb-3 flex items-start gap-3">
+                                <div className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-full bg-muted">
                                   {active.avatar_url ? (
-                                    <img src={active.avatar_url} alt={active.display_name || ''} className="h-full w-full object-cover" />
+                                    <img src={active.avatar_url} alt="" className="h-full w-full object-cover" />
+                                  ) : active.handle ? (
+                                    <span className="text-lg font-medium uppercase text-muted-foreground">{active.handle.charAt(0)}</span>
                                   ) : (
-                                    <User className="h-6 w-6 text-muted-foreground" />
+                                    <User className="h-6 w-6 text-muted-foreground" aria-hidden />
                                   )}
                                 </div>
-                                <div className="flex-1 min-w-0">
-                                  <h4 className="font-semibold truncate">{active.display_name || 'A participant'}</h4>
-                                  {active.handle && <p className="text-xs text-muted-foreground truncate">@{active.handle}</p>}
-                                  {active.affiliation && <p className="text-sm text-muted-foreground truncate">{active.affiliation}</p>}
+                                <div className="min-w-0 flex-1">
+                                  <h4 className="truncate font-semibold">{active.display_name || (active.handle ? `@${active.handle}` : 'Member')}</h4>
+                                  {active.handle && <p className="truncate text-xs text-muted-foreground">@{active.handle}</p>}
+                                  {active.affiliation && <p className="truncate text-sm text-muted-foreground">{active.affiliation}</p>}
                                 </div>
                               </div>
-                              <p className="text-xs uppercase tracking-wide text-muted-foreground mb-2">{active.role}</p>
-                              {active.bio && <p className="text-sm text-muted-foreground mb-3 line-clamp-3">{active.bio}</p>}
+                              <Badge variant="muted" className="mb-2">{active.role}</Badge>
+                              {active.bio && <p className="mb-1 line-clamp-3 text-sm text-muted-foreground">{active.bio}</p>}
                             </div>
-                            <button onClick={() => setShowHostCard(null)} className="md:hidden w-full py-3 border-t text-sm font-medium text-muted-foreground hover:bg-muted transition-colors">Close</button>
+                            <button
+                              type="button"
+                              onClick={() => setShowHostCard(null)}
+                              className="w-full border-t py-3 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted md:hidden"
+                            >
+                              Close
+                            </button>
                           </div>
                         </>
                       )
                     })()}
                   </div>
                 )}
-              </div>
 
-              {session.topic_tags.length > 0 && (
-                <div className="flex flex-wrap gap-2">
-                  {session.topic_tags.map((tag) => (
-                    <Badge key={tag} variant="secondary">{tag}</Badge>
-                  ))}
-                </div>
-              )}
+                {session.topic_tags.length > 0 && (
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {session.topic_tags.map((tag) => (
+                      <Badge key={tag} variant="muted">{tag}</Badge>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
             </Card>
 
             {(session.venue || session.time_slot || session.is_self_hosted) && (
-              <Card className="p-6 bg-primary/5 border-primary/20">
-                <div className="grid sm:grid-cols-2 gap-6">
-                  {session.is_self_hosted ? (
-                    <div>
-                      <div className="flex items-center gap-2 mb-2">
-                        <MapPin className="h-5 w-5 text-primary" />
-                        <h3 className="font-semibold">Self-Hosted Location</h3>
+              <Card className="border-primary/20 bg-primary/5">
+                <CardContent className="p-4 pt-4 sm:p-6 sm:pt-6">
+                  <div className="grid gap-6 sm:grid-cols-2">
+                    {session.is_self_hosted ? (
+                      <div>
+                        <div className="mb-2 flex items-center gap-2">
+                          <MapPin className="h-5 w-5 text-primary" aria-hidden />
+                          <h3 className="font-semibold">Self-hosted location</h3>
+                        </div>
+                        <Badge variant="amber" className="mb-2">Self-hosted</Badge>
+                        {session.self_hosted_start_time && (
+                          <div className="mb-1 flex items-center gap-1.5 text-sm text-muted-foreground">
+                            <Clock className="h-4 w-4" aria-hidden />
+                            <span>
+                              {formatInZone(session.self_hosted_start_time, event.timezone, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
+                              {session.self_hosted_end_time && <> {EN_DASH} {formatInZone(session.self_hosted_end_time, event.timezone, { hour: 'numeric', minute: '2-digit' })}</>}
+                            </span>
+                          </div>
+                        )}
+                        {session.custom_location ? (
+                          <>
+                            <p className="whitespace-pre-wrap text-muted-foreground">{session.custom_location}</p>
+                            <Button asChild variant="outline" size="sm" className="mt-2">
+                              <a
+                                href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(session.custom_location)}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                              >
+                                <MapPin className="mr-1.5 h-3.5 w-3.5" aria-hidden />
+                                Get directions
+                              </a>
+                            </Button>
+                          </>
+                        ) : session.has_private_location ? (
+                          <div className="space-y-1">
+                            {session.public_place && <p className="text-muted-foreground">{session.public_place}</p>}
+                            <p className="flex items-start gap-1.5 text-sm text-muted-foreground">
+                              <Lock className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+                              The exact location is shared with confirmed attendees.
+                            </p>
+                          </div>
+                        ) : (
+                          <p className="text-sm italic text-muted-foreground">The host will share location details.</p>
+                        )}
                       </div>
-                      <Badge variant="secondary" className="mb-2">Self-Hosted</Badge>
-                      {session.self_hosted_start_time && (
-                        <div className="flex items-center gap-1.5 text-sm text-muted-foreground mb-1">
-                          <Clock className="h-4 w-4" />
-                          <span>
-                            {formatInZone(session.self_hosted_start_time, event.timezone, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
-                            {session.self_hosted_end_time && <> - {formatInZone(session.self_hosted_end_time, event.timezone, { hour: 'numeric', minute: '2-digit' })}</>}
-                          </span>
+                    ) : session.venue && (
+                      <div>
+                        <div className="mb-2 flex items-center gap-2">
+                          <MapPin className="h-5 w-5 text-primary" aria-hidden />
+                          <h3 className="font-semibold">Location</h3>
                         </div>
-                      )}
-                      {session.custom_location ? (
-                        <>
-                          <p className="text-muted-foreground whitespace-pre-wrap">{session.custom_location}</p>
-                          <a
-                            href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(session.custom_location)}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="inline-flex items-center gap-1.5 mt-2 px-3 py-1.5 text-sm font-medium rounded-md border hover:bg-accent transition-colors"
-                          >
-                            <MapPin className="h-3.5 w-3.5" />
-                            Get Directions
-                          </a>
-                        </>
-                      ) : session.has_private_location ? (
-                        <div className="space-y-1">
-                          {session.public_place && <p className="text-muted-foreground">{session.public_place}</p>}
-                          <p className="text-sm text-muted-foreground flex items-start gap-1.5">
-                            <Lock className="h-4 w-4 mt-0.5 shrink-0" />
-                            The exact location is shared with confirmed attendees.
-                          </p>
-                        </div>
-                      ) : (
-                        <p className="text-sm text-muted-foreground italic">Location details will be provided by the host</p>
-                      )}
-                    </div>
-                  ) : session.venue && (
-                    <div>
-                      <div className="flex items-center gap-2 mb-2">
-                        <MapPin className="h-5 w-5 text-primary" />
-                        <h3 className="font-semibold">Location</h3>
+                        <p className="text-lg font-medium">{session.venue.name}</p>
+                        {session.venue.capacity && <p className="text-sm text-muted-foreground">Capacity: {session.venue.capacity} people</p>}
+                        {session.venue.address && (
+                          <Button asChild variant="outline" size="sm" className="mt-2">
+                            <a
+                              href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(session.venue.address)}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            >
+                              <MapPin className="mr-1.5 h-3.5 w-3.5" aria-hidden />
+                              Get directions
+                            </a>
+                          </Button>
+                        )}
+                        {session.venue.features.length > 0 && (
+                          <div className="mt-2 flex flex-wrap gap-1">
+                            {session.venue.features.map((feature) => (
+                              <Badge key={feature} variant="outline">{feature}</Badge>
+                            ))}
+                          </div>
+                        )}
                       </div>
-                      <p className="text-lg font-medium">{session.venue.name}</p>
-                      {session.venue.capacity && <p className="text-sm text-muted-foreground">Capacity: {session.venue.capacity} people</p>}
-                      {session.venue.address && (
-                        <a
-                          href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(session.venue.address)}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1.5 mt-2 px-3 py-1.5 text-sm font-medium rounded-md border hover:bg-accent transition-colors"
-                        >
-                          <MapPin className="h-3.5 w-3.5" />
-                          Get Directions
-                        </a>
-                      )}
-                      {session.venue.features.length > 0 && (
-                        <div className="flex gap-1 mt-2 flex-wrap">
-                          {session.venue.features.map((feature) => (
-                            <Badge key={feature} variant="outline" className="text-xs">{feature}</Badge>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  )}
+                    )}
 
-                  {session.time_slot && (
-                    <div>
-                      <div className="flex items-center gap-2 mb-2">
-                        <Calendar className="h-5 w-5 text-primary" />
-                        <h3 className="font-semibold">Schedule</h3>
+                    {session.time_slot && (
+                      <div>
+                        <div className="mb-2 flex items-center gap-2">
+                          <Calendar className="h-5 w-5 text-primary" aria-hidden />
+                          <h3 className="font-semibold">Schedule</h3>
+                        </div>
+                        <p className="text-lg font-medium">
+                          {formatInZone(session.time_slot.start_time, event.timezone, { weekday: 'long', month: 'long', day: 'numeric' })}
+                        </p>
+                        <p className="text-muted-foreground">
+                          {formatInZone(session.time_slot.start_time, event.timezone, { hour: 'numeric', minute: '2-digit' })}
+                          {` ${EN_DASH} `}
+                          {formatInZone(session.time_slot.end_time, event.timezone, { hour: 'numeric', minute: '2-digit' })}
+                        </p>
+                        {session.time_slot.label && <Badge variant="outline" className="mt-2">{session.time_slot.label}</Badge>}
                       </div>
-                      <p className="text-lg font-medium">
-                        {formatInZone(session.time_slot.start_time, event.timezone, { weekday: 'long', month: 'long', day: 'numeric' })}
-                      </p>
-                      <p className="text-muted-foreground">
-                        {formatInZone(session.time_slot.start_time, event.timezone, { hour: 'numeric', minute: '2-digit' })}
-                        {' - '}
-                        {formatInZone(session.time_slot.end_time, event.timezone, { hour: 'numeric', minute: '2-digit' })}
-                      </p>
-                      {session.time_slot.label && <Badge variant="outline" className="mt-2">{session.time_slot.label}</Badge>}
-                    </div>
-                  )}
-                </div>
+                    )}
+                  </div>
+                </CardContent>
               </Card>
             )}
 
             {session.telegram_group_url ? (
-              <Card className="p-4">
-                <a
-                  href={session.telegram_group_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center gap-2 px-4 py-2.5 bg-[#0088cc] hover:bg-[#006699] text-white rounded-lg transition-colors text-sm font-medium"
-                >
-                  <Send className="h-4 w-4" />
-                  Join Telegram Group
-                  <ExternalLink className="h-3.5 w-3.5 ml-auto" />
-                </a>
+              <Card>
+                <CardContent className="flex flex-wrap items-center justify-between gap-3 p-4 pt-4">
+                  <p className="text-sm text-muted-foreground">This session has a chat group for confirmed attendees.</p>
+                  <Button asChild variant="outline">
+                    <a href={session.telegram_group_url} target="_blank" rel="noopener noreferrer">
+                      <MessageCircle className="mr-2 h-4 w-4" aria-hidden />
+                      Join the chat group
+                      <ExternalLink className="ml-2 h-3.5 w-3.5" aria-hidden />
+                    </a>
+                  </Button>
+                </CardContent>
               </Card>
             ) : session.has_telegram_group && !confirmed ? (
-              <Card className="p-4 text-sm text-muted-foreground flex items-center gap-2">
-                <Lock className="h-4 w-4 shrink-0" />
-                This session has a Telegram group for confirmed attendees.
+              <Card>
+                <CardContent className="flex flex-wrap items-center justify-between gap-3 p-4 pt-4">
+                  <p className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <Lock className="h-4 w-4 shrink-0" aria-hidden />
+                    This session has a chat group for confirmed attendees.
+                  </p>
+                  {session.status === 'scheduled' && (
+                    <Button variant="outline" size="sm" onClick={focusRsvp}>
+                      RSVP to get the link
+                    </Button>
+                  )}
+                </CardContent>
               </Card>
             ) : null}
 
-            <Card className="p-6 overflow-hidden">
-              <h2 className="text-xl font-semibold mb-4">About This Session</h2>
-              <div className="prose prose-sm max-w-none break-words">
-                {session.description ? (
-                  session.description.split('\n').map((paragraph, i) => (
-                    <p key={i} className="text-muted-foreground mb-3">{paragraph}</p>
-                  ))
-                ) : (
-                  <p className="text-muted-foreground italic">No description provided.</p>
-                )}
-              </div>
-            </Card>
-
-            <Card className="p-6">
-              <h2 className="text-xl font-semibold mb-4">Session Format</h2>
-              <div className="flex items-start gap-4">
-                <div className="p-3 rounded-lg bg-primary/10">
-                  <FormatIcon className="h-6 w-6 text-primary" />
+            <Card className="overflow-hidden">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-xl">About this session</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="prose prose-sm max-w-none break-words">
+                  {session.description ? (
+                    session.description.split('\n').map((paragraph, i) => (
+                      <p key={i} className="mb-3 text-muted-foreground">{paragraph}</p>
+                    ))
+                  ) : (
+                    <p className="italic text-muted-foreground">No description yet.</p>
+                  )}
                 </div>
-                <div>
-                  <h3 className="font-medium capitalize">{session.format}</h3>
-                  <p className="text-sm text-muted-foreground">{formatDescriptions[session.format ?? ''] || 'Interactive session'}</p>
-                </div>
-              </div>
+              </CardContent>
             </Card>
 
             {sessionHasStarted && <SessionFeedback sessionId={sessionId} eventSlug={event.slug} />}
@@ -495,28 +576,45 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
 
           <div className="space-y-6">
             {votingOpen && session.status !== 'rejected' && session.status !== 'pending' && (
-              <Card className="p-6">
-                <h3 className="font-semibold mb-4">Your votes</h3>
-                <VoteControl eventSlug={event.slug} sessionId={sessionId} sessionTitle={session.title} />
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle>Your votes</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <VoteControl eventSlug={event.slug} sessionId={sessionId} sessionTitle={session.title} />
+                </CardContent>
               </Card>
             )}
 
-            <Card className="p-6">
-              <h3 className="font-semibold mb-4">Quick Actions</h3>
-              <div className="space-y-2">
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle>Quick actions</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-2">
                 {viewer.can_edit && (
                   <Button className="w-full justify-start" variant="outline" onClick={() => setShowEditModal(true)}>
-                    <Pencil className="h-4 w-4 mr-2" />
-                    Edit Session
+                    <Pencil className="mr-2 h-4 w-4" aria-hidden />
+                    Edit session
                   </Button>
                 )}
-                <Button className="w-full justify-start" variant={session.is_favorite ? 'default' : 'outline'} onClick={handleToggleFavorite}>
-                  <Heart className={`h-4 w-4 mr-2 ${session.is_favorite ? 'fill-current' : ''}`} />
-                  {session.is_favorite ? 'Saved to My Schedule' : 'Add to My Schedule'}
+                <Button
+                  className={cn('w-full justify-start', session.is_favorite && 'text-favorite hover:text-favorite')}
+                  variant="outline"
+                  onClick={handleToggleFavorite}
+                  aria-pressed={session.is_favorite}
+                >
+                  <Heart className={cn('mr-2 h-4 w-4', session.is_favorite && 'fill-favorite')} aria-hidden />
+                  {session.is_favorite ? 'Saved to my schedule' : 'Save to my schedule'}
                 </Button>
                 <Button className="w-full justify-start" variant="outline" onClick={handleShare}>
-                  <Share2 className="h-4 w-4 mr-2" />
-                  Share Session
+                  <Share2 className="mr-2 h-4 w-4" aria-hidden />
+                  Share
+                </Button>
+                <Button asChild className="w-full justify-start" variant="outline">
+                  <a href={blueskyComposeUrl(session.title, shareUrl)} target="_blank" rel="noopener noreferrer">
+                    <ExternalLink className="mr-2 h-4 w-4" aria-hidden />
+                    Share on Bluesky
+                  </a>
                 </Button>
                 {session.status === 'scheduled' && startsAt && (
                   <AddToCalendar
@@ -535,38 +633,53 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
                     eventLocation={event.locationName}
                     variant="outline"
                     size="default"
+                    className="w-full justify-start"
                   />
                 )}
                 {session.status === 'scheduled' && (
-                  <RSVPButton
-                    sessionId={sessionId}
-                    rsvpCount={session.rsvp_count}
-                    waitlistCount={session.waitlist_count}
-                    capacity={session.venue?.capacity ?? null}
-                    initialStatus={session.my_rsvp?.status ?? null}
-                    initialWaitlistPosition={session.my_rsvp?.waitlist_position ?? null}
-                    variant="outline"
-                    showCapacity
-                    onRSVPChange={() => refresh()}
-                  />
+                  <div ref={rsvpRef} id="rsvp" className="pt-1">
+                    <RSVPButton
+                      sessionId={sessionId}
+                      rsvpCount={session.rsvp_count}
+                      waitlistCount={session.waitlist_count}
+                      capacity={session.venue?.capacity ?? null}
+                      initialStatus={session.my_rsvp?.status ?? null}
+                      initialWaitlistPosition={session.my_rsvp?.waitlist_position ?? null}
+                      variant="default"
+                      className="w-full"
+                      showCapacity
+                      onRSVPChange={() => refresh()}
+                    />
+                  </div>
                 )}
-                {viewer.can_edit && !session.telegram_group_url && (
-                  <Button className="w-full justify-start gap-2" variant="outline" onClick={() => setShowEditModal(true)}>
-                    <Send className="h-4 w-4" />
-                    Add Telegram Group
-                  </Button>
-                )}
-                {viewer.is_host && (
+                {viewer.is_host && !showWithdrawConfirm && (
                   <Button
-                    className="w-full justify-start text-destructive hover:text-destructive hover:bg-destructive/10"
+                    className="w-full justify-start text-destructive hover:bg-destructive/10 hover:text-destructive"
                     variant="outline"
                     onClick={() => setShowWithdrawConfirm(true)}
                   >
-                    <Trash2 className="h-4 w-4 mr-2" />
-                    Withdraw Proposal
+                    <Trash2 className="mr-2 h-4 w-4" aria-hidden />
+                    Withdraw proposal
                   </Button>
                 )}
-              </div>
+                {viewer.is_host && showWithdrawConfirm && (
+                  <ConfirmInline
+                    destructive
+                    confirmLabel="Withdraw"
+                    loading={isWithdrawing}
+                    onConfirm={handleWithdraw}
+                    onCancel={() => setShowWithdrawConfirm(false)}
+                    message={
+                      <>
+                        Withdraw “{session.title}”? Its public record is deleted from your repository (copies may persist on the network).{' '}
+                        {session.status === 'scheduled'
+                          ? 'It is already on the schedule, so the organizers will decide what happens to its slot.'
+                          : 'The session, its favorites and RSVPs are removed from this gathering.'}
+                      </>
+                    }
+                  />
+                )}
+              </CardContent>
             </Card>
 
             <SessionResources sessionId={sessionId} eventSlug={event.slug} canManage={viewer.can_manage} />
@@ -586,42 +699,6 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
                 isOrganizer={viewer.is_organizer}
                 onCohostsChange={refresh}
               />
-            )}
-
-            {showWithdrawConfirm && (
-              <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm p-4" onClick={() => setShowWithdrawConfirm(false)}>
-                <div role="dialog" aria-modal="true" aria-labelledby="withdraw-title" className="w-full max-w-md bg-card border rounded-xl shadow-xl p-6" onClick={(e) => e.stopPropagation()}>
-                  <div className="flex items-center gap-3 mb-4">
-                    <div className="p-3 rounded-full bg-destructive/10">
-                      <AlertTriangle className="h-6 w-6 text-destructive" />
-                    </div>
-                    <div>
-                      <h3 id="withdraw-title" className="font-semibold text-lg">Withdraw proposal</h3>
-                      <p className="text-sm text-muted-foreground">This cannot be undone</p>
-                    </div>
-                  </div>
-                  <p className="text-muted-foreground mb-6">
-                    Withdraw &ldquo;<span className="font-medium text-foreground">{session.title}</span>&rdquo;? Its public record is deleted
-                    from your repository (copies may persist on the network).{' '}
-                    {session.status === 'scheduled'
-                      ? 'It is already on the schedule, so the organizers will decide what happens to its slot.'
-                      : 'The session, its favorites and RSVPs are removed from this gathering.'}
-                  </p>
-                  <div className="flex gap-3">
-                    <Button variant="outline" className="flex-1" onClick={() => setShowWithdrawConfirm(false)} disabled={isWithdrawing}>Cancel</Button>
-                    <Button variant="destructive" className="flex-1" onClick={handleWithdraw} disabled={isWithdrawing}>
-                      {isWithdrawing ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Trash2 className="h-4 w-4 mr-2" />}
-                      Withdraw
-                    </Button>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {showShareToast && (
-              <div className="fixed bottom-4 right-4 bg-primary text-primary-foreground px-4 py-2 rounded-lg shadow-lg text-sm">
-                Link copied to clipboard!
-              </div>
             )}
 
             {viewer.can_edit && (

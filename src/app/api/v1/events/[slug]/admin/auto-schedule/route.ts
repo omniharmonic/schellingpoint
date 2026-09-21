@@ -5,14 +5,15 @@
  *
  * Voter overlap is computed on ballot tokens after the round closes (spec §5.4). While a
  * round is open the preview answers 409 `RoundOpen`: the scheduler's inputs are sealed.
- * Applying writes only unpublished placements into free slots, as the organizer's account;
- * sessions already on the network are never moved here.
+ * The preview returns the greedy-plus-local-search proposal with its quality report and the
+ * five PRD stages (release design §9). Applying writes only unpublished placements into
+ * free slots, as the organizer's account; sessions already on the network are never moved here.
  */
-import { asAccount, sql } from '@/lib/db'
-import { RoundOpenError, schedulingInputs } from '@/lib/voting'
+import { asAccount } from '@/lib/db'
 import { autoSchedule } from '@/lib/scheduling/auto-scheduler'
+import { loadSchedulingContext, RoundOpenError, roundOpenResponse } from '@/lib/scheduling/context'
 import { errorResponse, fail, isUuid, json, readBody, requireOrganizer, rolesWith } from '@/lib/scheduling/admin-api'
-import { loadEvent, notifyPlacement } from '@/lib/scheduling/program'
+import { notifyPlacement } from '@/lib/scheduling/program'
 
 export const dynamic = 'force-dynamic'
 
@@ -26,59 +27,23 @@ export async function GET(request: Request, { params }: { params: Promise<{ slug
   const eventId = ctx.event.id
 
   try {
-    let inputs: Awaited<ReturnType<typeof schedulingInputs>>
+    let inputs: Awaited<ReturnType<typeof loadSchedulingContext>>
     try {
-      inputs = await schedulingInputs(eventId)
+      inputs = await loadSchedulingContext(eventId)
     } catch (e) {
-      if (e instanceof RoundOpenError) {
-        return fail(409, 'Voting is still open. The auto-scheduler uses ballots, which stay sealed until the round closes — try again after voting ends, or place sessions by hand.', {
-          code: 'RoundOpen',
-        })
-      }
+      if (e instanceof RoundOpenError) return roundOpenResponse()
       throw e
     }
-
-    const [event, rows, timeSlots, venues, availability] = await Promise.all([
-      loadEvent(eventId),
-      sql<{
-        id: string; title: string; duration: number | null; expected_attendance: number | null
-        status: 'pending' | 'approved' | 'rejected' | 'scheduled'; time_slot_id: string | null
-        track_id: string | null; time_preferences: string[] | null; required_features: string[] | null
-      }[]>`
-        select id, title, duration, expected_attendance, status, time_slot_id, track_id, time_preferences, required_features
-        from sessions where event_id = ${eventId}
-        order by created_at
-      `,
-      sql<{ id: string; start_time: string; end_time: string; is_break: boolean; venue_id: string | null; day_date: string | null }[]>`
-        select id, start_time, end_time, coalesce(is_break, false) as is_break, venue_id, day_date
-        from time_slots where event_id = ${eventId}
-      `,
-      sql<{ id: string; name: string; capacity: number | null; is_primary: boolean; features: string[] | null }[]>`
-        select id, name, capacity, coalesce(is_primary, false) as is_primary, features
-        from venues where event_id = ${eventId}
-      `,
-      // The host's own availability for their session (app-side; package B saves it).
-      sql<{ session_id: string; windows: Array<{ startsAt: string; endsAt: string; preference?: 1 | 2 | 3 }>; blackouts: Array<{ startsAt: string; endsAt: string }> }[]>`
-        select tp.session_id, tp.windows, tp.blackouts
-        from time_preferences tp
-        join sessions s on s.id = tp.session_id and s.event_id = tp.event_id and s.host_id = tp.account_id
-        where tp.event_id = ${eventId}
-      `,
-    ])
-
-    const bySession = new Map(availability.map((a) => [a.session_id, a]))
-    const sessions = rows.map((s) => ({
-      ...s,
-      windows: Array.isArray(bySession.get(s.id)?.windows) ? bySession.get(s.id)!.windows : [],
-      blackouts: Array.isArray(bySession.get(s.id)?.blackouts) ? bySession.get(s.id)!.blackouts : [],
-    }))
-    const result = autoSchedule(sessions, timeSlots, venues, { ballots: inputs.bySession, timezone: event.timezone })
-    return json(result)
+    const result = autoSchedule(inputs.sessions, inputs.timeSlots, inputs.venues, {
+      ballots: inputs.ballots,
+      timezone: inputs.event.timezone,
+      k: inputs.k,
+    })
+    return json({ ...result, roundId: inputs.roundId })
   } catch (e) {
     return errorResponse(e, 'auto-schedule preview')
   }
 }
-
 export async function POST(request: Request, { params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params
   const ctx = await requireOrganizer(request, slug, ROLES)

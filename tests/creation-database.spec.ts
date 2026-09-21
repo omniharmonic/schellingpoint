@@ -44,7 +44,7 @@ async function signIn(email: string): Promise<string> {
 
 function wizardState(slug: string, overrides: { visibility?: string; thresholds?: Record<string, unknown> } = {}) {
   return {
-    currentStep: 8,
+    currentStep: 9,
     basics: { name: `Creation test ${slug}`, tagline: '', description: 'A test gathering', slug, eventType: 'unconference', visibility: overrides.visibility ?? 'public' },
     dates: { startDate: '2027-03-01', endDate: '2027-03-02', timezone: 'America/Denver', locationName: 'Boulder', locationAddress: '', locationType: 'in-person' },
     venues: [{ id: 'room-1', name: 'Main hall', capacity: 40, features: [], address: '' }],
@@ -56,8 +56,13 @@ function wizardState(slug: string, overrides: { visibility?: string; thresholds?
       maxProposalsPerUser: 3, requireProposalApproval: false, allowedFormats: ['talk', 'workshop'], allowedDurations: [30, 60],
       policyThresholds: overrides.thresholds ?? { destructiveActionStewards: 2, feedbackK: 3, publishRoles: false },
     },
-    branding: { logoUrl: null, bannerUrl: null, theme: { primary: '#246653', secondary: '#E8F1EB', accent: '#DCD5ED', mode: 'light' }, social: { twitter: '', telegram: '', discord: '', website: '' } },
-    identity: { acknowledged: true },
+    branding: {
+      logoUrl: null, bannerUrl: null,
+      theme: { primary: '#246653', secondary: '#E8F1EB', accent: '#DCD5ED', mode: 'light' },
+      // The wizard edits one list; storage keeps the four legacy keys plus `links` for everything else.
+      social: { twitter: '', telegram: '', discord: '', website: 'https://example.test', links: [{ label: 'Signal', url: 'https://signal.group/example' }] },
+    },
+    identity: { acknowledged: true, termsAccepted: true },
     validation: {},
   }
 }
@@ -144,8 +149,9 @@ test.describe('creating a gathering', () => {
     const [event] = await sql<{
       id: string; status: string; actor_did: string; actor_handle: string; policy_thresholds: Record<string, unknown>
       require_proposal_approval: boolean; created_by: string; owner_email: string; venues: number; slots: number; tracks: number
+      theme: { social?: Record<string, unknown> }
     }[]>`
-      select e.id, e.status, e.actor_did, e.actor_handle, e.policy_thresholds, e.require_proposal_approval, e.created_by,
+      select e.id, e.status, e.actor_did, e.actor_handle, e.policy_thresholds, e.require_proposal_approval, e.created_by, e.theme,
              (select a.email from event_members m join accounts a on a.id = m.user_id where m.event_id = e.id and m.role = 'owner') as owner_email,
              (select count(*)::int from venues where event_id = e.id) as venues,
              (select count(*)::int from time_slots where event_id = e.id) as slots,
@@ -161,6 +167,9 @@ test.describe('creating a gathering', () => {
       venues: 1, slots: 1, tracks: 1,
     })
     expect(event.policy_thresholds).toEqual({ destructiveActionStewards: 3, feedbackK: 4, publishRoles: false })
+    // Social links: legacy keys stay where they were; other labels land in `theme.social.links`.
+    expect(event.theme.social).toMatchObject({ website: 'https://example.test', links: [{ label: 'Signal', url: 'https://signal.group/example' }] })
+    expect(event.theme.social).not.toHaveProperty('twitter')
 
     // The DID exists on our PDS and the handle resolves to it.
     expect(await resolveHandle(`${shortSlug}.${handleDomain}`)).toBe(body.identity.did)

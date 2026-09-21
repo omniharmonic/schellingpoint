@@ -14,16 +14,21 @@ import {
   Users,
   Vote,
   Zap,
+  Sparkles,
+  UserPlus,
 } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
 import { DashboardLayout } from '@/components/DashboardLayout'
-import { useAuth } from '@/hooks/useAuth'
+import { PageHeader } from '@/components/PageHeader'
+import { useAuth, viewerDisplayName } from '@/hooks/useAuth'
 import { useVoting } from '@/hooks/useVoting'
-import { useEvent, useEventRole } from '@/contexts/EventContext'
+import { useEvent, useEventRole, JoinGatheringButton } from '@/contexts/EventContext'
 import { isParticipationOpen } from '@/lib/events/lifecycle'
+import { sessionStatusBadge } from '@/lib/labels'
+import { plural, SEPARATOR } from '@/lib/format'
 
 export interface DashboardData {
   stats: {
@@ -69,11 +74,22 @@ export function DashboardClient({ data }: { data: DashboardData }) {
   )
 }
 
+/** The one "View all" treatment for every card header on this page. */
+function ViewAll({ href, label = 'View all' }: { href: string; label?: string }) {
+  return (
+    <Button variant="ghost" size="sm" asChild>
+      <Link href={href} className="text-muted-foreground">
+        {label} <ArrowRight className="h-4 w-4 ml-1" aria-hidden="true" />
+      </Link>
+    </Button>
+  )
+}
+
 function Dashboard({ data }: { data: DashboardData }) {
   const router = useRouter()
   const { user, profile, isLoading: authLoading } = useAuth()
   const event = useEvent()
-  const { isMember } = useEventRole()
+  const { isMember, joinable, joinBlockedBy } = useEventRole()
   const voting = useVoting(event.slug)
   const proposalsOpen = isParticipationOpen(event, 'propose')
 
@@ -112,25 +128,47 @@ function Dashboard({ data }: { data: DashboardData }) {
       votingDetail = 'voting has not started'
   }
 
+  const showJoinCard = Boolean(user) && !isMember && (joinable === true || joinBlockedBy === 'ticket-required')
+  const nothingYet =
+    data.stats.sessions === 0 && data.recentSessions.length === 0 && data.mySessions.length === 0 && supported.length === 0
+
   return (
     <div className="space-y-6">
-      <div className="dashboard-welcome">
-        <h1 className="text-2xl font-display font-bold">
-          {user ? `Welcome back, ${profile?.display_name || user.email?.split('@')[0] || user.handle || 'friend'}` : 'Your gathering'}
-        </h1>
-        <p className="text-muted-foreground mt-1">
-          Find your people. Follow your curiosity. Make {event.name} your own.
-        </p>
-      </div>
+      <PageHeader
+        className="dashboard-welcome mb-0"
+        title={user ? `Welcome back, ${viewerDisplayName(profile, user)}` : 'Your gathering'}
+        subtitle={`Find your people. Follow your curiosity. Make ${event.name} your own.`}
+      />
 
-      <div className="dashboard-stats grid grid-cols-2 gap-3 lg:grid-cols-4">
+      {showJoinCard && (
+        <Card accent="left" accentColor="hsl(var(--signal))">
+          <CardContent className="pt-6">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-start gap-4">
+                <div className="p-3 rounded-lg bg-primary/10">
+                  <UserPlus className="h-6 w-6 text-primary" aria-hidden="true" />
+                </div>
+                <div>
+                  <h2 className="font-semibold">Join this gathering</h2>
+                  <p className="text-sm text-muted-foreground">
+                    Proposing sessions, voting and the people directory are for members. Joining is never published.
+                  </p>
+                </div>
+              </div>
+              <JoinGatheringButton />
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      <div className="dashboard-stats grid grid-cols-2 gap-4 lg:grid-cols-4">
         <Card className="stats-card" accent="top" accentColor="hsl(var(--signal))">
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-xs text-muted-foreground">Sessions</CardTitle>
             <Presentation className="h-4 w-4 text-muted-foreground" strokeWidth={1.5} aria-hidden />
           </CardHeader>
           <CardContent>
-            <div className="text-3xl font-bold tabular-nums">{data.stats.sessions}</div>
+            <div className="stat-value tabular-nums">{data.stats.sessions}</div>
             <p className="text-xs text-muted-foreground mt-1">{data.stats.scheduled} scheduled</p>
           </CardContent>
         </Card>
@@ -141,7 +179,7 @@ function Dashboard({ data }: { data: DashboardData }) {
             <Vote className="h-4 w-4 text-muted-foreground" strokeWidth={1.5} aria-hidden />
           </CardHeader>
           <CardContent>
-            <div className="text-3xl font-bold">{votingHeadline}</div>
+            <div className="stat-value">{votingHeadline}</div>
             <p className="text-xs text-muted-foreground mt-1">{votingDetail}</p>
           </CardContent>
         </Card>
@@ -153,7 +191,7 @@ function Dashboard({ data }: { data: DashboardData }) {
               <Users className="h-4 w-4 text-muted-foreground" strokeWidth={1.5} aria-hidden />
             </CardHeader>
             <CardContent>
-              <div className="text-3xl font-bold tabular-nums">{data.stats.participants}</div>
+              <div className="stat-value tabular-nums">{data.stats.participants}</div>
               <p className="text-xs text-muted-foreground mt-1">people shaping the gathering</p>
             </CardContent>
           </Card>
@@ -166,7 +204,7 @@ function Dashboard({ data }: { data: DashboardData }) {
               <Vote className="h-4 w-4 text-primary" strokeWidth={1.5} aria-hidden />
             </CardHeader>
             <CardContent>
-              <div className="text-3xl font-bold tabular-nums text-primary">{voting.remaining}</div>
+              <div className="stat-value tabular-nums text-primary">{voting.remaining}</div>
               <p className="text-xs text-muted-foreground mt-1">
                 {voting.spent} of {voting.budget} allocated
               </p>
@@ -177,8 +215,8 @@ function Dashboard({ data }: { data: DashboardData }) {
 
       {user && isMember && (
         <div className="grid gap-4 md:grid-cols-3">
-          <Card className="hover:bg-muted/50 transition-colors">
-            <Link href={`/e/${event.slug}/sessions`}>
+          <Card interactive>
+            <Link href={`/e/${event.slug}/sessions`} className="block">
               <CardContent className="pt-6">
                 <div className="flex items-center gap-4">
                   <div className="p-3 rounded-lg bg-primary/10">
@@ -187,7 +225,7 @@ function Dashboard({ data }: { data: DashboardData }) {
                   <div>
                     <h2 className="font-semibold">{voting.canVote ? 'Vote on sessions' : 'Explore sessions'}</h2>
                     <p className="text-sm text-muted-foreground">
-                      {voting.canVote ? `${voting.remaining} credits remaining` : 'Discover the ideas taking shape'}
+                      {voting.canVote ? `${plural(voting.remaining, 'credit')} remaining` : 'Discover the ideas taking shape'}
                     </p>
                   </div>
                 </div>
@@ -195,26 +233,24 @@ function Dashboard({ data }: { data: DashboardData }) {
             </Link>
           </Card>
 
-          <Card className="hover:bg-muted/50 transition-colors">
-            <Link href={`/e/${event.slug}/my-schedule`}>
+          <Card interactive>
+            <Link href={`/e/${event.slug}/my-schedule`} className="block">
               <CardContent className="pt-6">
                 <div className="flex items-center gap-4">
                   <div className="p-3 rounded-lg bg-primary/10">
                     <Heart className="h-6 w-6 text-primary" aria-hidden />
                   </div>
                   <div>
-                    <h2 className="font-semibold">My Schedule</h2>
-                    <p className="text-sm text-muted-foreground">
-                      {data.favorites} session{data.favorites === 1 ? '' : 's'} saved
-                    </p>
+                    <h2 className="font-semibold">My schedule</h2>
+                    <p className="text-sm text-muted-foreground">{plural(data.favorites, 'session')} saved</p>
                   </div>
                 </div>
               </CardContent>
             </Link>
           </Card>
 
-          <Card className="hover:bg-muted/50 transition-colors">
-            <Link href={`/e/${event.slug}/${proposalsOpen ? 'propose' : 'participants'}`}>
+          <Card interactive>
+            <Link href={`/e/${event.slug}/${proposalsOpen ? 'propose' : 'participants'}`} className="block">
               <CardContent className="pt-6">
                 <div className="flex items-center gap-4">
                   <div className="p-3 rounded-lg bg-primary/10">
@@ -233,6 +269,42 @@ function Dashboard({ data }: { data: DashboardData }) {
         </div>
       )}
 
+      {nothingYet && (
+        <Card>
+          <CardContent className="pt-6">
+            <div className="flex items-start gap-4">
+              <div className="p-3 rounded-lg bg-primary/10">
+                <Sparkles className="h-6 w-6 text-primary" aria-hidden />
+              </div>
+              <div className="min-w-0 flex-1">
+                <h2 className="font-semibold">Nothing here yet — here’s what to do first</h2>
+                <ol className="mt-2 space-y-1.5 text-sm text-muted-foreground list-decimal pl-5">
+                  {proposalsOpen && <li>Propose a session around something you want to share or explore.</li>}
+                  <li>Meet the people who are already here on the People page.</li>
+                  <li>Save sessions to your schedule as ideas come in; voting opens when the organizers say so.</li>
+                  {data.isOrganizer && <li>As an organizer, add rooms and times so the schedule can take shape.</li>}
+                </ol>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {proposalsOpen && isMember && (
+                    <Button asChild size="sm">
+                      <Link href={`/e/${event.slug}/propose`}>Propose a session</Link>
+                    </Button>
+                  )}
+                  <Button asChild size="sm" variant="outline">
+                    <Link href={`/e/${event.slug}/participants`}>People</Link>
+                  </Button>
+                  {data.isOrganizer && (
+                    <Button asChild size="sm" variant="outline">
+                      <Link href={`/e/${event.slug}/admin`}>Organizer workspace</Link>
+                    </Button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {user && isMember && voting.status !== 'none' && (
         <Card accent="left" accentColor="hsl(var(--signal))" className="stats-card">
           <CardContent className="pt-6">
@@ -241,9 +313,7 @@ function Dashboard({ data }: { data: DashboardData }) {
                 <Zap className="h-5 w-5 text-primary" aria-hidden />
                 Your ballot
               </h2>
-              <Button variant="outline" size="sm" asChild>
-                <Link href={`/e/${event.slug}/my-votes`}>{voting.status === 'closed' ? 'See the tally' : 'View details'}</Link>
-              </Button>
+              <ViewAll href={`/e/${event.slug}/my-votes`} label={voting.status === 'closed' ? 'See the tally' : 'View all'} />
             </div>
             {voting.status === 'closed' ? (
               <p className="flex items-start gap-2 text-sm text-muted-foreground">
@@ -292,50 +362,45 @@ function Dashboard({ data }: { data: DashboardData }) {
       )}
 
       {user && pendingMine.length > 0 && (
-        <Card className="border-yellow-500/30 bg-yellow-500/5">
+        <Card className="border-signal-amber/30 bg-signal-amber/5">
           <CardHeader className="pb-3">
             <div className="flex items-center justify-between">
               <CardTitle className="text-lg flex items-center gap-2">
-                <Clock className="h-5 w-5 text-yellow-500" aria-hidden />
+                <Clock className="h-5 w-5 text-signal-amber" aria-hidden />
                 My pending proposals
               </CardTitle>
               <div className="flex items-center gap-2">
-                <Badge variant="outline" className="text-yellow-600 border-yellow-500/50">
-                  Awaiting review
-                </Badge>
-                <Button variant="ghost" size="sm" asChild>
-                  <Link href={`/e/${event.slug}/sessions?filter=mine`} className="text-muted-foreground">
-                    View all <ArrowRight className="h-4 w-4 ml-1" aria-hidden />
-                  </Link>
-                </Button>
+                <Badge variant="amber">Awaiting review</Badge>
+                <ViewAll href={`/e/${event.slug}/sessions?filter=mine`} />
               </div>
             </div>
           </CardHeader>
           <CardContent className="pt-0">
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {pendingMine.map((session) => (
-                <Link
-                  key={session.id}
-                  href={`/e/${event.slug}/sessions/${session.id}`}
-                  className="block p-4 rounded-lg border border-yellow-500/20 bg-background/50 hover:border-yellow-500/50 hover:bg-muted/30 transition-all"
-                >
-                  <div className="flex items-start justify-between gap-2 mb-2">
-                    <p className="font-medium line-clamp-2">{session.title}</p>
-                    <Badge variant="secondary" className="capitalize text-xs flex-shrink-0 bg-yellow-500/20 text-yellow-600">
-                      pending
-                    </Badge>
-                  </div>
-                  <p className="text-xs text-muted-foreground line-clamp-2 mb-2">{session.description || 'No description'}</p>
-                  <div className="flex items-center justify-between text-xs text-muted-foreground">
-                    <span className="capitalize">{session.format || 'session'}</span>
-                    <span>{new Date(session.created_at).toLocaleDateString()}</span>
-                  </div>
-                </Link>
-              ))}
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {pendingMine.map((session) => {
+                const status = sessionStatusBadge(session.status)
+                return (
+                  <Link
+                    key={session.id}
+                    href={`/e/${event.slug}/sessions/${session.id}`}
+                    className="block p-4 rounded-lg border border-signal-amber/20 bg-background/50 hover:border-signal-amber/50 hover:bg-muted/30 transition-all"
+                  >
+                    <div className="flex items-start justify-between gap-2 mb-2">
+                      <p className="font-medium line-clamp-2">{session.title}</p>
+                      <Badge variant={status.badge} className="flex-shrink-0">{status.label}</Badge>
+                    </div>
+                    <p className="text-xs text-muted-foreground line-clamp-2 mb-2">{session.description || 'No description'}</p>
+                    <div className="flex items-center justify-between text-xs text-muted-foreground">
+                      <span className="capitalize">{session.format || 'session'}</span>
+                      <span>{new Date(session.created_at).toLocaleDateString()}</span>
+                    </div>
+                  </Link>
+                )
+              })}
             </div>
             <p className="text-xs text-muted-foreground mt-3">
               Your proposals are being reviewed by organizers. You can still open and edit them while they wait. Once
-              approved they&apos;ll appear in the sessions list.
+              approved they’ll appear in the sessions list.
             </p>
           </CardContent>
         </Card>
@@ -349,11 +414,7 @@ function Dashboard({ data }: { data: DashboardData }) {
                 <MessagesSquare className="h-5 w-5 text-primary" aria-hidden />
                 Recently proposed
               </CardTitle>
-              <Button variant="ghost" size="sm" asChild>
-                <Link href={`/e/${event.slug}/sessions?sort=recent`} className="text-muted-foreground">
-                  View all <ArrowRight className="h-4 w-4 ml-1" aria-hidden />
-                </Link>
-              </Button>
+              <ViewAll href={`/e/${event.slug}/sessions?sort=recent`} />
             </div>
           </CardHeader>
           <CardContent className="pt-0">
@@ -369,14 +430,14 @@ function Dashboard({ data }: { data: DashboardData }) {
                     </div>
                     <div className="flex-1 min-w-0">
                       <p className="font-medium truncate group-hover:text-primary transition-colors">{session.title}</p>
-                      <div className="flex items-center gap-2 text-xs text-muted-foreground overflow-hidden">
+                      <div className="flex items-center text-xs text-muted-foreground overflow-hidden">
                         {session.host_display_name && <span className="truncate">{session.host_display_name}</span>}
-                        {session.host_display_name && <span className="flex-shrink-0" aria-hidden>•</span>}
+                        {session.host_display_name && <span className="flex-shrink-0" aria-hidden>{SEPARATOR}</span>}
                         <span className="flex-shrink-0">{new Date(session.created_at).toLocaleDateString()}</span>
                       </div>
                     </div>
                     {session.format && (
-                      <Badge variant="secondary" className="capitalize text-xs flex-shrink-0">
+                      <Badge variant="secondary" className="capitalize flex-shrink-0">
                         {session.format}
                       </Badge>
                     )}
@@ -396,30 +457,27 @@ function Dashboard({ data }: { data: DashboardData }) {
                 <Mic className="h-5 w-5 text-primary" aria-hidden />
                 My sessions
               </CardTitle>
-              <Button variant="ghost" size="sm" asChild>
-                <Link href={`/e/${event.slug}/sessions?filter=mine`} className="text-muted-foreground">
-                  View all <ArrowRight className="h-4 w-4 ml-1" aria-hidden />
-                </Link>
-              </Button>
+              <ViewAll href={`/e/${event.slug}/sessions?filter=mine`} />
             </div>
           </CardHeader>
           <CardContent className="pt-0">
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {liveMine.map((session) => (
-                <Link
-                  key={session.id}
-                  href={`/e/${event.slug}/sessions/${session.id}`}
-                  className="p-4 rounded-lg border hover:border-primary/50 hover:bg-muted/30 transition-all group"
-                >
-                  <div className="flex items-start justify-between gap-2 mb-2">
-                    <p className="font-medium line-clamp-2 group-hover:text-primary transition-colors">{session.title}</p>
-                    <Badge variant="secondary" className="capitalize text-xs flex-shrink-0">
-                      {session.status}
-                    </Badge>
-                  </div>
-                  <p className="text-xs text-muted-foreground capitalize">{session.format || 'session'}</p>
-                </Link>
-              ))}
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {liveMine.map((session) => {
+                const status = sessionStatusBadge(session.status)
+                return (
+                  <Link
+                    key={session.id}
+                    href={`/e/${event.slug}/sessions/${session.id}`}
+                    className="p-4 rounded-lg border hover:border-primary/50 hover:bg-muted/30 transition-all group"
+                  >
+                    <div className="flex items-start justify-between gap-2 mb-2">
+                      <p className="font-medium line-clamp-2 group-hover:text-primary transition-colors">{session.title}</p>
+                      <Badge variant={status.badge} className="flex-shrink-0">{status.label}</Badge>
+                    </div>
+                    <p className="text-xs text-muted-foreground capitalize">{session.format || 'session'}</p>
+                  </Link>
+                )
+              })}
             </div>
           </CardContent>
         </Card>
@@ -430,18 +488,14 @@ function Dashboard({ data }: { data: DashboardData }) {
           <CardHeader className="pb-3">
             <div className="flex items-center justify-between">
               <CardTitle className="text-lg flex items-center gap-2">
-                <Heart className="h-5 w-5 text-red-500" aria-hidden />
-                Sessions you&apos;re supporting
+                <Heart className="h-5 w-5 text-favorite" aria-hidden />
+                Sessions you’re supporting
               </CardTitle>
-              <Button variant="ghost" size="sm" asChild>
-                <Link href={`/e/${event.slug}/my-votes`} className="text-muted-foreground">
-                  View all <ArrowRight className="h-4 w-4 ml-1" aria-hidden />
-                </Link>
-              </Button>
+              <ViewAll href={`/e/${event.slug}/my-votes`} />
             </div>
           </CardHeader>
           <CardContent className="pt-0">
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
               {supported
                 .sort(([, a], [, b]) => b - a)
                 .slice(0, 6)
@@ -466,22 +520,20 @@ function Dashboard({ data }: { data: DashboardData }) {
       )}
 
       {data.isOrganizer && data.stats.pending !== null && data.stats.pending > 0 && (
-        <Card className="border-orange-500/30 bg-orange-500/5">
+        <Card className="border-signal-amber/30 bg-signal-amber/5">
           <CardContent className="pt-6">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex items-center gap-4">
-                <div className="p-3 rounded-lg bg-orange-500/10">
-                  <Clock className="h-6 w-6 text-orange-500" aria-hidden />
+                <div className="p-3 rounded-lg bg-signal-amber/10">
+                  <Clock className="h-6 w-6 text-signal-amber" aria-hidden />
                 </div>
                 <div>
-                  <h2 className="font-semibold">Pending approval</h2>
-                  <p className="text-sm text-muted-foreground">
-                    {data.stats.pending} {data.stats.pending === 1 ? 'session' : 'sessions'} awaiting review
-                  </p>
+                  <h2 className="font-semibold">Awaiting review</h2>
+                  <p className="text-sm text-muted-foreground">{plural(data.stats.pending, 'session')} waiting for a decision</p>
                 </div>
               </div>
               <Button asChild>
-                <Link href={`/e/${event.slug}/admin`}>Review</Link>
+                <Link href={`/e/${event.slug}/admin`}>Review proposals</Link>
               </Button>
             </div>
           </CardContent>

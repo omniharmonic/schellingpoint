@@ -23,9 +23,10 @@
  * resolve through GET /api/atproto/skills?uris=.
  */
 import * as React from 'react'
-import { Loader2, Search, X } from 'lucide-react'
+import { Loader2, Search } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
+import { RemovableChip } from '@/components/ui/removable-chip'
 import { apiFetch } from '@/lib/api/client'
 
 export interface SkillOption {
@@ -50,12 +51,15 @@ interface SkillsResponse {
   skills: SkillOption[]
 }
 
+const MIN_QUERY = 2
+
 export function SkillPicker({ value, onChange, max = 5, label = 'Skills', description, disabled = false, id }: SkillPickerProps) {
   const generatedId = React.useId()
   const inputId = id ?? `skill-picker-${generatedId}`
   const listId = `${inputId}-results`
   const [query, setQuery] = React.useState('')
   const [results, setResults] = React.useState<SkillOption[]>([])
+  const [searched, setSearched] = React.useState<string | null>(null)
   const [known, setKnown] = React.useState<Record<string, SkillOption>>({})
   const [loading, setLoading] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
@@ -82,8 +86,9 @@ export function SkillPicker({ value, onChange, max = 5, label = 'Skills', descri
   // Debounced search.
   React.useEffect(() => {
     const q = query.trim()
-    if (q.length < 2) {
+    if (q.length < MIN_QUERY) {
       setResults([])
+      setSearched(null)
       setLoading(false)
       return
     }
@@ -93,6 +98,7 @@ export function SkillPicker({ value, onChange, max = 5, label = 'Skills', descri
       apiFetch<SkillsResponse>(`/api/atproto/skills?q=${encodeURIComponent(q)}&limit=12`, { signal: controller.signal })
         .then((r) => {
           setResults(r.skills)
+          setSearched(q)
           setKnown((prev) => ({ ...prev, ...Object.fromEntries(r.skills.map((s) => [s.uri, s])) }))
           setError(null)
           setActive(-1)
@@ -113,6 +119,7 @@ export function SkillPicker({ value, onChange, max = 5, label = 'Skills', descri
     onChange([...value, skill.uri])
     setQuery('')
     setResults([])
+    setSearched(null)
   }
 
   const remove = (uri: string) => {
@@ -121,8 +128,15 @@ export function SkillPicker({ value, onChange, max = 5, label = 'Skills', descri
   }
 
   const options = results.filter((r) => !value.includes(r.uri))
+  const noMatches = !loading && !error && searched !== null && searched === query.trim() && options.length === 0
+  const listOpen = options.length > 0 || noMatches
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Escape') {
+      setResults([])
+      setSearched(null)
+      return
+    }
     if (!options.length) return
     if (e.key === 'ArrowDown') {
       e.preventDefault()
@@ -133,10 +147,10 @@ export function SkillPicker({ value, onChange, max = 5, label = 'Skills', descri
     } else if (e.key === 'Enter' && active >= 0) {
       e.preventDefault()
       add(options[active]!)
-    } else if (e.key === 'Escape') {
-      setResults([])
     }
   }
+
+  const labelOf = (uri: string) => known[uri]?.label ?? uri.slice(uri.lastIndexOf('/') + 1).replace(/-/g, ' ')
 
   return (
     <div className="space-y-2">
@@ -154,25 +168,14 @@ export function SkillPicker({ value, onChange, max = 5, label = 'Skills', descri
         <ul className="flex flex-wrap gap-1.5" aria-label="Selected skills">
           {value.map((uri) => (
             <li key={uri}>
-              <Badge variant="secondary" className="gap-1 pr-1">
-                <span>{known[uri]?.label ?? uri.slice(uri.lastIndexOf('/') + 1).replace(/-/g, ' ')}</span>
-                <button
-                  type="button"
-                  onClick={() => remove(uri)}
-                  disabled={disabled}
-                  className="rounded-sm p-0.5 hover:bg-background/60 disabled:opacity-50"
-                  aria-label={`Remove ${known[uri]?.label ?? 'skill'}`}
-                >
-                  <X className="h-3 w-3" aria-hidden />
-                </button>
-              </Badge>
+              <RemovableChip label={labelOf(uri)} onRemove={() => remove(uri)} disabled={disabled} />
             </li>
           ))}
         </ul>
       ) : null}
 
       <div className="relative">
-        <Search className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" aria-hidden />
+        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
         <Input
           id={inputId}
           value={query}
@@ -180,36 +183,42 @@ export function SkillPicker({ value, onChange, max = 5, label = 'Skills', descri
           onKeyDown={onKeyDown}
           disabled={disabled || full}
           placeholder={full ? `You can choose up to ${limit}` : 'Search skills, e.g. permaculture'}
-          className="pl-8"
+          className="pl-9"
           role="combobox"
-          aria-expanded={options.length > 0}
+          aria-expanded={listOpen}
           aria-controls={listId}
           aria-autocomplete="list"
           aria-activedescendant={active >= 0 && options[active] ? `${listId}-${active}` : undefined}
           autoComplete="off"
         />
-        {loading ? <Loader2 className="absolute right-2.5 top-2.5 h-4 w-4 animate-spin text-muted-foreground" aria-hidden /> : null}
-        {options.length ? (
+        {loading ? <Loader2 className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-muted-foreground" aria-hidden /> : null}
+        {listOpen ? (
           <ul id={listId} role="listbox" className="absolute z-20 mt-1 max-h-64 w-full overflow-auto rounded-md border bg-popover p-1 shadow-md">
-            {options.map((s, i) => (
-              <li
-                key={s.uri}
-                id={`${listId}-${i}`}
-                role="option"
-                aria-selected={i === active}
-                onMouseDown={(e) => {
-                  e.preventDefault()
-                  add(s)
-                }}
-                className={`cursor-pointer rounded-sm px-2 py-1.5 text-sm ${i === active ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/60'}`}
-              >
-                <div className="flex items-center gap-2">
-                  <span className="font-medium">{s.label}</span>
-                  {s.status === 'proposed' ? <span className="text-[10px] uppercase tracking-wide text-muted-foreground">proposed</span> : null}
-                </div>
-                {s.description ? <p className="line-clamp-1 text-xs text-muted-foreground">{s.description}</p> : null}
+            {noMatches ? (
+              <li role="option" aria-selected={false} aria-disabled="true" className="px-2 py-1.5 text-sm text-muted-foreground">
+                Nothing matches “{searched}”. Try another word; new skills are added by the taxonomy’s maintainers.
               </li>
-            ))}
+            ) : (
+              options.map((s, i) => (
+                <li
+                  key={s.uri}
+                  id={`${listId}-${i}`}
+                  role="option"
+                  aria-selected={i === active}
+                  onMouseDown={(e) => {
+                    e.preventDefault()
+                    add(s)
+                  }}
+                  className={`cursor-pointer rounded-sm px-2 py-1.5 text-sm ${i === active ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/60'}`}
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium">{s.label}</span>
+                    {s.status === 'proposed' ? <Badge variant="muted">Proposed</Badge> : null}
+                  </div>
+                  {s.description ? <p className="line-clamp-1 text-xs text-muted-foreground">{s.description}</p> : null}
+                </li>
+              ))
+            )}
           </ul>
         ) : null}
       </div>

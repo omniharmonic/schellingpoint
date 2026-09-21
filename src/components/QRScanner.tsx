@@ -127,17 +127,17 @@ export function QRScanner({
 
   if (!hasCamera) {
     return (
-      <div className={cn('flex flex-col items-center justify-center p-8 bg-muted rounded-lg', className)}>
+      <div className={cn('flex flex-col items-center justify-center p-8 bg-muted rounded-xl', className)}>
         <CameraOff className="h-12 w-12 text-muted-foreground mb-4" />
         <p className="text-center text-muted-foreground mb-4">
-          Camera access is required for QR scanning.
+          The camera is needed to scan tickets. Allow camera access, or enter the ticket code instead.
         </p>
         {lastError && (
-          <p className="text-sm text-destructive text-center mb-4">{lastError}</p>
+          <p role="alert" className="text-sm text-destructive text-center mb-4">{lastError}</p>
         )}
         <Button onClick={restartScanner}>
-          <RefreshCw className="h-4 w-4 mr-2" />
-          Retry
+          <RefreshCw className="h-4 w-4 mr-2" aria-hidden="true" />
+          Try again
         </Button>
       </div>
     )
@@ -148,7 +148,7 @@ export function QRScanner({
       {/* Scanner container */}
       <div
         id={`qr-reader-${scannerId}`}
-        className="w-full overflow-hidden rounded-lg bg-black"
+        className="w-full overflow-hidden rounded-xl bg-black"
         style={{ minHeight: 300 }}
       />
 
@@ -157,7 +157,7 @@ export function QRScanner({
         {isScanning && !paused ? (
           <>
             <Camera className="h-4 w-4 animate-pulse" />
-            <span>Scanning...</span>
+            <span>Scanning…</span>
           </>
         ) : (
           <>
@@ -169,10 +169,10 @@ export function QRScanner({
 
       {/* Restart button */}
       {!isScanning && !paused && (
-        <div className="absolute inset-0 flex items-center justify-center bg-black/50 rounded-lg">
+        <div className="absolute inset-0 flex items-center justify-center bg-black/50 rounded-xl">
           <Button onClick={restartScanner}>
-            <RefreshCw className="h-4 w-4 mr-2" />
-            Start Camera
+            <RefreshCw className="h-4 w-4 mr-2" aria-hidden="true" />
+            Start camera
           </Button>
         </div>
       )}

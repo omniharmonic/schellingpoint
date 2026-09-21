@@ -1,15 +1,22 @@
 'use client'
 
 import * as React from 'react'
-import { AlertCircle, Check, ChevronDown, ChevronUp, Globe, GripVertical, Loader2, Pencil, Plus, Trash2, X } from 'lucide-react'
+import { AlertCircle, ChevronDown, ChevronUp, Globe, GripVertical, Loader2, Pencil, Plus, Trash2, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
+import { Label } from '@/components/ui/label'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Alert, AlertDescription } from '@/components/ui/alert'
+import { ConfirmInline } from '@/components/ui/confirm-inline'
+import { useToast } from '@/components/ui/toast'
+import { PageHeader } from '@/components/PageHeader'
 import { SkillPicker } from '@/components/SkillPicker'
 import { useEvent, useEventRole } from '@/contexts/EventContext'
 import { apiFetch, ApiError } from '@/lib/api/client'
+import { plural } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { networkNotice, type AdminTrack, type NetworkSync } from '@/components/admin/types'
 
@@ -35,25 +42,21 @@ const errorText = (e: unknown, fallback: string) => (e instanceof ApiError ? e.m
 export default function AdminTracksPage() {
   const event = useEvent()
   const { can } = useEventRole()
+  const { toast } = useToast()
   const canManage = can('manageTracks')
   const base = `/api/v1/events/${event.slug}/admin/tracks`
 
   const [tracks, setTracks] = React.useState<AdminTrack[]>([])
   const [isLoading, setIsLoading] = React.useState(true)
   const [error, setError] = React.useState<string | null>(null)
-  const [status, setStatus] = React.useState<string | null>(null)
   const [editingTrack, setEditingTrack] = React.useState<AdminTrack | null>(null)
   const [isCreating, setIsCreating] = React.useState(false)
   const [formData, setFormData] = React.useState<TrackFormData>(EMPTY_FORM)
+  const [formError, setFormError] = React.useState<string | null>(null)
   const [isSaving, setIsSaving] = React.useState(false)
   const [deleteConfirm, setDeleteConfirm] = React.useState<string | null>(null)
   const [draggedTrack, setDraggedTrack] = React.useState<AdminTrack | null>(null)
-
-  React.useEffect(() => {
-    if (!status) return
-    const timer = window.setTimeout(() => setStatus(null), 5000)
-    return () => window.clearTimeout(timer)
-  }, [status])
+  const nameRef = React.useRef<HTMLInputElement>(null)
 
   const load = React.useCallback(async () => {
     try {
@@ -71,21 +74,32 @@ export default function AdminTracksPage() {
   const report = (sync: NetworkSync | undefined, success: string) => {
     const warning = networkNotice(sync)
     if (warning) setError(warning)
-    else setStatus(success)
+    else toast({ title: success, variant: 'success' })
   }
 
   const cancelEdit = () => {
     setEditingTrack(null)
     setIsCreating(false)
     setFormData(EMPTY_FORM)
+    setFormError(null)
+  }
+
+  const openCreate = () => {
+    setIsCreating(true)
+    setEditingTrack(null)
+    setFormData(EMPTY_FORM)
+    setFormError(null)
+    window.requestAnimationFrame(() => nameRef.current?.focus())
   }
 
   const handleSave = async () => {
     if (!formData.name.trim()) {
-      setError('Track name is required')
+      setFormError('Give the track a name.')
+      nameRef.current?.focus()
       return
     }
     setIsSaving(true)
+    setFormError(null)
     setError(null)
     const body = {
       name: formData.name.trim(),
@@ -102,7 +116,7 @@ export default function AdminTracksPage() {
       await load()
       report(res.network, editingTrack ? 'Track updated.' : 'Track created.')
     } catch (e) {
-      setError(errorText(e, editingTrack ? 'The track could not be updated.' : 'The track could not be created.'))
+      setFormError(errorText(e, editingTrack ? 'The track could not be updated.' : 'The track could not be created.'))
     } finally {
       setIsSaving(false)
     }
@@ -115,7 +129,7 @@ export default function AdminTracksPage() {
       const res = await apiFetch<{ sessionsWithoutTrack: number; network: NetworkSync }>(`${base}/${trackId}`, { method: 'DELETE' })
       setDeleteConfirm(null)
       await load()
-      report(res.network, res.sessionsWithoutTrack ? `Track deleted. ${res.sessionsWithoutTrack} session${res.sessionsWithoutTrack === 1 ? '' : 's'} now have no track.` : 'Track deleted.')
+      report(res.network, res.sessionsWithoutTrack ? `Track deleted. ${plural(res.sessionsWithoutTrack, 'session')} now ${res.sessionsWithoutTrack === 1 ? 'has' : 'have'} no track.` : 'Track deleted.')
     } catch (e) {
       setError(errorText(e, 'The track could not be deleted.'))
     } finally {
@@ -156,51 +170,52 @@ export default function AdminTracksPage() {
   const startEdit = (track: AdminTrack) => {
     setEditingTrack(track)
     setIsCreating(false)
+    setFormError(null)
     setFormData({ name: track.name, color: track.color || COLOR_PALETTE[0], description: track.description || '', skill_uris: track.skill_uris, is_active: track.is_active })
+    window.requestAnimationFrame(() => nameRef.current?.focus())
   }
 
   if (isLoading) {
     return <div className="flex items-center justify-center py-12" role="status" aria-label="Loading"><Loader2 className="h-8 w-8 animate-spin text-muted-foreground" /></div>
   }
 
+  const formOpen = isCreating || Boolean(editingTrack)
+
   return (
-    <div className="max-w-4xl">
-      <div className="page-heading mb-6">
-        <div>
-          <h1 className="text-2xl font-display font-bold">Tracks</h1>
-          <p className="text-muted-foreground">Organize sessions by theme, and connect each track to shared skills</p>
-        </div>
-        {canManage && !isCreating && !editingTrack && (
-          <Button onClick={() => { setIsCreating(true); setEditingTrack(null); setFormData(EMPTY_FORM) }}>
-            <Plus className="h-4 w-4 mr-2" />
+    <div>
+      <PageHeader
+        title="Tracks"
+        subtitle="Organize sessions by theme, and connect each track to shared skills."
+        actions={canManage && !formOpen && (
+          <Button onClick={openCreate}>
+            <Plus className="h-4 w-4 mr-2" aria-hidden="true" />
             Add track
           </Button>
         )}
-      </div>
+      />
 
       {error && (
-        <div role="alert" className="mb-6 p-4 bg-destructive/10 border border-destructive/20 rounded-lg flex items-center gap-3">
-          <AlertCircle className="h-5 w-5 text-destructive" aria-hidden />
-          <p className="text-sm text-destructive">{error}</p>
-          <Button variant="ghost" size="sm" className="ml-auto" onClick={() => setError(null)} aria-label="Dismiss"><X className="h-4 w-4" /></Button>
-        </div>
+        <Alert variant="destructive" className="mb-6 flex items-start gap-3 [&>svg~*]:pl-0">
+          <AlertCircle className="h-5 w-5" aria-hidden="true" />
+          <AlertDescription className="flex-1 pl-7">{error}</AlertDescription>
+          <Button variant="ghost" size="icon-sm" className="-my-2 shrink-0" onClick={() => setError(null)} aria-label="Dismiss"><X className="h-4 w-4" aria-hidden="true" /></Button>
+        </Alert>
       )}
-      {status && <p role="status" className="mb-6 rounded-lg border border-primary/30 p-4 text-sm">{status}</p>}
 
-      {(isCreating || editingTrack) && (
+      {formOpen && (
         <Card className="mb-6">
           <CardHeader>
-            <CardTitle>{editingTrack ? 'Edit track' : 'Create track'}</CardTitle>
-            <CardDescription>{editingTrack ? 'Update track details' : 'Add a new track for organizing sessions'}</CardDescription>
+            <CardTitle>{editingTrack ? 'Edit track' : 'New track'}</CardTitle>
+            <CardDescription>{editingTrack ? 'Changes apply to every session in this track.' : 'Tracks group sessions by theme and appear in the proposal form.'}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-2">
-              <label htmlFor="track-name" className="text-sm font-medium">Name <span className="text-destructive">*</span></label>
-              <Input id="track-name" value={formData.name} onChange={(e) => setFormData({ ...formData, name: e.target.value })} placeholder="e.g., Technical, Governance, Community" maxLength={50} />
+              <Label htmlFor="track-name">Name</Label>
+              <Input ref={nameRef} id="track-name" value={formData.name} onChange={(e) => setFormData({ ...formData, name: e.target.value })} placeholder="e.g. Technical, Governance, Community" maxLength={50} aria-invalid={formError && !formData.name.trim() ? true : undefined} />
             </div>
-            <div className="space-y-2">
-              <span id="track-color-label" className="text-sm font-medium">Color</span>
-              <div className="flex flex-wrap gap-2" role="radiogroup" aria-labelledby="track-color-label">
+            <fieldset className="space-y-2">
+              <legend className="text-sm font-medium">Color</legend>
+              <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Track color">
                 {COLOR_PALETTE.map((color) => (
                   <button
                     key={color}
@@ -209,14 +224,15 @@ export default function AdminTracksPage() {
                     aria-checked={formData.color === color}
                     aria-label={color}
                     onClick={() => setFormData({ ...formData, color })}
-                    className={cn('w-8 h-8 rounded-full transition-transform', formData.color === color && 'ring-2 ring-offset-2 ring-primary scale-110')}
-                    style={{ backgroundColor: color }}
-                  />
+                    className={cn('flex h-10 w-10 items-center justify-center rounded-full transition-transform focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2', formData.color === color && 'ring-2 ring-offset-2 ring-primary scale-110')}
+                  >
+                    <span className="h-7 w-7 rounded-full" style={{ backgroundColor: color }} aria-hidden="true" />
+                  </button>
                 ))}
               </div>
-            </div>
+            </fieldset>
             <div className="space-y-2">
-              <label htmlFor="track-description" className="text-sm font-medium">Description</label>
+              <Label htmlFor="track-description">Description (optional)</Label>
               <Textarea id="track-description" value={formData.description} onChange={(e) => setFormData({ ...formData, description: e.target.value })} placeholder="What belongs in this track…" rows={3} maxLength={200} />
               <p className="text-xs text-muted-foreground">{formData.description.length}/200</p>
             </div>
@@ -224,18 +240,18 @@ export default function AdminTracksPage() {
               value={formData.skill_uris}
               onChange={(skill_uris) => setFormData({ ...formData, skill_uris })}
               max={20}
-              label="Skills"
+              label="Skills (optional)"
               description="Skills from the shared taxonomy help people find this track across gatherings and schools."
               disabled={isSaving}
             />
-            <label className="flex items-center gap-2 text-sm">
-              <input type="checkbox" checked={formData.is_active} onChange={(e) => setFormData({ ...formData, is_active: e.target.checked })} />
-              Active (offered in proposal forms)
-            </label>
-            <div className="flex gap-2 pt-2">
+            <div className="flex items-center gap-2">
+              <Checkbox id="track-active" checked={formData.is_active} onCheckedChange={(checked) => setFormData({ ...formData, is_active: checked === true })} />
+              <Label htmlFor="track-active" className="font-normal">Active (offered in proposal forms)</Label>
+            </div>
+            {formError && <p role="alert" className="rounded-lg border border-destructive/20 bg-destructive/10 p-3 text-sm text-destructive">{formError}</p>}
+            <div className="flex justify-end gap-2 pt-2">
               <Button variant="outline" onClick={cancelEdit} disabled={isSaving}>Cancel</Button>
-              <Button onClick={() => void handleSave()} disabled={isSaving}>
-                {isSaving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              <Button onClick={() => void handleSave()} loading={isSaving}>
                 {editingTrack ? 'Save changes' : 'Create track'}
               </Button>
             </div>
@@ -245,12 +261,17 @@ export default function AdminTracksPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Tracks ({tracks.length})</CardTitle>
+          <CardTitle>{plural(tracks.length, 'track')}</CardTitle>
           <CardDescription>Drag, or use the arrows, to reorder. Tracks appear in this order in session forms.</CardDescription>
         </CardHeader>
         <CardContent>
           {tracks.length === 0 ? (
-            <div className="text-center py-12 text-muted-foreground">No tracks yet.</div>
+            <div className="text-center py-12">
+              <p className="text-muted-foreground">No tracks yet. Tracks help people find sessions by theme.</p>
+              {canManage && !formOpen && (
+                <Button className="mt-4" onClick={openCreate}><Plus className="h-4 w-4 mr-2" aria-hidden="true" />Add your first track</Button>
+              )}
+            </div>
           ) : (
             <ul className="space-y-2">
               {tracks.map((track, index) => (
@@ -261,34 +282,41 @@ export default function AdminTracksPage() {
                   onDragEnd={() => setDraggedTrack(null)}
                   onDragOver={(e) => e.preventDefault()}
                   onDrop={() => handleDrop(track)}
-                  className={cn('flex flex-wrap items-center gap-3 p-3 rounded-lg border bg-background transition-colors', draggedTrack?.id === track.id && 'opacity-50', draggedTrack && draggedTrack.id !== track.id && 'border-dashed')}
+                  className={cn('space-y-2 p-3 rounded-xl border bg-background transition-colors', draggedTrack?.id === track.id && 'opacity-50', draggedTrack && draggedTrack.id !== track.id && 'border-dashed')}
                 >
-                  {canManage && <GripVertical className="h-4 w-4 text-muted-foreground cursor-move flex-shrink-0" aria-hidden />}
-                  <div className="w-4 h-4 rounded-full flex-shrink-0" style={{ backgroundColor: track.color || '#64748b' }} aria-hidden />
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="font-medium">{track.name}</span>
-                      {!track.is_active && <Badge variant="outline" className="text-xs">Inactive</Badge>}
-                      {track.network_published && <Badge variant="outline" className="text-xs gap-1"><Globe className="h-3 w-3" />On the network</Badge>}
-                      {track.skill_uris.length > 0 && <Badge variant="secondary" className="text-xs">{track.skill_uris.length} skill{track.skill_uris.length === 1 ? '' : 's'}</Badge>}
+                  <div className="flex flex-wrap items-center gap-3">
+                    {canManage && <GripVertical className="h-4 w-4 text-muted-foreground cursor-move flex-shrink-0" aria-hidden="true" />}
+                    <div className="w-4 h-4 rounded-full flex-shrink-0" style={{ backgroundColor: track.color || '#64748b' }} aria-hidden="true" />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-medium">{track.name}</span>
+                        {!track.is_active && <Badge variant="muted">Inactive</Badge>}
+                        {track.network_published && <Badge variant="outline" className="gap-1"><Globe className="h-3 w-3" aria-hidden="true" />On the network</Badge>}
+                        {track.skill_uris.length > 0 && <Badge variant="secondary">{plural(track.skill_uris.length, 'skill')}</Badge>}
+                      </div>
+                      {track.description && <p className="text-sm text-muted-foreground truncate">{track.description}</p>}
                     </div>
-                    {track.description && <p className="text-sm text-muted-foreground truncate">{track.description}</p>}
+                    <Badge variant="secondary" className="flex-shrink-0">{plural(track.session_count, 'session')}</Badge>
+                    {canManage && deleteConfirm !== track.id && (
+                      <div className="flex items-center gap-1">
+                        <Button variant="ghost" size="icon-sm" onClick={() => moveTrack(track, -1)} disabled={index === 0} aria-label={`Move ${track.name} up`}><ChevronUp className="h-4 w-4" aria-hidden="true" /></Button>
+                        <Button variant="ghost" size="icon-sm" onClick={() => moveTrack(track, 1)} disabled={index === tracks.length - 1} aria-label={`Move ${track.name} down`}><ChevronDown className="h-4 w-4" aria-hidden="true" /></Button>
+                        <Button variant="ghost" size="icon-sm" onClick={() => startEdit(track)} aria-label={`Edit ${track.name}`}><Pencil className="h-4 w-4" aria-hidden="true" /></Button>
+                        <Button variant="ghost" size="icon-sm" onClick={() => setDeleteConfirm(track.id)} className="text-destructive hover:text-destructive" aria-label={`Delete ${track.name}`}><Trash2 className="h-4 w-4" aria-hidden="true" /></Button>
+                      </div>
+                    )}
                   </div>
-                  <Badge variant="secondary" className="flex-shrink-0">{track.session_count} sessions</Badge>
-                  {canManage && (deleteConfirm === track.id ? (
-                    <div className="flex items-center gap-2" role="alertdialog" aria-label={`Delete ${track.name}`}>
-                      <span className="text-xs text-destructive">{track.session_count > 0 ? `${track.session_count} sessions will lose their track.` : 'Delete this track?'}</span>
-                      <Button variant="destructive" size="sm" onClick={() => void handleDelete(track.id)} disabled={isSaving} aria-label="Confirm delete">{isSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}</Button>
-                      <Button variant="outline" size="sm" onClick={() => setDeleteConfirm(null)} disabled={isSaving} aria-label="Cancel delete"><X className="h-4 w-4" /></Button>
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-1">
-                      <Button variant="ghost" size="sm" onClick={() => moveTrack(track, -1)} disabled={index === 0} aria-label={`Move ${track.name} up`}><ChevronUp className="h-4 w-4" /></Button>
-                      <Button variant="ghost" size="sm" onClick={() => moveTrack(track, 1)} disabled={index === tracks.length - 1} aria-label={`Move ${track.name} down`}><ChevronDown className="h-4 w-4" /></Button>
-                      <Button variant="ghost" size="sm" onClick={() => startEdit(track)} aria-label={`Edit ${track.name}`}><Pencil className="h-4 w-4" /></Button>
-                      <Button variant="ghost" size="sm" onClick={() => setDeleteConfirm(track.id)} className="text-destructive hover:text-destructive" aria-label={`Delete ${track.name}`}><Trash2 className="h-4 w-4" /></Button>
-                    </div>
-                  ))}
+                  {canManage && deleteConfirm === track.id && (
+                    <ConfirmInline
+                      layout="inline"
+                      destructive
+                      message={track.session_count > 0 ? `Delete “${track.name}”? ${plural(track.session_count, 'session')} will lose ${track.session_count === 1 ? 'its' : 'their'} track.` : `Delete “${track.name}”?`}
+                      confirmLabel="Delete"
+                      loading={isSaving}
+                      onConfirm={() => void handleDelete(track.id)}
+                      onCancel={() => setDeleteConfirm(null)}
+                    />
+                  )}
                 </li>
               ))}
             </ul>

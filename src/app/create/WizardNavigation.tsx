@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import {
   WIZARD_STEPS,
+  STEP_LABELS,
   isStepValid,
   getStepValidationErrors,
   getStepFromNumber,
@@ -13,24 +14,9 @@ import {
   type WizardAction,
 } from './useWizardState';
 
-// Human-readable step labels
-const STEP_LABELS: Record<(typeof WIZARD_STEPS)[number], string> = {
-  basics: 'Basics',
-  dates: 'Dates',
-  venues: 'Venues',
-  schedule: 'Schedule',
-  tracks: 'Tracks',
-  voting: 'Voting',
-  branding: 'Branding',
-  identity: 'Identity',
-  review: 'Review',
-};
-
 interface WizardCommonProps {
   state: WizardState;
   dispatch: React.Dispatch<WizardAction>;
-  onNext?: () => void;
-  onPrev?: () => void;
 }
 
 /**
@@ -60,7 +46,7 @@ function getStepStatus(
 /**
  * Highest step the user can navigate to (all previous steps must be valid).
  */
-function getMaxNavigableStep(state: WizardState): number {
+export function getMaxNavigableStep(state: WizardState): number {
   for (let i = 0; i < WIZARD_STEPS.length; i++) {
     if (!isStepValid(state, i)) {
       return i;
@@ -76,15 +62,15 @@ function getMaxNavigableStep(state: WizardState): number {
 export function WizardStepTabs({ state, dispatch }: WizardCommonProps) {
   const { currentStep } = state;
   const currentStepName = getStepFromNumber(currentStep);
+  const maxNavigable = getMaxNavigableStep(state);
 
   const handleStepClick = React.useCallback(
     (stepIndex: number) => {
-      const maxNavigable = getMaxNavigableStep(state);
       if (stepIndex <= maxNavigable && stepIndex !== currentStep) {
         dispatch({ type: 'SET_STEP', payload: stepIndex });
       }
     },
-    [state, currentStep, dispatch]
+    [maxNavigable, currentStep, dispatch]
   );
 
   return (
@@ -97,7 +83,6 @@ export function WizardStepTabs({ state, dispatch }: WizardCommonProps) {
         >
           {WIZARD_STEPS.map((stepName, index) => {
             const status = getStepStatus(index, currentStep, state);
-            const maxNavigable = getMaxNavigableStep(state);
             const isClickable = index <= maxNavigable && index !== currentStep;
 
             return (
@@ -128,9 +113,9 @@ export function WizardStepTabs({ state, dispatch }: WizardCommonProps) {
                   )}
                 >
                   {status === 'completed' ? (
-                    <Check className="h-3.5 w-3.5" />
+                    <Check className="h-3.5 w-3.5" aria-hidden="true" />
                   ) : status === 'error' ? (
-                    <AlertCircle className="h-3.5 w-3.5" />
+                    <AlertCircle className="h-3.5 w-3.5" aria-hidden="true" />
                   ) : (
                     index + 1
                   )}
@@ -160,7 +145,6 @@ export function WizardStepTabs({ state, dispatch }: WizardCommonProps) {
         <div className="flex items-center gap-1.5">
           {WIZARD_STEPS.map((stepName, index) => {
             const status = getStepStatus(index, currentStep, state);
-            const maxNavigable = getMaxNavigableStep(state);
             const isClickable = index <= maxNavigable && index !== currentStep;
             return (
               <button
@@ -196,12 +180,12 @@ export function WizardValidationErrors({ state }: { state: WizardState }) {
   if (errors.length === 0) return null;
 
   return (
-    <div role="alert" className="rounded-lg border border-destructive/50 bg-destructive/10 p-4">
+    <div role="alert" className="rounded-xl border border-destructive/20 bg-destructive/10 p-3">
       <div className="flex items-start gap-3">
-        <AlertCircle className="h-5 w-5 text-destructive flex-shrink-0 mt-0.5" />
+        <AlertCircle className="h-5 w-5 text-destructive flex-shrink-0 mt-0.5" aria-hidden="true" />
         <div className="space-y-1">
           <p className="text-sm font-medium text-destructive">
-            Please fix the following errors:
+            Fix these before continuing:
           </p>
           <ul className="text-sm text-destructive/90 list-disc list-inside space-y-1">
             {errors.map((error, index) => (
@@ -218,18 +202,18 @@ export function WizardValidationErrors({ state }: { state: WizardState }) {
 // Back/Next buttons
 // ============================================================================
 
-export function WizardNavButtons({
-  state,
-  dispatch,
-  onNext,
-  onPrev,
-  hideOnLastStep = false,
-}: WizardCommonProps & { hideOnLastStep?: boolean }) {
+/**
+ * The one sticky navigation bar. Back is offered on every step but the first (including
+ * Review); Continue is hidden on Review, where the create button lives in the step itself.
+ * The primary button keeps a fixed label so it does not change width every step; the next
+ * step's name is exposed to assistive tech and as a hint.
+ */
+export function WizardNavButtons({ state, dispatch }: WizardCommonProps) {
   const { currentStep } = state;
   const currentStepName = getStepFromNumber(currentStep);
   const isFirstStep = currentStep === 0;
   const isLastStep = currentStep === WIZARD_STEPS.length - 1;
-  const isCurrentStepValid = isStepValid(state, currentStep);
+  const nextStepName = isLastStep ? null : WIZARD_STEPS[currentStep + 1];
 
   const handleNext = React.useCallback(() => {
     const errors = getStepValidationErrors(state, currentStep);
@@ -241,57 +225,36 @@ export function WizardNavButtons({
       return;
     }
     dispatch({ type: 'NEXT_STEP' });
-    onNext?.();
-  }, [state, currentStep, currentStepName, dispatch, onNext]);
+  }, [state, currentStep, currentStepName, dispatch]);
 
   const handlePrev = React.useCallback(() => {
     dispatch({ type: 'PREV_STEP' });
-    onPrev?.();
-  }, [dispatch, onPrev]);
-
-  if (hideOnLastStep && isLastStep) return null;
+  }, [dispatch]);
 
   return (
     <div className="flex items-center justify-between gap-3">
-      <div>
-        {!isFirstStep && (
-          <Button
-            type="button"
-            variant="outline"
-            onClick={handlePrev}
-            className="gap-2"
-          >
-            <ChevronLeft className="h-4 w-4" />
-            Back
-          </Button>
-        )}
-      </div>
-      <div>
-        {!isLastStep && (
+      {!isFirstStep ? (
+        <Button type="button" variant="outline" onClick={handlePrev} className="gap-2">
+          <ChevronLeft className="h-4 w-4" aria-hidden="true" />
+          Back
+        </Button>
+      ) : (
+        <span aria-hidden="true" />
+      )}
+      {nextStepName && (
+        <div className="ml-auto flex items-center gap-3">
+          <span className="hidden sm:inline text-sm text-muted-foreground">Next: {STEP_LABELS[nextStepName]}</span>
           <Button
             type="button"
             onClick={handleNext}
-                        className="gap-2"
+            className="gap-2"
+            aria-label={`Continue to ${STEP_LABELS[nextStepName]}`}
           >
-            Continue to {STEP_LABELS[WIZARD_STEPS[currentStep + 1]]}
-            <ChevronRight className="h-4 w-4" />
+            Continue
+            <ChevronRight className="h-4 w-4" aria-hidden="true" />
           </Button>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ============================================================================
-// Backwards-compatible composite (kept for callers that want everything)
-// ============================================================================
-
-export function WizardNavigation(props: WizardCommonProps) {
-  return (
-    <div className="space-y-6">
-      <WizardStepTabs {...props} />
-      <WizardValidationErrors state={props.state} />
-      <WizardNavButtons {...props} />
+        </div>
+      )}
     </div>
   );
 }

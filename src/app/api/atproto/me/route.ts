@@ -7,9 +7,12 @@ import { assertSameOrigin, getViewer, requireViewer, type Viewer } from '@/lib/a
 /**
  * The signed-in member's ATProto identity.
  *
- *   GET     `{ configured, oauthMode, linked, did, handle, kind, owned, publishProposals }`
+ *   GET     `{ configured, oauthMode, linked, did, handle, kind, owned, publishProposals,
+ *             syncedFields, profileSyncedAt }`
  *           — also answers signed out (`linked: false`) so the login page can learn
- *           whether the Bluesky door is on.
+ *           whether the Bluesky door is on. `syncedFields` / `profileSyncedAt`: which profile
+ *           fields still mirror the network profile and when it was last read
+ *           (`POST /api/atproto/me/resync` re-imports).
  *   PATCH   `{ publish_proposals: boolean }`
  *   DELETE  refused (409): every account IS its identity; there is nothing to unlink.
  */
@@ -22,8 +25,8 @@ function base() {
 }
 
 async function loadIdentity(viewer: Viewer) {
-  const rows = await sql<{ owned_at: string | null; publish_proposals: boolean | null }[]>`
-    select a.owned_at, p.publish_proposals
+  const rows = await sql<{ owned_at: string | null; publish_proposals: boolean | null; synced_fields: string[] | null; profile_synced_at: string | null }[]>`
+    select a.owned_at, p.publish_proposals, p.synced_fields, p.profile_synced_at
     from accounts a left join profiles p on p.id = a.id
     where a.id = ${viewer.accountId}
   `
@@ -34,6 +37,8 @@ async function loadIdentity(viewer: Viewer) {
     kind: viewer.kind,
     owned: viewer.kind === 'oauth' || Boolean(rows[0]?.owned_at),
     publishProposals: Boolean(rows[0]?.publish_proposals),
+    syncedFields: rows[0]?.synced_fields ?? [],
+    profileSyncedAt: rows[0]?.profile_synced_at ?? null,
   }
 }
 
@@ -42,7 +47,7 @@ export async function GET(request: Request) {
     const viewer = await getViewer(request)
     if (!viewer) {
       return NextResponse.json(
-        { ...base(), linked: false, did: null, handle: null, kind: null, owned: false, publishProposals: false },
+        { ...base(), linked: false, did: null, handle: null, kind: null, owned: false, publishProposals: false, syncedFields: [], profileSyncedAt: null },
         { headers: NO_STORE },
       )
     }

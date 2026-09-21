@@ -3,7 +3,8 @@
  * built from app rows and written through the gathering actor port — never with a raw agent.
  *
  *  - `publishGathering`   policy, the gathering's calendar event + config, `gathering@self`
- *                         (with `peers` and `tags`)
+ *                         (with `peers` and `tags`), then the account's `app.bsky.actor.profile`
+ *  - `publishGatheringProfile`   that profile record alone (name + tagline, text only)
  *  - `publishPolicy`      `freeschool.draft.policy` alone; `setPolicyThresholds` edits + republishes
  *  - `publishVenues` / `publishTracks` / `publishSlotGrids`
  *  - `publishSchedule`    per scheduled session: calendar event, config, slot (+ a gathering-written
@@ -39,6 +40,7 @@ import {
   addressLocation,
   buildEventConfig,
   buildGatheringCalendarEvent,
+  buildGatheringProfileRecord,
   buildGatheringRecord,
   buildPolicyRecord,
   buildProposalRecord,
@@ -72,6 +74,7 @@ export interface PublishResult {
     | 'gathering-event'
     | 'gathering-config'
     | 'gathering'
+    | 'profile'
     | 'venue'
     | 'track'
     | 'slot-grid'
@@ -634,6 +637,8 @@ export async function publishGathering(input: PublishInput, deps?: PublishDeps):
   if (gathering) {
     update.gathering_uri = gathering.uri
     update.gathering_cid = gathering.cid
+    // The account's own Bluesky-style profile, so the gathering reads as itself on the network.
+    await writeGatheringProfile(ctx, results)
   }
 
   if (ctx.deps.persist) {
@@ -647,6 +652,37 @@ export async function publishGathering(input: PublishInput, deps?: PublishDeps):
       where id = ${event.id}
     `
   }
+  return { results }
+}
+
+/**
+ * `app.bsky.actor.profile` at `self` for the gathering account: the gathering's name and its
+ * tagline (else a 256-grapheme cut of the description). Text only; never a person's name or a DID.
+ * CAS'd on the cid the read-your-writes index last saw (there is no app column for it).
+ */
+async function writeGatheringProfile(ctx: PublishContext, results: PublishResult[]): Promise<StrongRef | null> {
+  const { event } = ctx
+  return attempt(results, 'profile', event.id, () =>
+    putWithCas(ctx, {
+      action: 'publish-profile',
+      collection: NSID.actorProfile,
+      rkey: SELF_RKEY,
+      record: buildGatheringProfileRecord({
+        name: event.name,
+        tagline: event.tagline,
+        description: event.description,
+        createdAt: event.created_at,
+      }),
+      reason: `publish gathering "${event.name}": account profile`,
+    }),
+  )
+}
+
+/** The gathering account's `app.bsky.actor.profile` alone (see `writeGatheringProfile`). */
+export async function publishGatheringProfile(input: PublishInput, deps?: PublishDeps): Promise<PublishOutput> {
+  const ctx = await loadPublishContext(input, deps)
+  const results: PublishResult[] = []
+  await writeGatheringProfile(ctx, results)
   return { results }
 }
 

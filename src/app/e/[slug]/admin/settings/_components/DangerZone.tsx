@@ -2,7 +2,7 @@
 
 import * as React from 'react'
 import { useRouter } from 'next/navigation'
-import { Loader2, Trash2 } from 'lucide-react'
+import { Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { canDelete } from '@/lib/events/lifecycle'
@@ -33,12 +33,10 @@ export function DangerZone({ event, status, published }: { event: Event; status:
 
   return <SectionCard id="danger" title="Danger zone" description="Only the owner sees this. Deleting removes the gathering, its sessions, members and tickets, and its network identity, for good." className="border-destructive/40">
     {deletable ? <>
-      <Field label={`Type ${event.slug} to confirm`} htmlFor="delete-confirm" error={error}>
-        <Input id="delete-confirm" value={confirmation} onChange={e => setConfirmation(e.target.value)} autoComplete="off" spellCheck={false} placeholder={event.slug} />
+      <Field label={`Type ${event.slug} to confirm`} htmlFor="delete-confirm" hint="The gathering’s address slug, exactly as it appears in the link." error={error}>
+        <Input id="delete-confirm" value={confirmation} onChange={e => setConfirmation(e.target.value)} autoComplete="off" spellCheck={false} className="max-w-sm" error={!!error} />
       </Field>
-      <Button type="button" variant="destructive" disabled={!matches || deleting} onClick={remove}>{deleting ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Trash2 className="h-4 w-4 mr-2" />}Delete this draft</Button>
-    </> : <p className="text-sm text-muted-foreground">{published
-      ? 'This gathering has published records on the network, so it cannot be deleted. Archive it from the Lifecycle section instead; its public records stay where they are.'
-      : 'Only drafts can be deleted. This gathering has been published, so archive it from the Lifecycle section instead; archived gatherings leave discovery but keep their history.'}</p>}
+      <Button type="button" variant="destructive" disabled={!matches} loading={deleting} onClick={remove}>{deleting ? null : <Trash2 className="mr-2 h-4 w-4" aria-hidden="true" />}Delete this draft</Button>
+    </> : <p className="text-sm text-muted-foreground">Only a draft that has never published anything can be deleted, and this gathering has moved past that point. Archive it from the Lifecycle section instead: it leaves discovery and keeps its history, and any public records stay where they are.</p>}
   </SectionCard>
 }

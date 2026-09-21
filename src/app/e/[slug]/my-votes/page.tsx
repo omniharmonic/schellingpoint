@@ -1,7 +1,7 @@
 'use client'
 
 /**
- * My Votes — the signed-in participant's OWN ballot, nothing else.
+ * My votes — the signed-in participant's OWN ballot, nothing else.
  *
  * While a round is open: each session they support, with the vote control and their
  * credit use. Never anyone else's votes and never a live total (spec §5.3).
@@ -12,10 +12,11 @@
 import * as React from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { ClipboardList, Loader2, Lock, ExternalLink } from 'lucide-react'
+import { ClipboardList, Loader2, Lock, Download } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { PageHeader } from '@/components/PageHeader'
 import { DashboardLayout } from '@/components/DashboardLayout'
 import { VoteControl } from '@/components/VoteControl'
 import { useAuth } from '@/hooks/useAuth'
@@ -23,6 +24,8 @@ import { useVoting, type VotingRound } from '@/hooks/useVoting'
 import { useEvent } from '@/contexts/EventContext'
 import { apiFetch, ApiError } from '@/lib/api/client'
 import { voteCost } from '@/lib/voting/mechanism'
+import { plural } from '@/lib/format'
+import { formatLabel } from '@/lib/sessions/constants'
 
 export default function MyVotesPage() {
   return (
@@ -34,6 +37,15 @@ export default function MyVotesPage() {
 
 function formatWhen(iso: string): string {
   return new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+}
+
+function Stat({ label, value, highlight }: { label: string; value: React.ReactNode; highlight?: boolean }) {
+  return (
+    <div className="flex flex-col-reverse">
+      <dt className="text-sm text-muted-foreground">{label}</dt>
+      <dd className={highlight ? 'stat-value text-primary' : 'stat-value'}>{value}</dd>
+    </div>
+  )
 }
 
 function MyVotes() {
@@ -69,14 +81,11 @@ function MyVotes() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold">My Votes</h1>
-        <p className="text-muted-foreground mt-1">{subtitle}</p>
-      </div>
+      <PageHeader title="My votes" subtitle={subtitle} />
 
       {voting.error && (
         // Announced by the control that caused it; shown here too so it is not missed.
-        <p className="rounded-xl bg-destructive/10 p-4 text-destructive">
+        <p role="alert" className="rounded-lg border border-destructive/20 bg-destructive/10 p-3 text-sm text-destructive">
           {voting.error}
         </p>
       )}
@@ -86,31 +95,19 @@ function MyVotes() {
       ) : (
         <>
           <Card>
-            <CardContent className="p-6">
-              <dl className="grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
-                <div className="flex flex-col-reverse">
-                  <dt className="text-sm text-muted-foreground">Sessions supported</dt>
-                  <dd className="text-3xl font-bold text-primary">{votedIds.length}</dd>
-                </div>
-                <div className="flex flex-col-reverse">
-                  <dt className="text-sm text-muted-foreground">{mechanism === 'approval' ? 'Approvals' : 'Votes'}</dt>
-                  <dd className="text-3xl font-bold">{totalVotes}</dd>
-                </div>
-                <div className="flex flex-col-reverse">
-                  <dt className="text-sm text-muted-foreground">Credits used</dt>
-                  <dd className="text-3xl font-bold">{spent}</dd>
-                </div>
-                <div className="flex flex-col-reverse">
-                  <dt className="text-sm text-muted-foreground">Credits remaining</dt>
-                  <dd className="text-3xl font-bold text-primary">{status === 'none' ? '—' : `${remaining}/${budget}`}</dd>
-                </div>
+            <CardContent className="p-4 pt-4 sm:p-6 sm:pt-6">
+              <dl className="grid grid-cols-2 gap-4 text-center md:grid-cols-4">
+                <Stat label="Sessions supported" value={votedIds.length} highlight />
+                <Stat label={mechanism === 'approval' ? 'Approvals' : 'Votes'} value={totalVotes} />
+                <Stat label="Credits used" value={spent} />
+                <Stat label={`Credits remaining${status === 'none' ? '' : ` of ${budget}`}`} value={status === 'none' ? '—' : remaining} highlight />
               </dl>
               {mechanism === 'quadratic' && (
-                <p className="mt-4 text-xs text-muted-foreground text-center">
+                <p className="mt-4 text-center text-xs text-muted-foreground">
                   Quadratic voting: n votes on one session cost n² credits, so spreading support is cheaper than piling it on.
                 </p>
               )}
-              <p className="mt-2 text-xs text-muted-foreground text-center">
+              <p className="mt-2 text-center text-xs text-muted-foreground">
                 Only you can see this. Organizers see no counts while voting is open, and when it closes your ballot is sealed.
               </p>
             </CardContent>
@@ -119,9 +116,9 @@ function MyVotes() {
           {votedIds.length === 0 ? (
             <Card>
               <CardContent className="py-12 text-center">
-                <ClipboardList className="h-12 w-12 mx-auto mb-4 text-muted-foreground" aria-hidden />
-                <h2 className="text-lg font-semibold mb-2">No votes yet</h2>
-                <p className="text-muted-foreground mb-4">
+                <ClipboardList className="mx-auto mb-4 h-12 w-12 text-muted-foreground" aria-hidden />
+                <h2 className="mb-2 text-lg font-semibold">No votes yet</h2>
+                <p className="mb-4 text-muted-foreground">
                   {voting.canVote ? 'Browse sessions and support the ones you want to happen.' : 'You can still explore the sessions taking shape.'}
                 </p>
                 <Button asChild>
@@ -138,25 +135,19 @@ function MyVotes() {
                   .sort((a, b) => (a.session?.title ?? '').localeCompare(b.session?.title ?? ''))
                   .map(({ id, votes, session }) => (
                     <li key={id}>
-                      <Card className="hover:border-primary/50 transition-all">
-                        <CardContent className="p-4">
+                      <Card className="transition-all hover:border-primary/50">
+                        <CardContent className="p-4 pt-4">
                           <div className="flex flex-wrap items-center justify-between gap-4">
-                            <Link href={`/e/${event.slug}/sessions/${id}`} className="flex-1 min-w-0">
-                              <div className="flex items-center gap-2 mb-1">
-                                {session?.format && (
-                                  <Badge variant="secondary" className="capitalize text-xs">
-                                    {session.format}
-                                  </Badge>
-                                )}
-                                {session?.track && (
-                                  <span className="text-xs text-muted-foreground truncate">{session.track.name}</span>
-                                )}
+                            <Link href={`/e/${event.slug}/sessions/${id}`} className="min-w-0 flex-1 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                              <div className="mb-1 flex items-center gap-2">
+                                {session?.format && <Badge variant="secondary">{formatLabel(session.format)}</Badge>}
+                                {session?.track && <span className="truncate text-xs text-muted-foreground">{session.track.name}</span>}
                               </div>
-                              <h3 className="font-medium truncate hover:text-primary transition-colors">
+                              <h3 className="truncate font-medium transition-colors hover:text-primary">
                                 {session?.title ?? 'Session'}
                               </h3>
                               <p className="text-xs text-muted-foreground">
-                                {votes} {votes === 1 ? 'vote' : 'votes'} · {voteCost(votes, mechanism ?? 'quadratic')} credits
+                                {plural(votes, 'vote')} · {plural(voteCost(votes, mechanism ?? 'quadratic'), 'credit')}
                               </p>
                             </Link>
                             <VoteControl eventSlug={event.slug} sessionId={id} sessionTitle={session?.title} />
@@ -205,8 +196,8 @@ function ClosedRound({ round, eventSlug }: { round: VotingRound; eventSlug: stri
   return (
     <>
       <Card>
-        <CardContent className="p-6 flex gap-4 items-start">
-          <Lock className="h-6 w-6 text-primary flex-shrink-0 mt-0.5" aria-hidden />
+        <CardContent className="flex items-start gap-4 p-4 pt-4 sm:p-6 sm:pt-6">
+          <Lock className="mt-0.5 h-6 w-6 shrink-0 text-primary" aria-hidden />
           <div className="space-y-2">
             <h2 className="font-semibold">Your ballot is sealed</h2>
             <p className="text-sm text-muted-foreground">
@@ -222,22 +213,30 @@ function ClosedRound({ round, eventSlug }: { round: VotingRound; eventSlug: stri
         <CardHeader className="pb-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <CardTitle className="text-lg">Public tally</CardTitle>
-            <a href={tallyUrl} className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground underline underline-offset-2">
-              Public tally data <ExternalLink className="h-3.5 w-3.5" aria-hidden />
-            </a>
+            <Button asChild variant="outline" size="sm">
+              <a href={tallyUrl} download={`tally-${round.id}.json`}>
+                <Download className="mr-1.5 h-3.5 w-3.5" aria-hidden />
+                Download tally (JSON)
+              </a>
+            </Button>
           </div>
         </CardHeader>
-        <CardContent className="pt-0 space-y-3">
+        <CardContent className="space-y-3 pt-0">
           {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
           {!tally && !error && <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" aria-label="Loading tally" />}
           {tally && (
             <>
               <p className="text-sm text-muted-foreground">
-                {tally.ballotsCast} {tally.ballotsCast === 1 ? 'person' : 'people'} voted. Sessions supported by fewer than {tally.k}{' '}
-                people show no numbers, so a single person&apos;s choice is never published. Listed alphabetically — the tally is not a ranking.
+                {plural(tally.ballotsCast, 'person', 'people')} voted. Sessions supported by fewer than {tally.k}{' '}
+                people show no numbers, so a single person’s choice is never published. Listed alphabetically — the tally is not a ranking.
               </p>
               {rows.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No sessions were open for voting.</p>
+                <div className="space-y-3">
+                  <p className="text-sm text-muted-foreground">No sessions were open for voting.</p>
+                  <Button asChild variant="outline" size="sm">
+                    <Link href={`/e/${eventSlug}/sessions`}>Browse sessions</Link>
+                  </Button>
+                </div>
               ) : (
                 <ul className="divide-y divide-border">
                   {rows.map((entry) => (
@@ -245,10 +244,10 @@ function ClosedRound({ round, eventSlug }: { round: VotingRound; eventSlug: stri
                       <Link href={`/e/${eventSlug}/sessions/${entry.sessionId}`} className="min-w-0 truncate hover:text-primary">
                         {tally.sessions[entry.sessionId].title}
                       </Link>
-                      <span className="text-sm tabular-nums text-muted-foreground flex-shrink-0">
+                      <span className="shrink-0 text-sm tabular-nums text-muted-foreground">
                         {entry.suppressed
                           ? `fewer than ${tally.k} voters`
-                          : `${entry.votes} votes · ${entry.voters} voters`}
+                          : `${plural(entry.votes, 'vote')} · ${plural(entry.voters, 'voter')}`}
                       </span>
                     </li>
                   ))}

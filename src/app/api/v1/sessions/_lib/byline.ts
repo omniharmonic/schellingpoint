@@ -5,6 +5,27 @@
  */
 import type { SessionView } from './read'
 
+export interface HostBylineParts {
+  /** The line as `hostByline` renders it. */
+  name: string
+  /** The host's `@handle` (without the `@`), when there is a linked host with one. */
+  handle: string | null
+  /** Accepted co-hosts' handles, in order, `null` where a co-host has none. */
+  cohost_handles: (string | null)[]
+}
+
+/**
+ * The byline plus the handles the UI shows under it (release design §5.3). `hostByline` stays a
+ * string for the existing card and metadata callers.
+ */
+export function hostBylineParts(session: Pick<SessionView, 'host' | 'cohosts' | 'listed_as'>): HostBylineParts {
+  return {
+    name: hostByline(session),
+    handle: session.host?.handle ?? null,
+    cohost_handles: session.cohosts.map((c) => c.handle ?? null),
+  }
+}
+
 export function hostByline(session: Pick<SessionView, 'host' | 'cohosts' | 'listed_as'>): string {
   const cohostNames = session.cohosts
     .map((c) => c.display_name || (c.handle ? `@${c.handle}` : null))

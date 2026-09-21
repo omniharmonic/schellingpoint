@@ -42,6 +42,11 @@ const config: Config = {
           DEFAULT: 'hsl(var(--success))',
           foreground: 'hsl(var(--success-foreground))',
         },
+        // Saved / favourite heart (spec §2.3): one token instead of red-500.
+        favorite: {
+          DEFAULT: 'hsl(var(--favorite))',
+          foreground: 'hsl(var(--favorite-foreground))',
+        },
         muted: {
           DEFAULT: 'hsl(var(--muted))',
           foreground: 'hsl(var(--muted-foreground))',

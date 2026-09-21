@@ -23,6 +23,8 @@ export interface MemberCard {
   bio: string | null
   building: string | null
   interests: string[] | null
+  /** "What I'm looking for" (release design §6); members-only like everything here. */
+  looking_for: string | null
   telegram: string | null
   /** Present only when verified and opted in (`show_ens`). */
   ens: string | null
@@ -37,7 +39,7 @@ export interface Participant extends MemberCard {
 export function memberCardColumns() {
   return sql`
     a.id, a.did, a.handle,
-    p.display_name, p.avatar_url, p.affiliation, p.bio, p.building, p.interests, p.telegram,
+    p.display_name, p.avatar_url, p.affiliation, p.bio, p.building, p.interests, p.looking_for, p.telegram,
     case when p.show_ens and p.ens_verified_at is not null then p.ens end as ens
   `
 }

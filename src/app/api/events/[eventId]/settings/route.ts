@@ -102,6 +102,23 @@ function optionalInstant(body: Body, key: string, timezone: string, label: strin
   return new Date(text).toISOString()
 }
 
+/** Up to 8 `{ label, url }` entries; null clears the list. Only http(s) URLs, since the footer renders them as hrefs. */
+function cleanSocialLinks(value: unknown): { label: string; url: string }[] | undefined {
+  if (value === null || value === undefined) return undefined
+  if (!Array.isArray(value) || value.length > 8) fail('List up to 8 links.', 'theme')
+  const cleaned: { label: string; url: string }[] = []
+  for (const entry of value as unknown[]) {
+    const item = isRecord(entry) ? entry : fail('Each link needs a label and a URL.', 'theme')
+    if (typeof item.label !== 'string' || typeof item.url !== 'string') fail('Each link needs a label and a URL.', 'theme')
+    const label = (item.label as string).trim(), url = (item.url as string).trim()
+    if (!label || label.length > 40) fail('Give each link a label of up to 40 characters.', 'theme')
+    if (!url || url.length > 300) fail('Keep each link under 300 characters.', 'theme')
+    try { if (!['http:', 'https:'].includes(new URL(url).protocol)) throw new Error() } catch { fail(`The link “${label}” must start with http:// or https://.`, 'theme') }
+    cleaned.push({ label, url })
+  }
+  return cleaned.length ? cleaned : undefined
+}
+
 function mergeTheme(existing: EventTheme | null, incoming: unknown): EventTheme {
   if (!isRecord(incoming)) fail('Theme must be an object.', 'theme')
   const patch = incoming as Record<string, unknown>
@@ -123,14 +140,19 @@ function mergeTheme(existing: EventTheme | null, incoming: unknown): EventTheme 
   }
   if ('social' in patch) {
     if (!isRecord(patch.social)) fail('Social links must be an object.', 'theme')
-    const social: Record<string, string> = { ...(base.social as Record<string, string> | undefined) }
+    const { links: existingLinks, ...baseSocial } = (base.social ?? {}) as NonNullable<EventTheme['social']>
+    const social: Record<string, string> = { ...(baseSocial as Record<string, string>) }
     for (const [network, link] of Object.entries(patch.social as Record<string, unknown>)) {
       if (!['twitter', 'telegram', 'discord', 'website'].includes(network)) continue
       if (link === null || link === '' || link === undefined) { delete social[network]; continue }
       if (typeof link !== 'string' || (link as string).length > 300) fail(`Keep the ${network} link under 300 characters.`, 'theme')
       social[network] = (link as string).trim()
     }
-    next.social = social
+    // `links`: the organizer-labelled list (UI label is generic; storage keeps the four legacy keys too).
+    let links = existingLinks
+    const socialPatch = patch.social as Record<string, unknown>
+    if ('links' in socialPatch) links = cleanSocialLinks(socialPatch.links)
+    next.social = (links?.length ? { ...social, links } : social) as EventTheme['social']
   }
   return next
 }

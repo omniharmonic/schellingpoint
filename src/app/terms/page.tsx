@@ -1,45 +1,31 @@
 'use client'
 
-import Link from 'next/link'
-import { ArrowLeft } from 'lucide-react'
-import { Button } from '@/components/ui/button'
+import { SiteHeader } from '@/components/SiteHeader'
 import { Footer } from '@/components/Footer'
 
 const contactEmail = process.env.NEXT_PUBLIC_CONTACT_EMAIL?.trim() || null
 
 export default function TermsPage() {
   return (
-    <div className="min-h-screen bg-background">
-      {/* Header */}
-      <header className="border-b sticky top-0 bg-background/95 backdrop-blur z-10">
-        <div className="container mx-auto px-4">
-          <div className="flex items-center h-14">
-            <Button variant="ghost" size="sm" asChild>
-              <Link href="/">
-                <ArrowLeft className="h-4 w-4 mr-2" />
-                Back
-              </Link>
-            </Button>
-          </div>
-        </div>
-      </header>
+    <div className="min-h-screen bg-background flex flex-col">
+      <SiteHeader />
 
       {/* Content */}
-      <main className="container mx-auto px-4 py-12 max-w-3xl">
-        <h1 className="text-3xl font-bold mb-2">Terms of Service</h1>
+      <main className="container mx-auto px-5 py-12 max-w-3xl flex-1">
+        <h1 className="page-title mb-2">Terms of service</h1>
         <p className="text-muted-foreground mb-8">Last updated: February 2026</p>
 
         <div className="prose prose-invert prose-sm max-w-none space-y-6">
           <section>
-            <h2 className="text-xl font-semibold mb-3">Acceptance of Terms</h2>
+            <h2 className="text-xl font-semibold mb-3">Acceptance of terms</h2>
             <p className="text-muted-foreground leading-relaxed">
-              By accessing and using unconference ("the Service"), you agree to be bound by these Terms of Service.
+              By accessing and using unconference (“the Service”), you agree to be bound by these terms of service.
               If you do not agree to these terms, please do not use the Service.
             </p>
           </section>
 
           <section>
-            <h2 className="text-xl font-semibold mb-3">Description of Service</h2>
+            <h2 className="text-xl font-semibold mb-3">Description of service</h2>
             <p className="text-muted-foreground leading-relaxed">
               unconference is a session coordination platform for unconferences, hackathons, and community events, enabling participants to propose
               sessions, vote using quadratic voting, and help shape event schedules. The Service enables communities
@@ -48,7 +34,7 @@ export default function TermsPage() {
           </section>
 
           <section>
-            <h2 className="text-xl font-semibold mb-3">User Accounts</h2>
+            <h2 className="text-xl font-semibold mb-3">User accounts</h2>
             <ul className="list-disc list-inside text-muted-foreground space-y-2">
               <li>You must provide accurate information when creating an account</li>
               <li>You are responsible for maintaining the security of your account</li>
@@ -58,7 +44,7 @@ export default function TermsPage() {
           </section>
 
           <section>
-            <h2 className="text-xl font-semibold mb-3">Acceptable Use</h2>
+            <h2 className="text-xl font-semibold mb-3">Acceptable use</h2>
             <p className="text-muted-foreground leading-relaxed mb-3">
               When using the Service, you agree to:
             </p>
@@ -83,7 +69,7 @@ export default function TermsPage() {
           </section>
 
           <section>
-            <h2 className="text-xl font-semibold mb-3">Content Ownership</h2>
+            <h2 className="text-xl font-semibold mb-3">Content ownership</h2>
             <p className="text-muted-foreground leading-relaxed">
               You own what you write. Session proposals, co-host confirmations and endorsements are published as records
               in your own AT Protocol repository, where they remain yours to edit or delete. By publishing them you let
@@ -104,14 +90,14 @@ export default function TermsPage() {
           <section>
             <h2 className="text-xl font-semibold mb-3">Disclaimer</h2>
             <p className="text-muted-foreground leading-relaxed">
-              The Service is provided "as is" without warranties of any kind. We do not guarantee that sessions will
+              The Service is provided “as is” without warranties of any kind. We do not guarantee that sessions will
               be scheduled or that the platform will be available without interruption. Participation in
               event sessions is at your own risk.
             </p>
           </section>
 
           <section>
-            <h2 className="text-xl font-semibold mb-3">Limitation of Liability</h2>
+            <h2 className="text-xl font-semibold mb-3">Limitation of liability</h2>
             <p className="text-muted-foreground leading-relaxed">
               To the maximum extent permitted by law, unconference and event organizers shall not be liable for any indirect,
               incidental, special, or consequential damages arising from your use of the Service.
@@ -119,9 +105,9 @@ export default function TermsPage() {
           </section>
 
           <section>
-            <h2 className="text-xl font-semibold mb-3">Changes to Terms</h2>
+            <h2 className="text-xl font-semibold mb-3">Changes to terms</h2>
             <p className="text-muted-foreground leading-relaxed">
-              We may update these Terms of Service from time to time. Continued use of the Service after changes
+              We may update these terms from time to time. Continued use of the Service after changes
               constitutes acceptance of the new terms.
             </p>
           </section>

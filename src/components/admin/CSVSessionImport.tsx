@@ -1,7 +1,7 @@
 'use client'
 
 import * as React from 'react'
-import { Upload, FileText, AlertCircle, CheckCircle, Download, Loader2 } from 'lucide-react'
+import { Upload, AlertCircle, CheckCircle, Download, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
@@ -236,7 +236,7 @@ export function CSVSessionImport({ eventSlug, tracks, allowedFormats = DEFAULT_F
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Bulk Import Sessions</CardTitle>
+        <CardTitle>Import sessions from a CSV</CardTitle>
         <CardDescription>
           Upload a CSV file to create multiple sessions at once.
         </CardDescription>
@@ -354,7 +354,7 @@ export function CSVSessionImport({ eventSlug, tracks, allowedFormats = DEFAULT_F
                     {row.errors.length > 0 ? (
                       <AlertCircle className="h-4 w-4 text-destructive flex-shrink-0" />
                     ) : (
-                      <CheckCircle className="h-4 w-4 text-green-500 flex-shrink-0" />
+                      <CheckCircle className="h-4 w-4 text-success flex-shrink-0" />
                     )}
                   </div>
                   {row.errors.length > 0 && (
@@ -402,7 +402,7 @@ export function CSVSessionImport({ eventSlug, tracks, allowedFormats = DEFAULT_F
                 >
                   <div className="flex items-center gap-2 min-w-0">
                     {result.success ? (
-                      <CheckCircle className="h-4 w-4 text-green-500 flex-shrink-0" />
+                      <CheckCircle className="h-4 w-4 text-success flex-shrink-0" />
                     ) : (
                       <AlertCircle className="h-4 w-4 text-destructive flex-shrink-0" />
                     )}

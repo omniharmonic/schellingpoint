@@ -51,6 +51,35 @@ function instantInEventZone(value: string | null, timezone: string): string | nu
   return new Date(value).toISOString()
 }
 
+const SOCIAL_LINKS_MAX = 8
+const SOCIAL_LABEL_MAX = 40
+const SOCIAL_URL_MAX = 300
+
+function socialLink(value: unknown): string | undefined {
+  const link = typeof value === 'string' ? value.trim() : ''
+  return link ? link.slice(0, SOCIAL_URL_MAX) : undefined
+}
+
+function isHttpUrl(value: string): boolean {
+  try { return ['http:', 'https:'].includes(new URL(value).protocol) } catch { return false }
+}
+
+/** `theme.social.links`: at most 8 `{label, url}` entries, both trimmed and bounded; anything else is dropped. */
+function socialLinks(value: unknown): { label: string; url: string }[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const links: { label: string; url: string }[] = []
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object') continue
+    const { label, url } = entry as { label?: unknown; url?: unknown }
+    const cleanUrl = socialLink(url)
+    if (!cleanUrl || !isHttpUrl(cleanUrl)) continue
+    const cleanLabel = (typeof label === 'string' ? label.trim() : '').slice(0, SOCIAL_LABEL_MAX) || 'Link'
+    links.push({ label: cleanLabel, url: cleanUrl })
+    if (links.length >= SOCIAL_LINKS_MAX) break
+  }
+  return links.length ? links : undefined
+}
+
 function eventInsert(state: WizardState, accountId: string): Json {
   const tz = state.dates.timezone
   const theme: EventTheme = {
@@ -61,10 +90,12 @@ function eventInsert(state: WizardState, accountId: string): Json {
     },
     mode: state.branding.theme.mode,
     social: {
-      twitter: state.branding.social.twitter || undefined,
-      telegram: state.branding.social.telegram || undefined,
-      discord: state.branding.social.discord || undefined,
-      website: state.branding.social.website || undefined,
+      twitter: socialLink(state.branding.social.twitter),
+      telegram: socialLink(state.branding.social.telegram),
+      discord: socialLink(state.branding.social.discord),
+      website: socialLink(state.branding.social.website),
+      // The UI edits one list; labels that are not one of the four legacy networks land here.
+      links: socialLinks(state.branding.social.links),
     },
   }
   return {

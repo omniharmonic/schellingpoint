@@ -1,6 +1,4 @@
-import Link from 'next/link'
-import { ArrowLeft } from 'lucide-react'
-import { Button } from '@/components/ui/button'
+import { SiteHeader } from '@/components/SiteHeader'
 import { Footer } from '@/components/Footer'
 
 export const metadata = { title: 'Privacy' }
@@ -27,22 +25,11 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 
 export default function PrivacyPage() {
   return (
-    <div className="min-h-screen bg-background">
-      <header className="border-b sticky top-0 bg-background/95 backdrop-blur z-10">
-        <div className="container mx-auto px-4">
-          <div className="flex items-center h-14">
-            <Button variant="ghost" size="sm" asChild>
-              <Link href="/">
-                <ArrowLeft className="h-4 w-4 mr-2" />
-                Back
-              </Link>
-            </Button>
-          </div>
-        </div>
-      </header>
+    <div className="min-h-screen bg-background flex flex-col">
+      <SiteHeader />
 
-      <main className="container mx-auto px-4 py-12 max-w-3xl">
-        <h1 className="text-3xl font-bold mb-2">Privacy</h1>
+      <main className="container mx-auto px-5 py-12 max-w-3xl flex-1">
+        <h1 className="page-title mb-2">Privacy</h1>
         <p className="text-muted-foreground mb-8">Last updated: September 2026</p>
 
         <div className="max-w-none space-y-8 text-sm">
@@ -64,13 +51,15 @@ export default function PrivacyPage() {
             </p>
             <p>
               We hold the password for that identity on your behalf, encrypted, so you never have to manage one. You
-              can take full ownership at any time from Settings: we rotate the password, show it to you once, and stop
+              can take full ownership at any time from Account → Identity: we rotate the password, show it to you once, and stop
               holding it. You can export your whole repository whenever you like.
             </p>
             <p>
               If you sign in with an existing AT Protocol account (for example Bluesky), the public records you create
               here are written into that account&apos;s repository and are permanently associated with it. We ask you to
-              confirm this before your first public action.
+              confirm this before your first public action. Signing in this way also imports your public profile (display
+              name, photo and bio) from the network into your profile here; you can edit those fields, and re-sync them
+              from the network at any time from Account → Identity.
             </p>
             <p>Your email address is never published and is used only to sign you in and send the notifications you choose.</p>
           </Section>
@@ -103,7 +92,7 @@ export default function PrivacyPage() {
               <li><strong className="text-foreground">Membership and the roster,</strong> visible only to fellow members of the same gathering. You can hide yourself from the directory.</li>
               <li><strong className="text-foreground">Tickets, payments and check-ins.</strong> Card payments are handled by Stripe; we never see card numbers.</li>
               <li><strong className="text-foreground">Exact locations</strong> for self-hosted sessions, meeting links and chat groups, shown only to confirmed attendees, hosts and organizers.</li>
-              <li><strong className="text-foreground">Your profile details</strong> beyond your handle, display name and picture (bio, affiliation, interests), shown to members of gatherings you share. Telegram is shown only to fellow members. An ENS name is shown only if you verified it and chose to show it.</li>
+              <li><strong className="text-foreground">Your profile details</strong> beyond your handle, display name and picture (bio, affiliation, interests, what you are looking for), shown to members of gatherings you share. Your messaging handle (Telegram, Signal, Matrix or similar) is shown only to fellow members. An ENS name is shown only if you verified it and chose to show it.</li>
               <li><strong className="text-foreground">Notifications</strong> and your notification preferences.</li>
             </ul>
           </Section>
@@ -133,7 +122,7 @@ export default function PrivacyPage() {
           <Section title="Your choices">
             <p>
               You can edit your profile, change notification preferences, hide yourself from directories, delete records
-              you published, and take ownership of your identity from Settings. To delete your account and the private
+              you published, and take ownership of your identity from Account. To delete your account and the private
               data we hold about you, contact <Contact />. Deleting your account does not remove copies of public records
               held elsewhere on the network.
             </p>

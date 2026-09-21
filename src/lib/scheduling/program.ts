@@ -183,6 +183,8 @@ export interface AdminVenue {
   is_private_residence: boolean
   notes: string | null
   is_primary: boolean
+  /** Formats this room may host; empty = all. */
+  allowed_formats: string[]
   network_published: boolean
   slot_count: number
   scheduled_count: number
@@ -194,7 +196,8 @@ export async function selectVenues(db: Sql, eventId: string, venueId?: string): 
   return db<AdminVenue[]>`
     select v.id, v.name, v.slug, v.capacity, coalesce(v.features, '{}') as features, v.style, v.address,
            v.locality, v.region, v.postal_code, v.country, v.is_private_residence, v.notes,
-           coalesce(v.is_primary, false) as is_primary, v.at_uri is not null as network_published,
+           coalesce(v.is_primary, false) as is_primary, coalesce(v.allowed_formats, '{}') as allowed_formats,
+           v.at_uri is not null as network_published,
            (select count(*)::int from time_slots t where t.venue_id = v.id and t.event_id = v.event_id) as slot_count,
            (select count(*)::int from sessions s
               where s.event_id = v.event_id and s.venue_id = v.id and s.status = 'scheduled') as scheduled_count

@@ -9,10 +9,10 @@ interface InvitePageProps {
 export async function generateMetadata({ params }: InvitePageProps): Promise<Metadata> {
   const { token } = await params
   const invite = await previewInvite(token)
-  if (!invite) return { title: 'Invite Not Found' }
+  if (!invite) return { title: 'Invitation not available' }
   return {
-    title: `Co-host invite: ${invite.session.title}`,
-    description: `You've been invited to co-host "${invite.session.title}" at ${invite.event_name}`,
+    title: `Co-host invitation: ${invite.session.title}`,
+    description: `You’ve been invited to co-host “${invite.session.title}” at ${invite.event_name}`,
     robots: { index: false, follow: false },
   }
 }

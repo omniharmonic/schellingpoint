@@ -29,6 +29,8 @@ const NSID_MEMBERSHIP = 'coop.lexicon.membership'
 
 export type GatheringAction =
   | 'publish-gathering'
+  /** The gathering account's own `app.bsky.actor.profile` at `self` (name and tagline only). */
+  | 'publish-profile'
   | 'write-policy'
   | 'set-peers'
   | 'publish-venue'
@@ -74,6 +76,7 @@ const STEWARD_ROLES: ReadonlySet<MemberRole> = new Set<MemberRole>(['owner', 'ad
 /** What each action needs. `steward` = owner/admin of this gathering; `host` = derived role ≥ 20. */
 const MIN_ROLE: Record<GatheringAction, 'steward' | 'host' | 'any'> = {
   'publish-gathering': 'steward',
+  'publish-profile': 'steward',
   'write-policy': 'steward',
   'publish-policy': 'steward',
   'set-peers': 'steward',

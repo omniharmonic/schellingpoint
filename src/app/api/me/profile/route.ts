@@ -15,6 +15,9 @@ import { validateProfilePatch } from './validate'
  * `ens` set here is unverified until POST /api/me/ens/verify; changing it clears a previous
  * verification (trigger `profiles_clear_ens_verification`). Unverified names are never shown
  * to anyone else.
+ *
+ * A display name, avatar or bio CHANGED here becomes local: it leaves `synced_fields`, so the
+ * sign-in refresh from the network no longer overwrites it (until a re-sync is asked for).
  */
 export const dynamic = 'force-dynamic'
 
@@ -33,20 +36,25 @@ export interface OwnProfile {
   building: string | null
   telegram: string | null
   interests: string[] | null
+  /** "What I'm looking for" (release design §6), members-only. */
+  looking_for: string | null
   ens: string | null
   ens_verified_at: string | null
   show_ens: boolean
   onboarding_completed: boolean
   publish_proposals: boolean
+  /** Which of display_name / avatar_url / bio still mirror the network profile (release design §5). */
+  synced_fields: string[]
+  profile_synced_at: string | null
 }
 
 async function loadOwnProfile(viewer: Viewer): Promise<OwnProfile | null> {
   const rows = await sql<OwnProfile[]>`
     select p.id, a.did, a.handle, a.email,
-           p.display_name, p.bio, p.avatar_url, p.affiliation, p.building, p.telegram, p.interests,
+           p.display_name, p.bio, p.avatar_url, p.affiliation, p.building, p.telegram, p.interests, p.looking_for,
            p.ens, p.ens_verified_at, p.show_ens,
            coalesce(p.onboarding_completed, false) as onboarding_completed,
-           p.publish_proposals
+           p.publish_proposals, p.synced_fields, p.profile_synced_at
     from accounts a join profiles p on p.id = a.id
     where a.id = ${viewer.accountId}
   `
@@ -116,10 +124,15 @@ export async function PATCH(request: Request) {
         telegram = case when ${has('telegram')} then ${patch.telegram ?? null}::text else telegram end,
         avatar_url = case when ${has('avatar_url')} then ${patch.avatar_url ?? null}::text else avatar_url end,
         interests = case when ${has('interests')} then ${patch.interests ?? null}::text[] else interests end,
+        looking_for = case when ${has('looking_for')} then ${patch.looking_for ?? null}::text else looking_for end,
         ens = case when ${has('ens')} then ${patch.ens ?? null}::text else ens end,
         show_ens = case when ${has('show_ens')} then ${patch.show_ens ?? false}::boolean else show_ens end,
         onboarding_completed = case when ${has('onboarding_completed')}
-          then ${patch.onboarding_completed ?? false}::boolean else onboarding_completed end
+          then ${patch.onboarding_completed ?? false}::boolean else onboarding_completed end,
+        synced_fields = array_remove(array_remove(array_remove(synced_fields,
+          case when ${has('display_name')} and display_name is distinct from ${patch.display_name ?? null}::text then 'display_name'::text end),
+          case when ${has('avatar_url')} and avatar_url is distinct from ${patch.avatar_url ?? null}::text then 'avatar_url'::text end),
+          case when ${has('bio')} and bio is distinct from ${patch.bio ?? null}::text then 'bio'::text end)
       where id = ${viewer.accountId}
     `
   } catch (e) {

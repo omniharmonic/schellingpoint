@@ -227,7 +227,7 @@ async function mintLocked(t: Tx, email: string): Promise<{ accountId: string; di
   }
   const accountId = inserted[0].id
   await t`
-    update profiles set did = ${account.did}, atproto_handle = ${account.handle},
+    update profiles set did = ${account.did},
       atproto_linked_at = coalesce(atproto_linked_at, now())
     where id = ${accountId}
   `

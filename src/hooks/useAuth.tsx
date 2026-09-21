@@ -33,6 +33,8 @@ export interface Profile {
   telegram: string | null
   ens: string | null
   interests: string[] | null
+  /** "What I'm looking for" (release design §6). Optional: older /api/auth/me responses omit it. */
+  looking_for?: string | null
   onboarding_completed: boolean
   did?: string | null
   atproto_handle?: string | null
@@ -139,4 +141,27 @@ export function useAuth() {
     throw new Error('useAuth must be used within AuthProvider')
   }
   return context
+}
+
+/**
+ * The one fallback chain for a person's name (release design §5.3):
+ * display name → @handle → "Member". Never the email.
+ */
+export function viewerDisplayName(
+  profile: Pick<Profile, 'display_name'> | null | undefined,
+  user: Pick<AuthUser, 'handle'> | null | undefined,
+): string {
+  const name = profile?.display_name?.trim()
+  if (name) return name
+  if (user?.handle) return `@${user.handle}`
+  return 'Member'
+}
+
+/** Avatar fallback: the first letter of the display name, else of the handle, else "M" (Member). */
+export function viewerInitial(
+  profile: Pick<Profile, 'display_name'> | null | undefined,
+  user: Pick<AuthUser, 'handle'> | null | undefined,
+): string {
+  const source = profile?.display_name?.trim() || user?.handle || 'Member'
+  return source.replace(/^@/, '').charAt(0).toUpperCase() || 'M'
 }

@@ -27,6 +27,8 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { Alert, AlertDescription } from '@/components/ui/alert'
+import { ConfirmInline } from '@/components/ui/confirm-inline'
+import { PageHeader } from '@/components/PageHeader'
 
 import { useEvent, useEventRole } from '@/contexts/EventContext'
 import { cn } from '@/lib/utils'
@@ -155,6 +157,8 @@ function AdminTicketsPageInner() {
   const [isConnecting, setIsConnecting] = React.useState(false)
   const [isOpeningDashboard, setIsOpeningDashboard] = React.useState(false)
   const [isDisconnecting, setIsDisconnecting] = React.useState(false)
+  const [confirmDisconnect, setConfirmDisconnect] = React.useState(false)
+  const [confirmDeleteTierId, setConfirmDeleteTierId] = React.useState<string | null>(null)
   const [connectError, setConnectError] = React.useState<string | null>(null)
   const [connectBanner, setConnectBanner] = React.useState<'return' | 'refresh' | null>(null)
 
@@ -224,13 +228,6 @@ function AdminTicketsPageInner() {
   }
 
   const handleDisconnect = async () => {
-    if (
-      !confirm(
-        'Disconnect this Stripe account? Paid ticket sales will stop until another account is connected. The Stripe account itself is not deleted.',
-      )
-    ) {
-      return
-    }
     setIsDisconnecting(true)
     setConnectError(null)
     try {
@@ -245,6 +242,7 @@ function AdminTicketsPageInner() {
       setConnectError(err instanceof Error ? err.message : 'Failed to disconnect Stripe')
     } finally {
       setIsDisconnecting(false)
+      setConfirmDisconnect(false)
     }
   }
 
@@ -384,13 +382,14 @@ function AdminTicketsPageInner() {
   }
 
   const handleDelete = async (tierId: string) => {
-    if (!confirm('Are you sure you want to delete this ticket tier?')) return
     setTierError(null)
     try {
       await apiFetch(`${apiBase}/ticketing-settings/tiers/${tierId}`, { method: 'DELETE' })
       setTiers(prev => prev.filter(t => t.id !== tierId))
     } catch (err) {
-      setTierError(err instanceof Error ? err.message : 'Failed to delete tier')
+      setTierError(err instanceof Error ? err.message : 'The ticket type could not be deleted.')
+    } finally {
+      setConfirmDeleteTierId(null)
     }
   }
 
@@ -415,19 +414,16 @@ function AdminTicketsPageInner() {
 
   return (
         <div className="space-y-6">
-          {/* Header */}
-          <div className="page-heading">
-            <div>
-              <h1 className="text-2xl font-display font-bold">Tickets</h1>
-              <p className="text-muted-foreground mt-1">
-                Set admission, ticket options and your contribution.
-              </p>
-            </div>
-            <Button onClick={openCreateForm}>
-              <Plus className="h-4 w-4 mr-2" />
-              Add ticket type
-            </Button>
-          </div>
+          <PageHeader
+            title="Tickets"
+            subtitle="Set admission, ticket types and your contribution."
+            actions={(
+              <Button onClick={openCreateForm} disabled={isCreating}>
+                <Plus className="h-4 w-4 mr-2" aria-hidden="true" />
+                Add ticket type
+              </Button>
+            )}
+          />
 
           {/* Ticketing Settings */}
           {settings && (
@@ -544,11 +540,11 @@ function AdminTicketsPageInner() {
                   <div
                     className={cn(
                       'p-2 rounded-lg mt-0.5',
-                      connect?.chargesEnabled ? 'bg-green-500/10' : 'bg-primary/10',
+                      connect?.chargesEnabled ? 'bg-success/10' : 'bg-primary/10',
                     )}
                   >
                     {connect?.chargesEnabled ? (
-                      <CheckCircle2 className="h-5 w-5 text-green-600" />
+                      <CheckCircle2 className="h-5 w-5 text-success" aria-hidden="true" />
                     ) : (
                       <Link2 className="h-5 w-5 text-primary" />
                     )}
@@ -563,9 +559,9 @@ function AdminTicketsPageInner() {
                       ) : !connect?.connected ? (
                         <Badge variant="secondary">Not connected</Badge>
                       ) : connect.chargesEnabled ? (
-                        <Badge variant="outline" className="text-green-600">Ready</Badge>
+                        <Badge variant="success">Ready</Badge>
                       ) : (
-                        <Badge variant="outline" className="text-amber-600">Onboarding incomplete</Badge>
+                        <Badge variant="amber">Onboarding incomplete</Badge>
                       )}
                     </div>
                     <p className="text-sm text-muted-foreground mt-0.5">
@@ -592,10 +588,10 @@ function AdminTicketsPageInner() {
                         disabled={isOpeningDashboard}
                       >
                         {isOpeningDashboard ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
+                          <Loader2 className="h-4 w-4 animate-spin" aria-label="Opening" />
                         ) : (
                           <>
-                            <ExternalLink className="h-4 w-4 mr-2" />
+                            <ExternalLink className="h-4 w-4 mr-2" aria-hidden="true" />
                             Open Stripe dashboard
                           </>
                         )}
@@ -604,7 +600,7 @@ function AdminTicketsPageInner() {
                     {(!connect?.connected || !connect.chargesEnabled) && (
                       <Button size="sm" onClick={handleConnect} disabled={isConnecting || isLoadingConnect}>
                         {isConnecting ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
+                          <Loader2 className="h-4 w-4 animate-spin" aria-label="Connecting" />
                         ) : connect?.connected ? (
                           'Continue onboarding'
                         ) : (
@@ -618,23 +614,34 @@ function AdminTicketsPageInner() {
                         size="sm"
                         onClick={fetchConnectStatus}
                         disabled={isLoadingConnect}
+                        aria-label="Refresh Stripe status"
                         title="Refresh status"
                       >
-                        <RefreshCw className={cn('h-4 w-4', isLoadingConnect && 'animate-spin')} />
+                        <RefreshCw className={cn('h-4 w-4', isLoadingConnect && 'animate-spin')} aria-hidden="true" />
                       </Button>
                     )}
-                    {connect?.connected && isOwner && (
+                    {connect?.connected && isOwner && !confirmDisconnect && (
                       <Button
                         variant="ghost"
                         size="sm"
-                        onClick={handleDisconnect}
+                        onClick={() => setConfirmDisconnect(true)}
                         disabled={isDisconnecting}
                         className="text-destructive hover:text-destructive"
                       >
-                        {isDisconnecting ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Disconnect'}
+                        Disconnect
                       </Button>
                     )}
                   </div>
+                )}
+                {confirmDisconnect && (
+                  <ConfirmInline
+                    destructive
+                    message="Disconnect this Stripe account? Paid ticket sales stop until another account is connected. The Stripe account itself is not deleted."
+                    confirmLabel="Disconnect"
+                    loading={isDisconnecting}
+                    onConfirm={() => void handleDisconnect()}
+                    onCancel={() => setConfirmDisconnect(false)}
+                  />
                 )}
               </div>
 
@@ -647,7 +654,7 @@ function AdminTicketsPageInner() {
                   )}
                   <AlertDescription>
                     {isLoadingConnect
-                      ? 'Checking your Stripe account...'
+                      ? 'Checking your Stripe account…'
                       : connect?.chargesEnabled
                         ? 'Stripe onboarding complete. Your account can accept payments.'
                         : 'Welcome back from Stripe. Onboarding is not finished yet; see the outstanding requirements below.'}
@@ -722,7 +729,7 @@ function AdminTicketsPageInner() {
                     <p className="text-2xl font-bold">
                       {tiers.reduce((sum, t) => sum + t.quantity_sold, 0)}
                     </p>
-                    <p className="text-sm text-muted-foreground">Tickets Sold</p>
+                    <p className="text-sm text-muted-foreground">Tickets sold</p>
                   </div>
                 </div>
               </CardContent>
@@ -730,8 +737,8 @@ function AdminTicketsPageInner() {
             <Card>
               <CardContent className="pt-6">
                 <div className="flex items-center gap-3">
-                  <div className="p-2 rounded-lg bg-green-500/10">
-                    <DollarSign className="h-5 w-5 text-green-500" />
+                  <div className="p-2 rounded-lg bg-success/10">
+                    <DollarSign className="h-5 w-5 text-success" aria-hidden="true" />
                   </div>
                   <div>
                     <p className="text-2xl font-bold">
@@ -740,7 +747,7 @@ function AdminTicketsPageInner() {
                         tiers[0]?.currency || 'usd'
                       )}
                     </p>
-                    <p className="text-sm text-muted-foreground">Total Revenue</p>
+                    <p className="text-sm text-muted-foreground">Total revenue</p>
                   </div>
                 </div>
               </CardContent>
@@ -748,12 +755,12 @@ function AdminTicketsPageInner() {
             <Card>
               <CardContent className="pt-6">
                 <div className="flex items-center gap-3">
-                  <div className="p-2 rounded-lg bg-blue-500/10">
-                    <Users className="h-5 w-5 text-blue-500" />
+                  <div className="p-2 rounded-lg bg-primary/10">
+                    <Users className="h-5 w-5 text-primary" aria-hidden="true" />
                   </div>
                   <div>
                     <p className="text-2xl font-bold">{tiers.filter(t => t.is_active).length}</p>
-                    <p className="text-sm text-muted-foreground">Active Tiers</p>
+                    <p className="text-sm text-muted-foreground">Active ticket types</p>
                   </div>
                 </div>
               </CardContent>
@@ -771,13 +778,14 @@ function AdminTicketsPageInner() {
           {isCreating && (
             <Card>
               <CardHeader>
-                <CardTitle>{editingTier ? 'Edit Tier' : 'Create Tier'}</CardTitle>
+                <CardTitle>{editingTier ? 'Edit ticket type' : 'New ticket type'}</CardTitle>
               </CardHeader>
               <CardContent>
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="space-y-2">
-                    <label className="text-sm font-medium">Name *</label>
+                    <Label htmlFor="tier-name">Name</Label>
                     <Input
+                      id="tier-name"
                       value={formName}
                       onChange={(e) => setFormName(e.target.value)}
                       placeholder="e.g., Early Bird, General Admission"
@@ -863,9 +871,8 @@ function AdminTicketsPageInner() {
                   >
                     Cancel
                   </Button>
-                  <Button onClick={handleSave} disabled={isSaving || !formName.trim()}>
-                    {isSaving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-                    {editingTier ? 'Save Changes' : 'Create Tier'}
+                  <Button onClick={handleSave} loading={isSaving} disabled={!formName.trim()}>
+                    {editingTier ? 'Save changes' : 'Create ticket type'}
                   </Button>
                 </div>
               </CardContent>
@@ -910,7 +917,7 @@ function AdminTicketsPageInner() {
                             <Badge variant="secondary">Inactive</Badge>
                           )}
                           {tier.price_cents === 0 && (
-                            <Badge variant="outline" className="text-green-600">Free</Badge>
+                            <Badge variant="success">Free</Badge>
                           )}
                         </div>
                         {tier.description && (
@@ -932,36 +939,52 @@ function AdminTicketsPageInner() {
                           )}
                         </div>
                       </div>
-                      <div className="flex items-center gap-2">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => toggleActive(tier)}
-                          title={tier.is_active ? 'Deactivate' : 'Activate'}
-                        >
-                          {tier.is_active ? (
-                            <X className="h-4 w-4" />
-                          ) : (
-                            <Check className="h-4 w-4" />
-                          )}
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => openEditForm(tier)}
-                        >
-                          <Pencil className="h-4 w-4" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => handleDelete(tier.id)}
-                          className="text-destructive hover:text-destructive"
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </div>
+                      {confirmDeleteTierId !== tier.id && (
+                        <div className="flex items-center gap-1">
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            onClick={() => toggleActive(tier)}
+                            aria-label={tier.is_active ? `Deactivate ${tier.name}` : `Activate ${tier.name}`}
+                            title={tier.is_active ? 'Deactivate' : 'Activate'}
+                          >
+                            {tier.is_active ? (
+                              <X className="h-4 w-4" aria-hidden="true" />
+                            ) : (
+                              <Check className="h-4 w-4" aria-hidden="true" />
+                            )}
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            onClick={() => openEditForm(tier)}
+                            aria-label={`Edit ${tier.name}`}
+                          >
+                            <Pencil className="h-4 w-4" aria-hidden="true" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            onClick={() => setConfirmDeleteTierId(tier.id)}
+                            className="text-destructive hover:text-destructive"
+                            aria-label={`Delete ${tier.name}`}
+                          >
+                            <Trash2 className="h-4 w-4" aria-hidden="true" />
+                          </Button>
+                        </div>
+                      )}
                     </div>
+                    {confirmDeleteTierId === tier.id && (
+                      <ConfirmInline
+                        layout="inline"
+                        destructive
+                        className="mt-3"
+                        message={`Delete “${tier.name}”?${tier.quantity_sold > 0 ? ` ${tier.quantity_sold} people already hold this ticket.` : ''}`}
+                        confirmLabel="Delete"
+                        onConfirm={() => void handleDelete(tier.id)}
+                        onCancel={() => setConfirmDeleteTierId(null)}
+                      />
+                    )}
                   </CardContent>
                 </Card>
               ))}

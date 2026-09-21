@@ -27,6 +27,7 @@ import type {
   OccurrenceRecord,
   SeriesFreq,
   SeriesRecord,
+  ActorProfileRecord,
   TimePreferenceRecord,
   TimeWindow,
   WeekdayCode,
@@ -86,6 +87,26 @@ function toIso(value: string | Date): string {
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString()
 }
 
+/**
+ * At most `max` user-perceived characters (grapheme clusters) and, when given, at most `maxBytes`
+ * of UTF-8 (lexicon `maxGraphemes` / `maxLength`), never cutting a cluster in half.
+ */
+export function clampGraphemes(value: string, max: number, maxBytes?: number): string {
+  const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+  let out = ''
+  let bytes = 0
+  let n = 0
+  for (const { segment } of segmenter.segment(value)) {
+    if (n >= max) break
+    const size = Buffer.byteLength(segment, 'utf8')
+    if (maxBytes !== undefined && bytes + size > maxBytes) break
+    out += segment
+    bytes += size
+    n++
+  }
+  return out
+}
+
 const URL_RE = /^(https?:\/\/|meet\.|zoom\.us|www\.)/i
 export function looksLikeUrl(value?: string | null): boolean {
   const v = value?.trim()
@@ -129,6 +150,28 @@ export function buildGatheringRecord(input: GatheringInput): GatheringRecord {
     peers: list(input.peers),
     tags: list(normalizeTags(input.tags).map((t) => t.slice(0, 40))),
     createdAt: toIso(input.createdAt),
+  })
+}
+
+export interface GatheringProfileInput {
+  name: string
+  tagline?: string | null
+  description?: string | null
+  createdAt?: string | Date | null
+}
+
+/**
+ * The gathering account's `app.bsky.actor.profile` at `self`: the gathering's name and its
+ * tagline (else the first 256 graphemes of its description). Text only — no avatar or banner
+ * blob, no labels, no pinned post — and never a DID or a person's name (spec §5.4).
+ */
+export function buildGatheringProfileRecord(input: GatheringProfileInput): ActorProfileRecord {
+  const blurb = text(input.tagline) ?? text(input.description)
+  return compact({
+    $type: NSID.actorProfile,
+    displayName: clampGraphemes(input.name.trim(), 64, 640).trim() || undefined,
+    description: blurb ? clampGraphemes(blurb, 256, 2560).trim() || undefined : undefined,
+    createdAt: input.createdAt ? toIso(input.createdAt) : undefined,
   })
 }
 

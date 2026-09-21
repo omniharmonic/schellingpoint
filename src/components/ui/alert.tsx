@@ -1,3 +1,8 @@
+/**
+ * Alert variants: default | destructive | success | warning.
+ * `success` and `warning` are token-based (--success, --signal-amber); never use the raw palette.
+ */
+
 import * as React from "react"
 import { cva, type VariantProps } from "class-variance-authority"
 
@@ -11,6 +16,8 @@ const alertVariants = cva(
         default: "bg-background text-foreground",
         destructive:
           "border-destructive/50 text-destructive dark:border-destructive [&>svg]:text-destructive",
+        success: "border-success/30 bg-success/10 text-foreground [&>svg]:text-success",
+        warning: "border-signal-amber/30 bg-signal-amber/10 text-foreground [&>svg]:text-signal-amber",
       },
     },
     defaultVariants: {

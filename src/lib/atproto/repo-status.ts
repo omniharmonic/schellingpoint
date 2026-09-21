@@ -24,7 +24,7 @@ import 'server-only'
  * IDENTITY (relay `#identity` frames)
  *   Every cache holding the DID is evicted, the handle is re-verified BOTH ways (DID document
  *   claims it → it resolves back to the DID) and stored on `at_repo_status.handle`,
- *   `accounts.handle`, `profiles.atproto_handle` and `events.actor_handle` for that DID. An
+ *   `accounts.handle` and `events.actor_handle` for that DID. An
  *   unverified handle is stored as NULL — display falls back to the DID.
  */
 import { sql } from '@/lib/db'
@@ -240,13 +240,9 @@ export async function applyIdentityChange(did: string, verifier?: HandleVerifier
       on conflict (did) do update set handle = excluded.handle, handle_verified_at = excluded.handle_verified_at, updated_at = now()
     `
     const a = await t`update accounts set handle = ${handle} where did = ${did} and handle is distinct from ${handle} returning id`
-    const p = await t`
-      update profiles set atproto_handle = ${handle}
-      where id in (select id from accounts where did = ${did}) and atproto_handle is distinct from ${handle}
-      returning id
-    `
     const e = await t`update events set actor_handle = ${handle} where actor_did = ${did} and actor_handle is distinct from ${handle} returning id`
-    out.updated = { accounts: a.length, profiles: p.length, events: e.length }
+    // `profiles.atproto_handle` is deprecated (migration 0019) and no longer written; the count stays for callers.
+    out.updated = { accounts: a.length, profiles: 0, events: e.length }
   })
   return out
 }

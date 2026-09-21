@@ -30,6 +30,8 @@ export interface CuratedSessionInput {
   time_slot_id: string | null
   expected_attendance: number | null
   required_features: string[]
+  /** Organizer pin for the scheduler: this session must be in this room. */
+  pinned_venue_id?: string | null
 }
 
 const CREATE_STATUSES = ['pending', 'approved', 'scheduled'] as const
@@ -57,6 +59,7 @@ export function parseCuratedSession(body: Record<string, unknown>): CuratedSessi
     time_slot_id: status === 'scheduled' ? timeSlotId : null,
     expected_attendance: integer(body, 'expected_attendance', { min: 1, max: 100000, label: 'Expected attendance' }),
     required_features: stringList(body, 'required_features', { maxItems: 20, maxLength: 40, label: 'Required features' }) ?? [],
+    pinned_venue_id: uuidOrNull(body, 'pinned_venue_id', 'Pinned room'),
   }
 }
 
@@ -74,6 +77,10 @@ export async function insertCuratedSession(
   if (input.track_id) {
     const [track] = await tx`select id from tracks where id = ${input.track_id} and event_id = ${eventId}`
     if (!track) throw new InputError('That track does not belong to this event', 'track_id')
+  }
+  if (input.pinned_venue_id) {
+    const [venue] = await tx`select id from venues where id = ${input.pinned_venue_id} and event_id = ${eventId}`
+    if (!venue) throw new InputError('That room does not belong to this event', 'pinned_venue_id')
   }
   let venueId: string | null = null
   if (input.time_slot_id) {
@@ -106,6 +113,7 @@ export async function insertCuratedSession(
       is_votable: input.status !== 'scheduled',
       expected_attendance: input.expected_attendance,
       required_features: input.required_features,
+      pinned_venue_id: input.pinned_venue_id ?? null,
       imported_from: opts.importedFrom ?? null,
     })}
     returning id

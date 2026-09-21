@@ -219,7 +219,7 @@ export function buildSessionScheduledEmail(params: SessionScheduledEmailParams):
                 <tr>
                   <td align="center">
                     <p style="margin: 0; font-size: 13px; line-height: 20px; color: #8b949e;">
-                      You can edit your session details, add a Telegram group link, or invite co-hosts from your session page.
+                      You can edit your session details, add a chat group link, or invite co-hosts from your session page.
                     </p>
                   </td>
                 </tr>

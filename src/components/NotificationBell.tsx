@@ -3,38 +3,16 @@
 import * as React from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { Bell, CheckCheck, ExternalLink, Settings } from 'lucide-react'
+import { Bell, CheckCheck, ArrowRight, Settings } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from '@/components/ui/popover'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
+import { notificationType } from '@/lib/labels'
 import { safeActionPath, useNotifications, type Notification } from '@/hooks/useNotifications'
 import { useEvent } from '@/contexts/EventContext'
 import { formatDistanceToNow } from 'date-fns'
-
-// Map notification types to icons/colors
-const notificationStyles: Record<string, { color: string; icon?: string }> = {
-  session_approved: { color: 'bg-green-500' },
-  session_rejected: { color: 'bg-red-500' },
-  session_scheduled: { color: 'bg-blue-500' },
-  session_rescheduled: { color: 'bg-yellow-500' },
-  session_cancelled: { color: 'bg-red-500' },
-  cohost_invited: { color: 'bg-indigo-500' },
-  cohost_accepted: { color: 'bg-green-500' },
-  cohost_declined: { color: 'bg-orange-500' },
-  new_proposal: { color: 'bg-cyan-500' },
-  proposal_changed: { color: 'bg-yellow-500' },
-  approval_requested: { color: 'bg-orange-500' },
-  event_invitation: { color: 'bg-indigo-500' },
-  ticket_confirmed: { color: 'bg-green-500' },
-  admin_announcement: { color: 'bg-primary' },
-  default: { color: 'bg-muted-foreground' },
-}
 
 function NotificationItem({
   notification,
@@ -47,16 +25,12 @@ function NotificationItem({
 }) {
   const router = useRouter()
   const isUnread = !notification.read_at
-  const style = notificationStyles[notification.type] || notificationStyles.default
+  const { dot } = notificationType(notification.type)
 
   const handleClick = () => {
-    if (isUnread) {
-      onMarkAsRead(notification.id)
-    }
+    if (isUnread) onMarkAsRead(notification.id)
     const target = safeActionPath(notification.action_url)
-    if (target) {
-      router.push(target)
-    }
+    if (target) router.push(target)
     onClick?.()
   }
 
@@ -64,6 +38,7 @@ function NotificationItem({
 
   return (
     <button
+      type="button"
       onClick={handleClick}
       className={cn(
         'w-full text-left p-3 hover:bg-muted/50 transition-colors border-b border-border last:border-b-0',
@@ -71,28 +46,18 @@ function NotificationItem({
       )}
     >
       <div className="flex gap-3">
-        {/* Indicator dot */}
         <div className="flex-shrink-0 mt-1.5">
-          <div className={cn('w-2 h-2 rounded-full', style.color)} />
+          <div className={cn('w-2 h-2 rounded-full', dot)} aria-hidden="true" />
         </div>
-
-        {/* Content */}
         <div className="flex-1 min-w-0">
-          <p className={cn('text-sm', isUnread ? 'font-medium' : 'text-muted-foreground')}>
-            {notification.title}
-          </p>
-          {notification.body && (
-            <p className="text-xs text-muted-foreground mt-0.5 line-clamp-2">
-              {notification.body}
-            </p>
-          )}
+          <p className={cn('text-sm', isUnread ? 'font-medium' : 'text-muted-foreground')}>{notification.title}</p>
+          {notification.body && <p className="text-xs text-muted-foreground mt-0.5 line-clamp-2">{notification.body}</p>}
           <p className="text-xs text-muted-foreground/60 mt-1">{timeAgo}</p>
         </div>
-
-        {/* Unread indicator */}
         {isUnread && (
           <div className="flex-shrink-0">
-            <div className="w-2 h-2 rounded-full bg-primary" />
+            <div className="w-2 h-2 rounded-full bg-primary" aria-hidden="true" />
+            <span className="sr-only">Unread</span>
           </div>
         )}
       </div>
@@ -119,54 +84,43 @@ export function NotificationBell() {
   const event = useEvent()
   const [isOpen, setIsOpen] = React.useState(false)
 
-  const {
-    notifications,
-    unreadCount,
-    isLoading,
-    markAsRead,
-    markAllAsRead,
-    refresh,
-  } = useNotifications({ eventSlug: event.slug, limit: 10 })
+  const { notifications, unreadCount, isLoading, markAsRead, markAllAsRead, refresh } = useNotifications({
+    eventSlug: event.slug,
+    limit: 10,
+  })
 
   // Refresh when popover opens
   React.useEffect(() => {
-    if (isOpen) {
-      refresh()
-    }
+    if (isOpen) refresh()
   }, [isOpen, refresh])
 
   return (
     <Popover open={isOpen} onOpenChange={setIsOpen}>
       <PopoverTrigger asChild>
-        <Button variant="ghost" size="sm" className="relative">
-          <Bell className="h-4 w-4" />
+        <Button variant="ghost" size="icon-sm" className="relative" aria-label={unreadCount > 0 ? `Notifications, ${unreadCount} unread` : 'Notifications'}>
+          <Bell className="h-4 w-4" aria-hidden="true" />
           {unreadCount > 0 && (
-            <span className="absolute -top-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">
+            <span
+              aria-hidden="true"
+              className="absolute -top-0.5 -right-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-bold text-primary-foreground"
+            >
               {unreadCount > 9 ? '9+' : unreadCount}
             </span>
           )}
-          <span className="sr-only">Notifications</span>
         </Button>
       </PopoverTrigger>
 
-      <PopoverContent className="w-80 p-0 bg-background border shadow-lg" align="end">
-        {/* Header */}
+      <PopoverContent className="w-[min(20rem,calc(100vw-2rem))] p-0 bg-background border shadow-lg" align="end">
         <div className="flex items-center justify-between p-3 border-b border-border">
           <h3 className="font-semibold text-sm">Notifications</h3>
           {unreadCount > 0 && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-auto p-1 text-xs text-muted-foreground hover:text-foreground"
-              onClick={() => markAllAsRead()}
-            >
-              <CheckCheck className="h-3 w-3 mr-1" />
-              Mark all read
+            <Button variant="ghost" size="sm" className="text-xs text-muted-foreground hover:text-foreground" onClick={() => markAllAsRead()}>
+              <CheckCheck className="h-3.5 w-3.5 mr-1" aria-hidden="true" />
+              Mark all as read
             </Button>
           )}
         </div>
 
-        {/* Notification list */}
         <ScrollArea className="max-h-[400px]">
           {isLoading ? (
             <>
@@ -176,7 +130,7 @@ export function NotificationBell() {
             </>
           ) : notifications.length === 0 ? (
             <div className="p-6 text-center">
-              <Bell className="h-8 w-8 mx-auto text-muted-foreground/50 mb-2" />
+              <Bell className="h-8 w-8 mx-auto text-muted-foreground/50 mb-2" aria-hidden="true" />
               <p className="text-sm text-muted-foreground">No notifications yet</p>
             </div>
           ) : (
@@ -191,32 +145,17 @@ export function NotificationBell() {
           )}
         </ScrollArea>
 
-        {/* Footer */}
         <div className="p-2 border-t border-border flex gap-2">
-          {notifications.length > 0 && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="flex-1 text-xs"
-              asChild
-              onClick={() => setIsOpen(false)}
-            >
-              <Link href={`/e/${event.slug}/notifications`}>
-                View all
-                <ExternalLink className="h-3 w-3 ml-1" />
-              </Link>
-            </Button>
-          )}
-          <Button
-            variant="ghost"
-            size="sm"
-            className={cn("text-xs", notifications.length === 0 && "w-full")}
-            asChild
-            onClick={() => setIsOpen(false)}
-          >
+          <Button variant="ghost" size="sm" className="flex-1 text-xs" asChild onClick={() => setIsOpen(false)}>
+            <Link href={`/e/${event.slug}/notifications`}>
+              View all
+              <ArrowRight className="h-3.5 w-3.5 ml-1" aria-hidden="true" />
+            </Link>
+          </Button>
+          <Button variant="ghost" size="sm" className="text-xs" asChild onClick={() => setIsOpen(false)}>
             <Link href={`/e/${event.slug}/settings/notifications`}>
-              <Settings className="h-3 w-3 mr-1" />
-              Settings
+              <Settings className="h-3.5 w-3.5 mr-1" aria-hidden="true" />
+              Preferences
             </Link>
           </Button>
         </div>

@@ -1,7 +1,7 @@
 /**
  * Every NSID Schelling Point reads or writes, in one place.
  *
- * `community.lexicon.*`, `coop.lexicon.*` and `freeschool.draft.*` are BORROWED
+ * `community.lexicon.*`, `coop.lexicon.*`, `freeschool.draft.*` and `app.bsky.*` are BORROWED
  * records: never modified, never extended (sidecar rule, spec §4.3). Their JSON
  * is vendored under `lexicons/vendor/`. `schellingpoint.draft.*` are ours,
  * under `lexicons/schellingpoint/draft/`.
@@ -21,6 +21,9 @@ export const NSID = {
   eventConfig: 'coop.lexicon.event.config',
   eventListing: 'coop.lexicon.event.listing',
   membership: 'coop.lexicon.membership',
+
+  // app.bsky — borrowed verbatim (vendored under lexicons/vendor/bsky/)
+  actorProfile: 'app.bsky.actor.profile',
 
   // freeschool.draft — reused verbatim
   policy: 'freeschool.draft.policy',
@@ -96,6 +99,9 @@ export const GATHERING_COLLECTIONS: readonly Nsid[] = [
   NSID.proposal,
   NSID.series,
   NSID.occurrence,
+  // The gathering account's own `app.bsky.actor.profile` (rkey `self`); not indexed (it is not in
+  // `INDEXED_COLLECTIONS`, so reconciliation skips it and Jetstream never subscribes to it).
+  NSID.actorProfile,
 ]
 
 /** What a PERSON's repo holds that matters to us (reconciliation scope for `accounts.did`). */
@@ -115,7 +121,7 @@ export const PARTICIPANT_COLLECTIONS: readonly Nsid[] = [
 export const JETSTREAM_COLLECTIONS: readonly Nsid[] = [...INDEXED_COLLECTIONS, NSID.skill]
 
 /** Collections we borrow and must never extend (sidecar rule). */
-export const BORROWED_PREFIXES: readonly string[] = ['community.lexicon.', 'coop.lexicon.', 'freeschool.draft.']
+export const BORROWED_PREFIXES: readonly string[] = ['community.lexicon.', 'coop.lexicon.', 'freeschool.draft.', 'app.bsky.']
 
 export function isBorrowedNsid(nsid: string): boolean {
   return BORROWED_PREFIXES.some((p) => nsid.startsWith(p))

@@ -12,6 +12,7 @@ import {
   Hourglass,
   Loader2,
   Lock,
+  MoreHorizontal,
   PanelLeft,
   PanelLeftClose,
   Redo2,
@@ -26,11 +27,18 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Checkbox } from '@/components/ui/checkbox'
+import { Label } from '@/components/ui/label'
+import { Textarea } from '@/components/ui/textarea'
+import { ConfirmInline } from '@/components/ui/confirm-inline'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
+import { PageHeader } from '@/components/PageHeader'
 import { useEvent, useEventRole } from '@/contexts/EventContext'
 import { apiFetch, ApiError } from '@/lib/api/client'
 import { getEventDayLabel, getEventDays } from '@/lib/events/dates'
 import { formatInEventTimezone } from '@/lib/events/timezone'
 import { cn } from '@/lib/utils'
+import { plural } from '@/lib/format'
 import { PublishJobProgress } from '@/components/PublishJobProgress'
 import { hostLabel, type AdminSession, type AdminSessionsResponse, type AdminTimeSlot, type AdminVenue } from '@/components/admin/types'
 
@@ -331,7 +339,7 @@ export default function AdminSchedulePage() {
         const needed = res.approvalsNeeded ?? 1
         setNotice({
           kind: 'info',
-          text: `Awaiting approval: "${session.title}" ${destructive.kind === 'move' ? 'will move' : 'will be cancelled'} once ${needed} more organizer${needed === 1 ? '' : 's'} approve${needed === 1 ? 's' : ''}. Your approval is recorded.`,
+          text: `Awaiting approval: "${session.title}" ${destructive.kind === 'move' ? 'will move' : 'will be cancelled'} once ${plural(needed, 'more organizer')} approve${needed === 1 ? 's' : ''}. Your approval is recorded.`,
         })
       } else {
         setNotice({ kind: 'success', text: destructive.kind === 'move' ? `"${session.title}" moved and the network calendar was updated.` : `"${session.title}" is cancelled on the network calendar. The proposal stays with its author.` })
@@ -435,7 +443,7 @@ export default function AdminSchedulePage() {
     setHistoryIndex(-1)
     setNotice({
       kind: failures.length ? 'error' : 'success',
-      text: `Cleared ${targets.length - failures.length} draft placement${targets.length - failures.length === 1 ? '' : 's'}${kept ? `; ${kept} published session${kept === 1 ? '' : 's'} kept (move or cancel them individually)` : ''}.`,
+      text: `Cleared ${plural(targets.length - failures.length, 'draft placement')}${kept ? `; ${plural(kept, 'published session')} kept (move or cancel them individually)` : ''}.`,
       details: failures,
     })
     await refreshAfterChange().catch(() => undefined)
@@ -475,7 +483,7 @@ export default function AdminSchedulePage() {
       setHistoryIndex(-1)
       setNotice({
         kind: 'success',
-        text: `Applied ${res.applied} of ${chosen.length} assignment${chosen.length === 1 ? '' : 's'} to the draft schedule.`,
+        text: `Applied ${res.applied} of ${plural(chosen.length, 'assignment')} to the draft schedule.`,
         details: res.skipped.map((s) => `${s.title}: ${s.reason}`),
       })
       await refreshAfterChange()
@@ -515,10 +523,10 @@ export default function AdminSchedulePage() {
 
   return (
     <>
-      <div className="mb-6">
-        <h1 className="font-semibold">Schedule builder</h1>
-        <p className="text-muted-foreground mt-2">Bring ideas into the room. Arrange sessions as a draft, then publish when you&rsquo;re ready. Moving or cancelling a session that is already published needs another organizer&rsquo;s approval.</p>
-      </div>
+      <PageHeader
+        title="Schedule builder"
+        subtitle="Arrange sessions as a draft, then publish when you’re ready. Moving or cancelling a session that is already published needs another organizer’s approval."
+      />
 
       {loadError && (
         <div role="alert" className="mb-4 rounded-xl border border-destructive/30 bg-destructive/5 p-4 flex flex-wrap items-center justify-between gap-3">
@@ -528,10 +536,10 @@ export default function AdminSchedulePage() {
       )}
 
       {notice && (
-        <div role={notice.kind === 'error' ? 'alert' : 'status'} className={cn('mb-4 rounded-xl border bg-card p-4 text-sm', notice.kind === 'error' ? 'border-destructive/30 text-destructive' : notice.kind === 'info' ? 'border-amber-500/40' : 'border-primary/30')}>
+        <div role={notice.kind === 'error' ? 'alert' : 'status'} className={cn('mb-4 rounded-xl border bg-card p-4 text-sm', notice.kind === 'error' ? 'border-destructive/30 text-destructive' : notice.kind === 'info' ? 'border-signal-amber/40' : 'border-success/30')}>
           <div className="flex items-start justify-between gap-3">
             <p>{notice.text}</p>
-            <button onClick={() => setNotice(null)} aria-label="Dismiss" className="text-muted-foreground hover:text-foreground"><X className="h-4 w-4" /></button>
+            <Button variant="ghost" size="icon-sm" onClick={() => setNotice(null)} aria-label="Dismiss" className="-m-2 shrink-0"><X className="h-4 w-4" aria-hidden="true" /></Button>
           </div>
           {notice.details && notice.details.length > 0 && (
             <ul className="mt-2 list-disc pl-5 text-xs text-muted-foreground">{notice.details.slice(0, 8).map((d) => <li key={d}>{d}</li>)}</ul>
@@ -540,8 +548,8 @@ export default function AdminSchedulePage() {
       )}
 
       {(pendingRequests.length > 0 || approvalsError) && (
-        <section aria-labelledby="approvals-heading" className="mb-4 rounded-xl border border-amber-500/40 bg-amber-500/5 p-4">
-          <h2 id="approvals-heading" className="flex items-center gap-2 font-semibold text-sm"><ShieldCheck className="h-4 w-4 text-amber-600" />Changes awaiting approval</h2>
+        <section aria-labelledby="approvals-heading" className="mb-4 rounded-xl border border-signal-amber/40 bg-signal-amber/5 p-4">
+          <h2 id="approvals-heading" className="flex items-center gap-2 font-semibold text-sm"><ShieldCheck className="h-4 w-4 text-signal-amber" aria-hidden="true" />Changes awaiting approval</h2>
           {approvalsError && <p className="mt-2 text-sm text-destructive">{approvalsError}</p>}
           <ul className="mt-3 space-y-3">
             {pendingRequests.map((r) => {
@@ -555,7 +563,7 @@ export default function AdminSchedulePage() {
                     </p>
                     <p className="text-muted-foreground">&ldquo;{r.reason}&rdquo;{r.requestedBy?.handle ? ` — requested by @${r.requestedBy.handle}` : ''}</p>
                     <p className="text-xs text-muted-foreground mt-1">
-                      {r.status === 'failed' ? `Approved, but applying failed: ${r.error ?? 'unknown error'}` : `${approvedByCount} of ${r.threshold} approvals`}
+                      {r.status === 'failed' ? `Approved, but applying failed: ${r.error ?? 'unknown error'}` : `${approvedByCount} of ${plural(r.threshold, 'approval')}`}
                       {r.approvals.length > 0 && ` (${r.approvals.map((a) => (a.handle ? `@${a.handle}` : 'an organizer')).join(', ')})`}
                     </p>
                   </div>
@@ -565,12 +573,12 @@ export default function AdminSchedulePage() {
                     return (
                       <div className="flex flex-col items-end gap-2">
                         {needsLinkage && (
-                          <label className="flex items-start gap-2 text-xs max-w-xs">
-                            <input type="checkbox" checked={confirmLinkage} onChange={(e) => setConfirmLinkage(e.target.checked)} className="mt-0.5" />
-                            <span>My approval is a public record in my own repository naming me as an organizer.</span>
-                          </label>
+                          <div className="flex items-start gap-2 text-xs max-w-xs">
+                            <Checkbox id={`linkage-${r.id}`} className="mt-0.5" checked={confirmLinkage} onCheckedChange={(checked) => setConfirmLinkage(checked === true)} />
+                            <Label htmlFor={`linkage-${r.id}`} className="text-xs font-normal leading-snug">My approval is a public record in my own repository naming me as an organizer.</Label>
+                          </div>
                         )}
-                        <Button size="sm" onClick={() => void approveRequest(r)} disabled={busy || r.status === 'applying' || (needsLinkage && !confirmLinkage)}>
+                        <Button size="sm" onClick={() => void approveRequest(r)} loading={busy} disabled={r.status === 'applying' || (needsLinkage && !confirmLinkage)}>
                           {r.status === 'failed' ? 'Retry' : 'Approve'}
                         </Button>
                       </div>
@@ -597,8 +605,8 @@ export default function AdminSchedulePage() {
               <h2 className="font-semibold text-sm">Unscheduled ({unscheduled.length})</h2>
               <p className="text-xs text-muted-foreground mt-0.5 hidden sm:block">Drag to a slot, or choose Place</p>
             </div>
-            <Button variant="ghost" size="icon" className="h-8 w-8 flex-shrink-0" aria-label="Close unscheduled sessions" onClick={() => setShowSidebar(false)}>
-              <PanelLeftClose className="h-4 w-4" />
+            <Button variant="ghost" size="icon-sm" className="flex-shrink-0" aria-label="Close unscheduled sessions" onClick={() => setShowSidebar(false)}>
+              <PanelLeftClose className="h-4 w-4" aria-hidden="true" />
             </Button>
           </div>
           <div className="flex-1 overflow-y-auto p-3 sm:p-4 space-y-2">
@@ -614,7 +622,7 @@ export default function AdminSchedulePage() {
                     draggable
                     onDragStart={() => setDragged(session)}
                     onDragEnd={() => setDragged(null)}
-                    className={cn('p-3 bg-background rounded-lg border shadow-sm cursor-move hover:shadow-md transition-shadow group', matchesDay && 'ring-2 ring-green-500/50 border-green-500/30', picked?.id === session.id && 'ring-2 ring-primary')}
+                    className={cn('p-3 bg-background rounded-lg border shadow-sm cursor-move hover:shadow-md transition-shadow group', matchesDay && 'ring-2 ring-success/50 border-success/30', picked?.id === session.id && 'ring-2 ring-primary')}
                   >
                     <div className="flex items-start gap-2">
                       <GripVertical className="h-4 w-4 mt-0.5 text-muted-foreground shrink-0 opacity-50 group-hover:opacity-100" aria-hidden />
@@ -630,12 +638,12 @@ export default function AdminSchedulePage() {
                             <Badge variant="secondary" className="text-xs" style={{ backgroundColor: session.track.color ?? undefined }}>{session.track.name}</Badge>
                           )}
                           {prefs.map((pref) => (
-                            <Badge key={pref} variant="outline" className={cn('text-[10px]', dayPrefs.includes(pref) ? 'border-green-500 text-green-700 dark:text-green-400 bg-green-500/10' : 'text-muted-foreground')}>
+                            <Badge key={pref} variant={dayPrefs.includes(pref) ? 'success' : 'muted'} className="text-[10px]">
                               {PREF_LABELS[pref] || pref}
                             </Badge>
                           ))}
                         </div>
-                        <Button size="sm" variant="ghost" className="mt-2 h-7 px-2 text-xs" onClick={() => setPicked(picked?.id === session.id ? null : session)} aria-pressed={picked?.id === session.id}>
+                        <Button size="sm" variant="ghost" className="mt-2 text-xs" onClick={() => setPicked(picked?.id === session.id ? null : session)} aria-pressed={picked?.id === session.id}>
                           {picked?.id === session.id ? 'Cancel placing' : 'Place…'}
                         </Button>
                       </div>
@@ -669,12 +677,21 @@ export default function AdminSchedulePage() {
                 </Button>
               )}
               <div className="w-px h-6 bg-border mx-1 hidden sm:block" />
-              <Button variant="ghost" size="sm" onClick={() => void undo()} disabled={historyIndex < 0 || busy} aria-label="Undo (Ctrl+Z)" title="Undo (Ctrl+Z)"><Undo2 className="h-4 w-4" /></Button>
-              <Button variant="ghost" size="sm" onClick={() => void redo()} disabled={historyIndex >= history.length - 1 || busy} aria-label="Redo (Ctrl+Shift+Z)" title="Redo (Ctrl+Shift+Z)"><Redo2 className="h-4 w-4" /></Button>
-              <Button variant="ghost" size="sm" onClick={() => setConfirmReset(true)} disabled={busy} aria-label="Clear this day" title="Clear this day" className="text-destructive hover:text-destructive"><RotateCcw className="h-4 w-4" /></Button>
+              <Button variant="ghost" size="icon-sm" onClick={() => void undo()} disabled={historyIndex < 0 || busy} aria-label="Undo (Ctrl+Z)" title="Undo (Ctrl+Z)"><Undo2 className="h-4 w-4" aria-hidden="true" /></Button>
+              <Button variant="ghost" size="icon-sm" onClick={() => void redo()} disabled={historyIndex >= history.length - 1 || busy} aria-label="Redo (Ctrl+Shift+Z)" title="Redo (Ctrl+Shift+Z)"><Redo2 className="h-4 w-4" aria-hidden="true" /></Button>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="ghost" size="icon-sm" disabled={busy} aria-label="More actions"><MoreHorizontal className="h-4 w-4" aria-hidden="true" /></Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem className="text-destructive focus:text-destructive gap-2" onSelect={() => setConfirmReset(true)}>
+                    <RotateCcw className="h-4 w-4" aria-hidden="true" />Clear this day…
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
               <div className="w-px h-6 bg-border mx-1 hidden sm:block" />
               {publishStatus?.hasUnpublishedChanges && (
-                <Badge variant="outline" className="bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/20"><FileText className="h-3 w-3 mr-1" />{changeCount} unpublished</Badge>
+                <Badge variant="amber" className="gap-1"><FileText className="h-3 w-3" aria-hidden="true" />{changeCount} unpublished</Badge>
               )}
               <Button variant={publishStatus?.hasUnpublishedChanges ? 'default' : 'outline'} size="sm" onClick={() => { setPublishResult(null); setPublishOpen(true) }} className="gap-1.5">
                 <Send className="h-4 w-4" />
@@ -684,16 +701,19 @@ export default function AdminSchedulePage() {
           </div>
 
           {confirmReset && (
-            <div role="alertdialog" aria-label="Clear this day" className="flex flex-wrap items-center justify-between gap-2 border-b bg-destructive/5 px-4 py-3 text-sm">
-              <span>Remove every draft placement on {getEventDayLabel(selectedDay, event.timezone)}? Published sessions stay where they are.</span>
-              <div className="flex gap-2">
-                <Button size="sm" variant="outline" onClick={() => setConfirmReset(false)}>Keep</Button>
-                <Button size="sm" variant="destructive" onClick={() => void resetDay()}>Clear day</Button>
-              </div>
-            </div>
+            <ConfirmInline
+              layout="inline"
+              destructive
+              className="rounded-none border-x-0 border-t-0"
+              message={`Remove every draft placement on ${getEventDayLabel(selectedDay, event.timezone)}? Published sessions stay where they are.`}
+              confirmLabel="Clear day"
+              loading={busy}
+              onConfirm={() => void resetDay()}
+              onCancel={() => setConfirmReset(false)}
+            />
           )}
 
-          <div className="sm:hidden px-3 py-2 bg-amber-500/10 border-b border-amber-500/20 text-xs text-amber-700 dark:text-amber-400">Scroll horizontally to see every room.</div>
+          <p className="sm:hidden px-3 py-2 border-b text-xs text-muted-foreground">Scroll sideways to see every room.</p>
 
           <div className="flex-1 overflow-auto p-4">
             {timeRows.length === 0 ? (
@@ -711,7 +731,7 @@ export default function AdminSchedulePage() {
                   <div key={venue.id} className={cn('h-12 rounded-lg flex items-center justify-center px-2 text-center', venue.is_primary ? 'bg-primary text-primary-foreground' : 'bg-muted')}>
                     <div>
                       <div className="font-semibold text-sm truncate">{venue.name}</div>
-                      {venue.capacity && <div className="text-xs opacity-80">{venue.capacity} cap</div>}
+                      {venue.capacity && <div className="text-xs opacity-80">{plural(venue.capacity, 'seat')}</div>}
                     </div>
                   </div>
                 ))}
@@ -726,8 +746,8 @@ export default function AdminSchedulePage() {
                       if (!slot) return <div key={venue.id} className="h-24 rounded-lg bg-muted/20 border border-dashed border-muted-foreground/20" />
                       if (slot.is_break) {
                         return (
-                          <div key={venue.id} className="h-24 rounded-lg bg-amber-100 dark:bg-amber-950/30 flex items-center justify-center overflow-hidden">
-                            <span className="text-xs text-amber-700 dark:text-amber-400 font-medium truncate px-2">{slot.label || 'Break'}</span>
+                          <div key={venue.id} className="h-24 rounded-lg bg-signal-amber/10 flex items-center justify-center overflow-hidden">
+                            <span className="text-xs text-signal-amber font-medium truncate px-2">{slot.label || 'Break'}</span>
                           </div>
                         )
                       }
@@ -743,7 +763,7 @@ export default function AdminSchedulePage() {
                             key={venue.id}
                             onDragOver={(e) => { if (dragged) e.preventDefault() }}
                             onDrop={(e) => { e.preventDefault(); if (dragged) void dropOnSlot(dragged, slot.id) }}
-                            className={cn('min-h-24 rounded-xl border-l-4 border p-3 relative group overflow-hidden', session.proposal_withdrawn_at ? 'bg-destructive/5 border-destructive/40' : mismatch || overCapacity || session.proposal_drift_at ? 'bg-amber-500/10 border-amber-500/30' : 'bg-secondary border-primary/60')}
+                            className={cn('min-h-24 rounded-xl border-l-4 border p-3 relative group overflow-hidden', session.proposal_withdrawn_at ? 'bg-destructive/5 border-destructive/40' : mismatch || overCapacity || session.proposal_drift_at ? 'bg-signal-amber/10 border-signal-amber/40' : 'bg-secondary border-primary/60')}
                           >
                             <button
                               onClick={() => void removeFromSlot(session)}
@@ -752,18 +772,18 @@ export default function AdminSchedulePage() {
                               title={session.network_published ? 'Cancel (needs approval)' : 'Remove from slot'}
                               className="absolute top-1 right-1 p-1 rounded bg-background/80 opacity-100 lg:opacity-0 lg:group-hover:opacity-100 focus-visible:opacity-100 transition-opacity hover:bg-destructive hover:text-destructive-foreground z-10 disabled:opacity-40"
                             >
-                              <X className="h-3 w-3" />
+                              <X className="h-3 w-3" aria-hidden="true" />
                             </button>
                             <div className="flex flex-wrap items-center gap-1">
                               {session.network_published && <Badge variant="outline" className="text-[10px] gap-0.5 px-1"><Globe className="h-2.5 w-2.5" />Published</Badge>}
-                              {request && <Badge variant="outline" className="text-[10px] gap-0.5 px-1 border-amber-500/60 text-amber-700 dark:text-amber-400"><Hourglass className="h-2.5 w-2.5" />Awaiting approval</Badge>}
-                              {mismatch && <span title={`Session is ${session.duration} min; slot is ${duration} min`}><Clock className="h-3 w-3 text-amber-600" aria-label="Duration mismatch" /></span>}
-                              {overCapacity && <span title={`Expected ${session.expected_attendance}; room holds ${venue.capacity}`}><AlertTriangle className="h-3 w-3 text-amber-600" aria-label="Over capacity" /></span>}
+                              {request && <Badge variant="amber" className="text-[10px] gap-0.5 px-1"><Hourglass className="h-2.5 w-2.5" aria-hidden="true" />Awaiting approval</Badge>}
+                              {mismatch && <span title={`Session is ${session.duration} min; slot is ${duration} min`}><Clock className="h-3 w-3 text-signal-amber" aria-label="Duration mismatch" /></span>}
+                              {overCapacity && <span title={`Expected ${session.expected_attendance}; room holds ${venue.capacity}`}><AlertTriangle className="h-3 w-3 text-signal-amber" aria-label="Over capacity" /></span>}
                             </div>
                             <h3 className="text-xs font-medium line-clamp-2 mt-1">{session.title}</h3>
                             {hostLabel(session) && <p className="text-xs text-muted-foreground mt-0.5 truncate">{hostLabel(session)}</p>}
                             {session.proposal_withdrawn_at && <p className="text-[11px] text-destructive mt-0.5">Withdrawn by proposer</p>}
-                            {!session.proposal_withdrawn_at && session.proposal_drift_at && <p className="text-[11px] text-amber-700 dark:text-amber-400 mt-0.5">Proposer edited — re-publish</p>}
+                            {!session.proposal_withdrawn_at && session.proposal_drift_at && <p className="text-[11px] text-signal-amber mt-0.5">Proposer edited — re-publish</p>}
                             {session.network_published && !request && (
                               <button
                                 draggable
@@ -796,11 +816,11 @@ export default function AdminSchedulePage() {
                           aria-label={picked ? `Place ${picked.title} in ${venue.name} at ${formatTime(slot.start_time)}` : `Free slot in ${venue.name} at ${formatTime(slot.start_time)}`}
                           className={cn(
                             'h-24 w-full rounded-lg border-2 border-dashed transition-colors flex flex-col items-center justify-center overflow-hidden gap-1 disabled:cursor-default',
-                            mover ? (durationWarning ? 'border-amber-500/60 bg-amber-500/5' : 'border-primary/50 bg-primary/5 hover:bg-primary/10') : 'border-muted-foreground/20 bg-muted/10',
+                            mover ? (durationWarning ? 'border-signal-amber/60 bg-signal-amber/5' : 'border-primary/50 bg-primary/5 hover:bg-primary/10') : 'border-muted-foreground/20 bg-muted/10',
                           )}
                         >
                           <span className="text-xs text-muted-foreground">{slot.label || `${duration} min`}</span>
-                          {durationWarning && <span className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400"><Clock className="h-3 w-3" />Session is {mover.duration} min</span>}
+                          {durationWarning && <span className="flex items-center gap-1 text-xs text-signal-amber"><Clock className="h-3 w-3" aria-hidden="true" />Session is {mover.duration} min</span>}
                         </button>
                       )
                     })}
@@ -812,78 +832,66 @@ export default function AdminSchedulePage() {
         </div>
       </div>
 
-      {conflict && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm p-4" role="dialog" aria-modal="true" aria-labelledby="conflict-title">
-          <div className="w-full max-w-md bg-card border rounded-xl shadow-xl p-5">
-            <div className="flex items-start gap-3 mb-4">
-              <div className="p-2 rounded-full bg-amber-500/10"><AlertTriangle className="h-5 w-5 text-amber-500" /></div>
-              <div>
-                <h2 id="conflict-title" className="font-semibold">That slot is taken</h2>
-                <p className="text-sm text-muted-foreground mt-1">&ldquo;{conflict.occupant}&rdquo; is already there. Replace it? It goes back to the tray.</p>
+      <Dialog open={conflict !== null} onOpenChange={(open) => { if (!open) setConflict(null) }}>
+        <DialogContent size="sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2"><AlertTriangle className="h-5 w-5 text-signal-amber" aria-hidden="true" />That slot is taken</DialogTitle>
+            <DialogDescription>&ldquo;{conflict?.occupant}&rdquo; is already there. Replace it? It goes back to the tray.</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConflict(null)}>Cancel</Button>
+            <Button variant="destructive" loading={busy} onClick={() => { if (conflict) void dropOnSlot(conflict.session, conflict.slotId, true) }}>Replace</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={destructive !== null} onOpenChange={(open) => { if (!open && !busy) setDestructive(null) }}>
+        <DialogContent size="sm">
+          {destructive && (
+            <>
+              <DialogHeader>
+                <DialogTitle className="flex items-center gap-2"><ShieldCheck className="h-5 w-5 text-signal-amber" aria-hidden="true" />{destructive.kind === 'move' ? 'Move a published session' : 'Cancel a published session'}</DialogTitle>
+                <DialogDescription>
+                  &ldquo;{destructive.session.title}&rdquo; is on the published calendar, so people may already have it saved.
+                  {destructive.kind === 'move'
+                    ? ` Moving it${destructiveSlot ? ` to ${formatInEventTimezone(new Date(destructiveSlot.start_time), event.timezone, 'datetime')}` : ''} needs approval from other organizers. Your request counts as the first approval.`
+                    : ' Cancelling marks its calendar event cancelled once other organizers approve. The proposal stays with its author.'}
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-2">
+                <Label htmlFor="destructive-reason">Reason (shown to approvers)</Label>
+                <Textarea id="destructive-reason" value={reason} onChange={(e) => setReason(e.target.value)} maxLength={2000} rows={3} />
               </div>
-            </div>
-            <div className="flex gap-2">
-              <Button variant="outline" className="flex-1" onClick={() => setConflict(null)}>Cancel</Button>
-              <Button variant="destructive" className="flex-1" disabled={busy} onClick={() => void dropOnSlot(conflict.session, conflict.slotId, true)}>Replace</Button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {destructive && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm p-4" role="dialog" aria-modal="true" aria-labelledby="destructive-title">
-          <div className="w-full max-w-md bg-card border rounded-xl shadow-xl p-5 space-y-4">
-            <div>
-              <h2 id="destructive-title" className="font-semibold flex items-center gap-2"><ShieldCheck className="h-5 w-5 text-amber-600" />{destructive.kind === 'move' ? 'Move a published session' : 'Cancel a published session'}</h2>
-              <p className="text-sm text-muted-foreground mt-2">
-                &ldquo;{destructive.session.title}&rdquo; is on the published calendar, so people may already have it saved.
-                {destructive.kind === 'move'
-                  ? ` Moving it${destructiveSlot ? ` to ${formatInEventTimezone(new Date(destructiveSlot.start_time), event.timezone, 'datetime')}` : ''} needs approval from other organizers. Your request counts as the first approval.`
-                  : ' Cancelling marks its calendar event cancelled once other organizers approve. The proposal stays with its author.'}
-              </p>
-            </div>
-            <div className="space-y-2">
-              <label htmlFor="destructive-reason" className="text-sm font-medium">Reason (shown to approvers)</label>
-              <textarea id="destructive-reason" value={reason} onChange={(e) => setReason(e.target.value)} maxLength={2000} className="w-full min-h-[80px] rounded-md border bg-background px-3 py-2 text-sm" />
-            </div>
-            {needsLinkage && (
-              <label className="flex items-start gap-2 text-sm">
-                <input type="checkbox" checked={confirmLinkage} onChange={(e) => setConfirmLinkage(e.target.checked)} className="mt-1" />
-                <span>I understand my approval is a public record in my own repository that names me as an organizer of this gathering.</span>
-              </label>
-            )}
-            <div className="flex gap-2">
-              <Button variant="outline" className="flex-1" onClick={() => setDestructive(null)} disabled={busy}>Keep as is</Button>
-              <Button className="flex-1" onClick={() => void submitDestructive()} disabled={busy || !reason.trim() || (needsLinkage && !confirmLinkage)}>
-                {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Request change'}
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {autoOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm p-4" role="dialog" aria-modal="true" aria-labelledby="auto-title">
-          <div className="w-full max-w-2xl max-h-[80vh] bg-card border rounded-xl shadow-xl flex flex-col">
-            <div className="p-5 border-b flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div className="p-2 rounded-full bg-primary/10"><SlidersHorizontal className="h-5 w-5 text-primary" /></div>
-                <div>
-                  <h2 id="auto-title" className="font-semibold">Auto-schedule preview</h2>
-                  <p className="text-sm text-muted-foreground">Review proposed placements before adding them to the draft</p>
+              {needsLinkage && (
+                <div className="flex items-start gap-2 text-sm">
+                  <Checkbox id="destructive-linkage" className="mt-0.5" checked={confirmLinkage} onCheckedChange={(checked) => setConfirmLinkage(checked === true)} />
+                  <Label htmlFor="destructive-linkage" className="font-normal leading-snug">I understand my approval is a public record in my own repository that names me as an organizer of this gathering.</Label>
                 </div>
-              </div>
-              <Button variant="ghost" size="sm" onClick={() => setAutoOpen(false)} disabled={autoLoading} aria-label="Close"><X className="h-4 w-4" /></Button>
-            </div>
-            <div className="flex-1 overflow-y-auto p-5">
+              )}
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setDestructive(null)} disabled={busy}>Cancel</Button>
+                <Button onClick={() => void submitDestructive()} loading={busy} disabled={!reason.trim() || (needsLinkage && !confirmLinkage)}>Request change</Button>
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={autoOpen} onOpenChange={(open) => { if (!open && !autoLoading) setAutoOpen(false) }}>
+        <DialogContent size="lg" className="flex max-h-[85dvh] flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2"><SlidersHorizontal className="h-5 w-5 text-primary" aria-hidden="true" />Auto-schedule preview</DialogTitle>
+            <DialogDescription>Review proposed placements before adding them to the draft.</DialogDescription>
+          </DialogHeader>
+          <div className="flex-1 overflow-y-auto">
               {autoLoading && !autoResult ? (
                 <div className="flex items-center justify-center py-12"><Loader2 className="h-8 w-8 animate-spin text-muted-foreground" /></div>
               ) : autoResult ? (
                 <div className="space-y-4">
                   <div className="grid grid-cols-3 gap-3">
-                    <div className="bg-muted rounded-lg p-3 text-center"><div className="text-2xl font-bold">{autoResult.stats.assigned}</div><div className="text-xs text-muted-foreground">Placed</div></div>
-                    <div className="bg-muted rounded-lg p-3 text-center"><div className="text-2xl font-bold">{autoResult.stats.unassigned}</div><div className="text-xs text-muted-foreground">Not placed</div></div>
-                    <div className="bg-muted rounded-lg p-3 text-center"><div className="text-2xl font-bold">{autoResult.stats.averageScore}</div><div className="text-xs text-muted-foreground">Average fit</div></div>
+                    <div className="bg-muted rounded-lg p-3 text-center"><div className="text-2xl font-semibold tabular-nums">{autoResult.stats.assigned}</div><div className="text-xs text-muted-foreground">Placed</div></div>
+                    <div className="bg-muted rounded-lg p-3 text-center"><div className="text-2xl font-semibold tabular-nums">{autoResult.stats.unassigned}</div><div className="text-xs text-muted-foreground">Not placed</div></div>
+                    <div className="bg-muted rounded-lg p-3 text-center"><div className="text-2xl font-semibold tabular-nums">{autoResult.stats.averageScore}</div><div className="text-xs text-muted-foreground">Average fit</div></div>
                   </div>
                   <p className="text-xs text-muted-foreground">
                     {autoResult.stats.usedBallots
@@ -893,20 +901,20 @@ export default function AdminSchedulePage() {
                   {autoResult.assignments.length > 0 && (
                     <div>
                       <div className="flex items-center justify-between mb-2">
-                        <h3 className="font-medium">Proposed ({selectedAssignments.size}/{autoResult.assignments.length} selected)</h3>
+                        <h3 className="font-medium">Proposed ({selectedAssignments.size} of {autoResult.assignments.length} selected)</h3>
                         <div className="flex gap-2">
                           <Button variant="ghost" size="sm" onClick={() => setSelectedAssignments(new Set(autoResult.assignments.map((a) => a.sessionId)))}>Select all</Button>
                           <Button variant="ghost" size="sm" onClick={() => setSelectedAssignments(new Set())}>Clear</Button>
                         </div>
                       </div>
-                      <div className="space-y-2 max-h-60 overflow-y-auto">
+                      <div className="space-y-2">
                         {autoResult.assignments.map((a) => {
                           const slot = timeSlots.find((t) => t.id === a.slotId)
                           const venue = venues.find((v) => v.id === a.venueId)
                           const checked = selectedAssignments.has(a.sessionId)
                           const toggle = () => setSelectedAssignments((prev) => { const next = new Set(prev); if (next.has(a.sessionId)) next.delete(a.sessionId); else next.add(a.sessionId); return next })
                           return (
-                            <div key={a.sessionId} className={cn('p-3 rounded-lg border text-sm', checked ? (a.warnings.length ? 'bg-amber-500/10 border-amber-500/50' : 'bg-green-500/10 border-green-500/50') : 'bg-muted/50 opacity-60')}>
+                            <div key={a.sessionId} className={cn('p-3 rounded-lg border text-sm', checked ? (a.warnings.length ? 'bg-signal-amber/10 border-signal-amber/50' : 'bg-success/10 border-success/50') : 'bg-muted/50 opacity-60')}>
                               <div className="flex items-start gap-3">
                                 <Checkbox checked={checked} onCheckedChange={toggle} className="mt-0.5" aria-label={`Include ${a.sessionTitle}`} />
                                 <div className="flex-1 min-w-0">
@@ -918,7 +926,7 @@ export default function AdminSchedulePage() {
                                     <Badge variant="outline" className="text-xs shrink-0">Fit {a.score}</Badge>
                                   </div>
                                   {a.warnings.length > 0 && (
-                                    <ul className="mt-2 space-y-0.5">{a.warnings.map((w) => <li key={w} className="text-xs text-amber-700 dark:text-amber-400 flex gap-1"><AlertTriangle className="h-3 w-3 mt-0.5 shrink-0" />{w}</li>)}</ul>
+                                    <ul className="mt-2 space-y-0.5">{a.warnings.map((w) => <li key={w} className="text-xs text-signal-amber flex gap-1"><AlertTriangle className="h-3 w-3 mt-0.5 shrink-0" aria-hidden="true" />{w}</li>)}</ul>
                                   )}
                                 </div>
                               </div>
@@ -930,40 +938,38 @@ export default function AdminSchedulePage() {
                   )}
                   {autoResult.unassigned.length > 0 && (
                     <div>
-                      <h3 className="font-medium mb-2 text-amber-700 dark:text-amber-400">Could not place ({autoResult.unassigned.length})</h3>
+                      <h3 className="font-medium mb-2 text-signal-amber">Could not place ({autoResult.unassigned.length})</h3>
                       <div className="space-y-2">{autoResult.unassigned.map((u) => <div key={u.sessionId} className="p-3 rounded-lg bg-muted text-sm"><p className="font-medium">{u.sessionTitle}</p><p className="text-xs text-muted-foreground">{u.reason}</p></div>)}</div>
                     </div>
                   )}
                 </div>
               ) : null}
             </div>
-            {autoResult && autoResult.assignments.length > 0 && (
-              <div className="p-5 border-t flex gap-2">
-                <Button variant="outline" className="flex-1" onClick={() => setAutoOpen(false)} disabled={autoLoading}>Cancel</Button>
-                <Button className="flex-1" onClick={() => void applyAutoSchedule()} disabled={autoLoading || selectedAssignments.size === 0}>
-                  {autoLoading ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Applying…</> : <>Add {selectedAssignments.size} to draft</>}
-                </Button>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
+          {autoResult && autoResult.assignments.length > 0 && (
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setAutoOpen(false)} disabled={autoLoading}>Cancel</Button>
+              <Button onClick={() => void applyAutoSchedule()} loading={autoLoading} disabled={selectedAssignments.size === 0}>
+                Add {selectedAssignments.size} to draft
+              </Button>
+            </DialogFooter>
+          )}
+        </DialogContent>
+      </Dialog>
 
-      {publishOpen && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="publish-title">
-          <div className="bg-background rounded-xl shadow-xl w-full max-w-lg max-h-[85vh] flex flex-col">
-            <div className="p-5 border-b flex items-center justify-between">
-              <h2 id="publish-title" className="font-semibold">{publishResult ? 'Schedule published' : 'Publish schedule'}</h2>
-              <Button variant="ghost" size="sm" onClick={() => setPublishOpen(false)} aria-label="Close" disabled={publishing}><X className="h-4 w-4" /></Button>
-            </div>
-            <div className="p-5 overflow-y-auto space-y-4 text-sm">
+      <Dialog open={publishOpen} onOpenChange={(open) => { if (!open && !publishing) setPublishOpen(false) }}>
+        <DialogContent size="md" className="flex max-h-[85dvh] flex-col">
+          <DialogHeader>
+            <DialogTitle>{publishResult ? 'Schedule published' : 'Publish schedule'}</DialogTitle>
+            <DialogDescription>{publishResult ? 'Members can see the schedule now.' : 'Members are told the schedule is live, and the public calendar is updated.'}</DialogDescription>
+          </DialogHeader>
+          <div className="flex-1 overflow-y-auto space-y-4 text-sm">
               {publishResult ? (
                 <>
                   <div className="flex items-center gap-3">
-                    <CheckCircle className="h-8 w-8 text-green-500" />
+                    <CheckCircle className="h-8 w-8 text-success" aria-hidden="true" />
                     <div>
                       <p className="font-medium">{publishResult.message}</p>
-                      <p className="text-muted-foreground">{publishResult.notified.members} member{publishResult.notified.members === 1 ? '' : 's'} notified that the schedule is live.</p>
+                      <p className="text-muted-foreground">{plural(publishResult.notified.members, 'member')} notified that the schedule is live.</p>
                     </div>
                   </div>
                   {publishResult.network.attempted ? (
@@ -977,7 +983,7 @@ export default function AdminSchedulePage() {
                           onDone={() => void refreshAfterChange()}
                         />
                       ) : (
-                        <p className="text-muted-foreground">{publishResult.network.published} session{publishResult.network.published === 1 ? '' : 's'} written; {publishResult.network.failed} failed.</p>
+                        <p className="text-muted-foreground">{plural(publishResult.network.published, 'session')} written; {publishResult.network.failed} failed.</p>
                       )}
                       {publishResult.network.results.length > 0 && (
                         <ul className="max-h-48 overflow-y-auto space-y-1 text-xs">
@@ -1015,26 +1021,25 @@ export default function AdminSchedulePage() {
                   )}
                   {publishStatus?.networkLinked && <p className="text-muted-foreground flex gap-2"><Globe className="h-4 w-4 shrink-0 mt-0.5" />Each scheduled session is also written to the gathering&rsquo;s public calendar on the network.</p>}
                   {publishStatus?.scheduledSessions === 0 && (
-                    <p className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg text-amber-700 dark:text-amber-400 flex gap-2"><AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />No sessions are scheduled yet.</p>
+                    <p className="p-3 bg-signal-amber/10 border border-signal-amber/30 rounded-lg flex gap-2"><AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-signal-amber" aria-hidden="true" />No sessions are scheduled yet.</p>
                   )}
                 </>
               )}
             </div>
-            <div className="p-5 border-t flex gap-2">
-              {publishResult ? (
-                <Button className="flex-1" onClick={() => setPublishOpen(false)}>Done</Button>
-              ) : (
-                <>
-                  <Button variant="outline" className="flex-1" onClick={() => setPublishOpen(false)} disabled={publishing}>Cancel</Button>
-                  <Button className="flex-1" onClick={() => void publish()} disabled={publishing}>
-                    {publishing ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Publishing…</> : <><Send className="h-4 w-4 mr-2" />Publish</>}
-                  </Button>
-                </>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
+          <DialogFooter>
+            {publishResult ? (
+              <Button onClick={() => setPublishOpen(false)}>Done</Button>
+            ) : (
+              <>
+                <Button variant="outline" onClick={() => setPublishOpen(false)} disabled={publishing}>Cancel</Button>
+                <Button onClick={() => void publish()} loading={publishing}>
+                  {!publishing && <Send className="h-4 w-4 mr-2" aria-hidden="true" />}Publish
+                </Button>
+              </>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   )
 }

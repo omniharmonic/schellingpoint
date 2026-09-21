@@ -4,6 +4,7 @@ import * as React from 'react'
 import { useRouter } from 'next/navigation'
 import { apiFetch, ApiError } from '@/lib/api/client'
 import type { EventRow } from '@/types/event'
+import { LEGACY_SOCIAL_ALIASES, LEGACY_SOCIAL_KEYS, LEGACY_SOCIAL_LABELS, MAX_SOCIAL_LINKS, type LegacySocialKey } from './labels'
 
 // ============================================================================
 // API helpers (same-origin, session cookie — plan §3.3)
@@ -100,4 +101,55 @@ export function toEventLocal(date: Date | null | undefined, timezone: string): s
 /** Format a date-only column (YYYY-MM-DD) for a date input. */
 export function toDateInput(date: Date | null | undefined): string {
   return date ? date.toISOString().slice(0, 10) : ''
+}
+
+// ============================================================================
+// Dirty tracking and the social-links list
+// ============================================================================
+
+/** Structural equality for the small plain objects sections build for `save()`. */
+export function sameValue(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b)
+}
+
+export interface SocialLink { label: string; url: string }
+
+type StoredSocial = Partial<Record<LegacySocialKey, string>> & { links?: SocialLink[] }
+
+/** Legacy keys + `links` → one list for the editor (readers merge the same way). */
+export function socialToLinks(social: unknown): SocialLink[] {
+  const stored = (social && typeof social === 'object' ? social : {}) as StoredSocial
+  const list: SocialLink[] = []
+  for (const key of LEGACY_SOCIAL_KEYS) {
+    const url = stored[key]
+    if (typeof url === 'string' && url.trim()) list.push({ label: LEGACY_SOCIAL_LABELS[key], url: url.trim() })
+  }
+  for (const link of Array.isArray(stored.links) ? stored.links : []) {
+    if (link && typeof link.url === 'string' && link.url.trim()) list.push({ label: String(link.label ?? '').trim(), url: link.url.trim() })
+  }
+  return list.slice(0, MAX_SOCIAL_LINKS)
+}
+
+/**
+ * The editor's list → the stored shape: a label matching a legacy key (case-insensitively)
+ * writes that key, everything else goes to `links`. Legacy keys with no entry are sent as
+ * null so the server clears them.
+ */
+export function linksToSocial(links: SocialLink[]): Record<LegacySocialKey, string | null> & { links: SocialLink[] } {
+  const social: Record<LegacySocialKey, string | null> & { links: SocialLink[] } = { twitter: null, telegram: null, discord: null, website: null, links: [] }
+  for (const entry of links) {
+    const raw = entry.url.trim()
+    if (!raw) continue
+    const url = /^[a-z][a-z\d+.-]*:/i.test(raw) ? raw : `https://${raw}`
+    const label = entry.label.trim() || hostLabel(url)
+    const legacy = LEGACY_SOCIAL_ALIASES[label.toLowerCase()]
+    if (legacy && !social[legacy]) social[legacy] = url
+    else social.links.push({ label, url })
+  }
+  social.links = social.links.slice(0, MAX_SOCIAL_LINKS)
+  return social
+}
+
+function hostLabel(url: string): string {
+  try { return new URL(url.includes('://') ? url : `https://${url}`).hostname.replace(/^www\./, '') } catch { return 'Link' }
 }

@@ -1,6 +1,7 @@
 'use client'
 
 import * as React from 'react'
+import Link from 'next/link'
 import {
   DollarSign,
   Ticket,
@@ -10,17 +11,18 @@ import {
   ArrowDownRight,
   Loader2,
   BarChart3,
-  Download,
   AlertTriangle,
 } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
-
+import { PageHeader } from '@/components/PageHeader'
 import { useAuth } from '@/hooks/useAuth'
 import { useEvent, useEventRole } from '@/contexts/EventContext'
 import { formatPrice } from '@/lib/payments/format'
-import { apiFetch } from '@/lib/api/client'
+import { apiFetch, ApiError } from '@/lib/api/client'
+import { plural } from '@/lib/format'
+import { cn } from '@/lib/utils'
 
 interface RevenueStats {
   totalRevenue: number
@@ -54,6 +56,7 @@ export default function RevenueDashboardPage() {
   const [stats, setStats] = React.useState<RevenueStats | null>(null)
   const [loading, setLoading] = React.useState(true)
   const [error, setError] = React.useState<string | null>(null)
+  const [reloadKey, setReloadKey] = React.useState(0)
 
   // Only owners and admins can view revenue
   const canViewRevenue = isOwner || isAdmin
@@ -64,12 +67,14 @@ export default function RevenueDashboardPage() {
       return
     }
     let cancelled = false
+    setLoading(true)
+    setError(null)
     apiFetch<RevenueStats>(`/api/v1/events/${encodeURIComponent(event.slug)}/admin/ticketing-settings/revenue`)
       .then((data) => {
         if (!cancelled) setStats(data)
       })
-      .catch(() => {
-        if (!cancelled) setError('Failed to load revenue data')
+      .catch((e) => {
+        if (!cancelled) setError(e instanceof ApiError ? e.message : 'Revenue could not be loaded.')
       })
       .finally(() => {
         if (!cancelled) setLoading(false)
@@ -77,39 +82,43 @@ export default function RevenueDashboardPage() {
     return () => {
       cancelled = true
     }
-  }, [canViewRevenue, event.slug, user])
+  }, [canViewRevenue, event.slug, user, reloadKey])
 
   if (!canViewRevenue) {
     return (
-      <Card>
-        <CardContent className="py-12 text-center">
-          <DollarSign className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
-          <h2 className="text-xl font-semibold mb-2">Access Denied</h2>
-          <p className="text-muted-foreground">
-            Only event owners and admins can view revenue data.
-          </p>
-        </CardContent>
-      </Card>
+      <>
+        <PageHeader title="Revenue" />
+        <Card>
+          <CardContent className="py-12 text-center space-y-4">
+            <DollarSign className="h-12 w-12 mx-auto text-muted-foreground" aria-hidden="true" />
+            <p className="text-muted-foreground">Only owners and admins can see revenue. Ask an owner or admin to change your role.</p>
+            <Button asChild variant="outline"><Link href={`/e/${event.slug}/admin`}>Overview & sessions</Link></Button>
+          </CardContent>
+        </Card>
+      </>
     )
   }
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center py-12">
-        <Loader2 className="h-8 w-8 animate-spin" />
+      <div className="flex items-center justify-center py-12" role="status" aria-label="Loading revenue">
+        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
       </div>
     )
   }
 
   if (error || !stats) {
     return (
-      <Card>
-        <CardContent className="py-12 text-center">
-          <BarChart3 className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
-          <h2 className="text-xl font-semibold mb-2">Error Loading Data</h2>
-          <p className="text-muted-foreground">{error || 'Failed to load revenue data'}</p>
-        </CardContent>
-      </Card>
+      <>
+        <PageHeader title="Revenue" />
+        <Card>
+          <CardContent className="py-12 text-center space-y-4">
+            <BarChart3 className="h-12 w-12 mx-auto text-muted-foreground" aria-hidden="true" />
+            <p role="alert" className="text-destructive">{error || 'Revenue could not be loaded.'}</p>
+            <Button variant="outline" onClick={() => setReloadKey((k) => k + 1)}>Try again</Button>
+          </CardContent>
+        </Card>
+      </>
     )
   }
 
@@ -123,28 +132,24 @@ export default function RevenueDashboardPage() {
   const revenueChange = lastWeekRevenue > 0
     ? ((thisWeekRevenue - lastWeekRevenue) / lastWeekRevenue) * 100
     : thisWeekRevenue > 0 ? 100 : 0
+  const maxRevenue = Math.max(...stats.dailySales.map((d) => d.revenue), 1)
 
   return (
-      <div className="space-y-8">
-        <div className="page-heading">
-          <div>
-            <h1 className="text-2xl font-display font-bold">Revenue</h1>
-            <p className="text-muted-foreground">Track ticket sales and revenue</p>
-          </div>
-          <Button variant="outline" disabled>
-            <Download className="h-4 w-4 mr-2" />
-            Export Report
-          </Button>
-        </div>
+    <div>
+      <PageHeader
+        title="Revenue"
+        subtitle="Ticket sales and what reaches you after the platform contribution."
+        actions={<Button asChild variant="outline"><Link href={`/e/${event.slug}/admin/tickets`}>Ticket types</Link></Button>}
+      />
 
+      <div className="space-y-8">
         {stats.refundNeeded.count > 0 && (
           <Card className="border-destructive">
             <CardContent className="py-4 flex items-start gap-3">
-              <AlertTriangle className="h-5 w-5 text-destructive mt-0.5" />
+              <AlertTriangle className="h-5 w-5 text-destructive mt-0.5" aria-hidden="true" />
               <div>
                 <p className="font-medium">
-                  {stats.refundNeeded.count} payment{stats.refundNeeded.count === 1 ? '' : 's'} need
-                  {stats.refundNeeded.count === 1 ? 's' : ''} a refund ({formatPrice(stats.refundNeeded.amountCents, stats.currency)})
+                  {plural(stats.refundNeeded.count, 'payment')} {stats.refundNeeded.count === 1 ? 'needs' : 'need'} a refund ({formatPrice(stats.refundNeeded.amountCents, stats.currency)})
                 </p>
                 <p className="text-sm text-muted-foreground">
                   These buyers paid after their checkout hold lapsed and the tier had filled, or paid twice. They have no
@@ -155,27 +160,26 @@ export default function RevenueDashboardPage() {
           </Card>
         )}
 
-        {/* Summary Cards */}
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           <Card>
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Gross Revenue</CardTitle>
-              <DollarSign className="h-4 w-4 text-muted-foreground" />
+              <CardTitle className="text-sm font-medium">Gross revenue</CardTitle>
+              <DollarSign className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">
+              <div className="text-2xl font-semibold tabular-nums">
                 {formatPrice(stats.totalRevenue, stats.currency)}
               </div>
               <p className="text-xs text-muted-foreground flex items-center">
                 {revenueChange >= 0 ? (
                   <>
-                    <ArrowUpRight className="h-3 w-3 text-green-600 mr-1" />
-                    <span className="text-green-600">+{revenueChange.toFixed(1)}%</span>
+                    <ArrowUpRight className="h-3 w-3 text-success mr-1" aria-hidden="true" />
+                    <span className="text-success">+{revenueChange.toFixed(1)}%</span>
                   </>
                 ) : (
                   <>
-                    <ArrowDownRight className="h-3 w-3 text-red-600 mr-1" />
-                    <span className="text-red-600">{revenueChange.toFixed(1)}%</span>
+                    <ArrowDownRight className="h-3 w-3 text-destructive mr-1" aria-hidden="true" />
+                    <span className="text-destructive">{revenueChange.toFixed(1)}%</span>
                   </>
                 )}
                 <span className="ml-1">vs last week</span>
@@ -185,67 +189,67 @@ export default function RevenueDashboardPage() {
 
           <Card>
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Platform Fees</CardTitle>
-              <DollarSign className="h-4 w-4 text-muted-foreground" />
+              <CardTitle className="text-sm font-medium">Platform contribution</CardTitle>
+              <DollarSign className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">
+              <div className="text-2xl font-semibold tabular-nums">
                 {formatPrice(stats.platformFees, stats.currency)}
               </div>
               <p className="text-xs text-muted-foreground">
-                Contributions recorded at checkout. Stripe processing fees are separate.
+                Recorded at checkout. Stripe processing fees are separate.
               </p>
             </CardContent>
           </Card>
 
           <Card>
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Net to Organizer</CardTitle>
-              <DollarSign className="h-4 w-4 text-muted-foreground" />
+              <CardTitle className="text-sm font-medium">Net to you</CardTitle>
+              <DollarSign className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">
+              <div className="text-2xl font-semibold tabular-nums">
                 {formatPrice(stats.netRevenue, stats.currency)}
               </div>
-              <p className="text-xs text-muted-foreground">gross revenue less platform fees</p>
+              <p className="text-xs text-muted-foreground">Gross revenue less the platform contribution</p>
             </CardContent>
           </Card>
 
           <Card>
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Tickets Sold</CardTitle>
-              <Ticket className="h-4 w-4 text-muted-foreground" />
+              <CardTitle className="text-sm font-medium">Tickets sold</CardTitle>
+              <Ticket className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">{stats.confirmedTickets}</div>
+              <div className="text-2xl font-semibold tabular-nums">{stats.confirmedTickets}</div>
               <p className="text-xs text-muted-foreground">
-                {stats.pendingTickets > 0 && `${stats.pendingTickets} pending`}
+                {stats.pendingTickets > 0 ? `${stats.pendingTickets} pending` : 'None pending'}
               </p>
             </CardContent>
           </Card>
 
           <Card>
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Check-Ins</CardTitle>
-              <Users className="h-4 w-4 text-muted-foreground" />
+              <CardTitle className="text-sm font-medium">Checked in</CardTitle>
+              <Users className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">{stats.checkedIn}</div>
+              <div className="text-2xl font-semibold tabular-nums">{stats.checkedIn}</div>
               <p className="text-xs text-muted-foreground">
-                {stats.confirmedTickets > 0 && (
-                  `${((stats.checkedIn / stats.confirmedTickets) * 100).toFixed(0)}% attendance`
-                )}
+                {stats.confirmedTickets > 0
+                  ? `${((stats.checkedIn / stats.confirmedTickets) * 100).toFixed(0)}% attendance`
+                  : 'No tickets sold yet'}
               </p>
             </CardContent>
           </Card>
 
           <Card>
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Avg. Ticket Price</CardTitle>
-              <TrendingUp className="h-4 w-4 text-muted-foreground" />
+              <CardTitle className="text-sm font-medium">Average ticket price</CardTitle>
+              <TrendingUp className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">
+              <div className="text-2xl font-semibold tabular-nums">
                 {stats.confirmedTickets > 0
                   ? formatPrice(Math.round(stats.totalRevenue / stats.confirmedTickets), stats.currency)
                   : formatPrice(0, stats.currency)
@@ -256,11 +260,10 @@ export default function RevenueDashboardPage() {
           </Card>
         </div>
 
-        {/* Tier Breakdown */}
         <Card>
           <CardHeader>
-            <CardTitle>Sales by Tier</CardTitle>
-            <CardDescription>Breakdown of tickets sold per tier</CardDescription>
+            <CardTitle>Sales by ticket type</CardTitle>
+            <CardDescription>Tickets sold per type</CardDescription>
           </CardHeader>
           <CardContent>
             <div className="space-y-4">
@@ -275,14 +278,14 @@ export default function RevenueDashboardPage() {
                       <div className="flex items-center gap-2">
                         <span className="font-medium">{tier.tierName}</span>
                         <Badge variant="secondary">
-                          {tier.sold}{tier.capacity ? `/${tier.capacity}` : ''} sold
+                          {tier.capacity ? `${tier.sold} of ${tier.capacity} sold` : `${tier.sold} sold`}
                         </Badge>
                       </div>
-                      <span className="font-semibold">
+                      <span className="font-semibold tabular-nums">
                         {formatPrice(tier.revenue, stats.currency)}
                       </span>
                     </div>
-                    <div className="h-2 bg-muted rounded-full overflow-hidden">
+                    <div className="h-2 bg-muted rounded-full overflow-hidden" role="progressbar" aria-label={`${tier.tierName} sold`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.min(100, Math.round(percentage))}>
                       <div
                         className="h-full bg-primary transition-all"
                         style={{ width: `${Math.min(100, percentage)}%` }}
@@ -293,51 +296,56 @@ export default function RevenueDashboardPage() {
               })}
 
               {stats.tierBreakdown.length === 0 && (
-                <p className="text-muted-foreground text-center py-4">
-                  No ticket tiers configured yet
-                </p>
+                <div className="text-center py-4 space-y-3">
+                  <p className="text-muted-foreground">No ticket types yet.</p>
+                  <Button asChild variant="outline" size="sm"><Link href={`/e/${event.slug}/admin/tickets`}>Create a ticket type</Link></Button>
+                </div>
               )}
             </div>
           </CardContent>
         </Card>
 
-        {/* Sales Chart (Simplified) */}
         <Card>
           <CardHeader>
-            <CardTitle>Sales Over Time</CardTitle>
+            <CardTitle>Sales over time</CardTitle>
             <CardDescription>Last 30 days of ticket sales</CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="h-[200px] flex items-end gap-1">
-              {stats.dailySales.slice(-30).map((day, index) => {
-                const maxRevenue = Math.max(...stats.dailySales.map(d => d.revenue), 1)
-                const height = (day.revenue / maxRevenue) * 100
-
-                return (
-                  <div
-                    key={day.date}
-                    className="flex-1 bg-primary/20 hover:bg-primary/40 transition-colors rounded-t cursor-pointer relative group"
-                    style={{ height: `${Math.max(2, height)}%` }}
-                    title={`${day.date}: ${day.tickets} tickets, ${formatPrice(day.revenue, stats.currency)}`}
-                  >
-                    {/* Tooltip on hover */}
-                    <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block z-10">
-                      <div className="bg-popover text-popover-foreground text-xs p-2 rounded shadow-lg whitespace-nowrap">
-                        <p className="font-medium">{new Date(`${day.date}T00:00:00Z`).toLocaleDateString(undefined, { timeZone: 'UTC' })}</p>
-                        <p>{day.tickets} tickets</p>
-                        <p>{formatPrice(day.revenue, stats.currency)}</p>
+            {stats.dailySales.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No sales yet.</p>
+            ) : (
+              <>
+                <div className="h-[200px] flex items-end gap-1" role="img" aria-label="Daily ticket revenue for the last 30 days">
+                  {stats.dailySales.slice(-30).map((day) => {
+                    const height = (day.revenue / maxRevenue) * 100
+                    const label = new Date(`${day.date}T00:00:00Z`).toLocaleDateString(undefined, { timeZone: 'UTC' })
+                    return (
+                      <div
+                        key={day.date}
+                        className={cn('flex-1 bg-primary/20 hover:bg-primary/40 transition-colors rounded-t relative group')}
+                        style={{ height: `${Math.max(2, height)}%` }}
+                        title={`${label}: ${plural(day.tickets, 'ticket')}, ${formatPrice(day.revenue, stats.currency)}`}
+                      >
+                        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block z-10">
+                          <div className="bg-popover text-popover-foreground text-xs p-2 rounded-lg border shadow-lg whitespace-nowrap">
+                            <p className="font-medium">{label}</p>
+                            <p>{plural(day.tickets, 'ticket')}</p>
+                            <p>{formatPrice(day.revenue, stats.currency)}</p>
+                          </div>
+                        </div>
                       </div>
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-            <div className="flex justify-between mt-2 text-xs text-muted-foreground">
-              <span>{stats.dailySales[0]?.date}</span>
-              <span>{stats.dailySales[stats.dailySales.length - 1]?.date}</span>
-            </div>
+                    )
+                  })}
+                </div>
+                <div className="flex justify-between mt-2 text-xs text-muted-foreground">
+                  <span>{stats.dailySales[0]?.date}</span>
+                  <span>{stats.dailySales[stats.dailySales.length - 1]?.date}</span>
+                </div>
+              </>
+            )}
           </CardContent>
         </Card>
       </div>
+    </div>
   )
 }

@@ -3,9 +3,9 @@
 import * as React from 'react'
 import Link from 'next/link'
 import {
+  ArrowRight,
   Building,
   Calendar,
-  Check,
   ChevronDown,
   ChevronUp,
   Clock,
@@ -21,10 +21,18 @@ import {
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Select } from '@/components/ui/select'
+import { Alert, AlertDescription } from '@/components/ui/alert'
+import { ConfirmInline } from '@/components/ui/confirm-inline'
+import { useToast } from '@/components/ui/toast'
+import { PageHeader } from '@/components/PageHeader'
 import { useEvent, useEventRole } from '@/contexts/EventContext'
 import { apiFetch, ApiError } from '@/lib/api/client'
 import { getEventDayLabel, getEventDays } from '@/lib/events/dates'
+import { EN_DASH, plural } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { BulkSlotGenerator, type GeneratedSlot } from '@/components/admin/BulkSlotGenerator'
 import { networkNotice, type AdminTimeSlot, type AdminVenue, type NetworkSync } from '@/components/admin/types'
@@ -89,6 +97,7 @@ const errorText = (e: unknown, fallback: string) => (e instanceof ApiError ? e.m
 export default function AdminSetupPage() {
   const event = useEvent()
   const { can } = useEventRole()
+  const { toast } = useToast()
   const canManage = can('manageVenues')
   const base = `/api/v1/events/${event.slug}/admin`
 
@@ -102,7 +111,6 @@ export default function AdminSetupPage() {
   const [isLoading, setIsLoading] = React.useState(true)
   const [isSaving, setIsSaving] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
-  const [status, setStatus] = React.useState<string | null>(null)
 
   const [showVenueForm, setShowVenueForm] = React.useState(false)
   const [editingVenue, setEditingVenue] = React.useState<AdminVenue | null>(null)
@@ -111,17 +119,12 @@ export default function AdminSetupPage() {
   const [confirmDeleteVenue, setConfirmDeleteVenue] = React.useState<string | null>(null)
   const [expandedVenues, setExpandedVenues] = React.useState<Set<string>>(new Set())
   const [showBulkGenerator, setShowBulkGenerator] = React.useState(false)
-
-  React.useEffect(() => {
-    if (!status) return
-    const timer = window.setTimeout(() => setStatus(null), 5000)
-    return () => window.clearTimeout(timer)
-  }, [status])
+  const venueNameRef = React.useRef<HTMLInputElement>(null)
 
   const reportNetwork = (sync: NetworkSync | undefined, success: string) => {
     const warning = networkNotice(sync)
     if (warning) setError(warning)
-    else setStatus(success)
+    else toast({ title: success, variant: 'success' })
   }
 
   const load = React.useCallback(async () => {
@@ -133,7 +136,7 @@ export default function AdminSetupPage() {
       setVenues(v.venues)
       setTimeSlots(t.timeSlots)
     } catch (e) {
-      setError(errorText(e, 'Could not load rooms and availability. Refresh to try again.'))
+      setError(errorText(e, 'Rooms and availability could not be loaded. Refresh to try again.'))
     } finally {
       setIsLoading(false)
     }
@@ -153,6 +156,12 @@ export default function AdminSetupPage() {
     setVenueError(null)
   }
 
+  const openVenueForm = () => {
+    resetVenueForm()
+    setShowVenueForm(true)
+    window.requestAnimationFrame(() => venueNameRef.current?.focus())
+  }
+
   const startEditVenue = (venue: AdminVenue) => {
     setEditingVenue(venue)
     setVenueForm({
@@ -170,12 +179,13 @@ export default function AdminSetupPage() {
     })
     setVenueError(null)
     setShowVenueForm(true)
+    window.requestAnimationFrame(() => venueNameRef.current?.focus())
   }
 
   const saveVenue = async () => {
     if (isSaving) return
     setVenueError(null)
-    if (!venueForm.name.trim()) { setVenueError('Enter a room name.'); return }
+    if (!venueForm.name.trim()) { setVenueError('Enter a room name.'); venueNameRef.current?.focus(); return }
     if (venueForm.capacity && (!Number.isInteger(Number(venueForm.capacity)) || Number(venueForm.capacity) <= 0)) {
       setVenueError('Capacity must be a positive whole number.')
       return
@@ -202,25 +212,25 @@ export default function AdminSetupPage() {
       resetVenueForm()
       reportNetwork(res.network, editingVenue ? 'Room updated.' : 'Room added.')
     } catch (e) {
-      setVenueError(errorText(e, 'Could not save this room.'))
+      setVenueError(errorText(e, 'The room could not be saved.'))
     } finally {
       setIsSaving(false)
     }
   }
 
   const deleteVenue = async (id: string) => {
-    setConfirmDeleteVenue(null)
     setIsSaving(true)
     setError(null)
     try {
       const res = await apiFetch<{ unscheduled: number; network: { venues: NetworkSync; grids: NetworkSync } }>(`${base}/venues/${id}`, { method: 'DELETE' })
       setVenues((prev) => prev.filter((v) => v.id !== id))
       setTimeSlots((prev) => prev.filter((t) => t.venue_id !== id))
+      setConfirmDeleteVenue(null)
       reportNetwork(res.network.venues.error ? res.network.venues : res.network.grids, res.unscheduled
-        ? `Room removed. ${res.unscheduled} session${res.unscheduled === 1 ? '' : 's'} went back to the unscheduled tray.`
+        ? `Room removed. ${plural(res.unscheduled, 'session')} went back to the unscheduled tray.`
         : 'Room removed.')
     } catch (e) {
-      setError(errorText(e, 'Could not remove this room.'))
+      setError(errorText(e, 'The room could not be removed.'))
     } finally {
       setIsSaving(false)
     }
@@ -237,10 +247,10 @@ export default function AdminSetupPage() {
       })
       setTimeSlots((prev) => [...prev, ...res.timeSlots].sort((a, b) => Date.parse(a.start_time) - Date.parse(b.start_time)))
       await refreshVenues()
-      reportNetwork(res.network, `Saved ${res.timeSlots.length} time slot${res.timeSlots.length === 1 ? '' : 's'}.`)
+      reportNetwork(res.network, `Saved ${plural(res.timeSlots.length, 'time slot')}.`)
       return null
     } catch (e) {
-      return errorText(e, 'Could not save this availability.')
+      return errorText(e, 'The availability could not be saved.')
     } finally {
       setIsSaving(false)
     }
@@ -261,7 +271,7 @@ export default function AdminSetupPage() {
       return { error: null }
     } catch (e) {
       if (e instanceof ApiError && e.code === 'SlotHasSessions') return { error: e.message, needsConfirm: true }
-      return { error: errorText(e, 'Could not update this availability.') }
+      return { error: errorText(e, 'The availability could not be updated.') }
     } finally {
       setIsSaving(false)
     }
@@ -274,11 +284,11 @@ export default function AdminSetupPage() {
       const res = await apiFetch<{ unscheduled: number; network: NetworkSync }>(`${base}/time-slots/${id}${confirmed ? '?confirm=1' : ''}`, { method: 'DELETE' })
       setTimeSlots((prev) => prev.filter((t) => t.id !== id))
       await refreshVenues()
-      reportNetwork(res.network, res.unscheduled ? `Slot removed; ${res.unscheduled} session${res.unscheduled === 1 ? '' : 's'} went back to the tray.` : 'Slot removed.')
+      reportNetwork(res.network, res.unscheduled ? `Slot removed; ${plural(res.unscheduled, 'session')} went back to the tray.` : 'Slot removed.')
       return { error: null }
     } catch (e) {
       if (e instanceof ApiError && e.code === 'SlotHasSessions') return { error: e.message, needsConfirm: true }
-      return { error: errorText(e, 'Could not remove this availability.') }
+      return { error: errorText(e, 'The availability could not be removed.') }
     } finally {
       setIsSaving(false)
     }
@@ -294,10 +304,11 @@ export default function AdminSetupPage() {
     return <div className="flex items-center justify-center py-12" role="status" aria-label="Loading"><Loader2 className="h-8 w-8 animate-spin text-muted-foreground" /></div>
   }
 
-  const field = (key: keyof VenueForm, label: string, props: React.InputHTMLAttributes<HTMLInputElement> = {}) => (
+  const field = (key: keyof VenueForm, label: string, props: React.InputHTMLAttributes<HTMLInputElement> = {}, ref?: React.RefObject<HTMLInputElement | null>) => (
     <div className="space-y-2">
-      <label htmlFor={`venue-${key}`} className="text-sm font-medium">{label}</label>
+      <Label htmlFor={`venue-${key}`}>{label}</Label>
       <Input
+        ref={ref}
         id={`venue-${key}`}
         value={venueForm[key] as string}
         onChange={(e) => setVenueForm((f) => ({ ...f, [key]: e.target.value }))}
@@ -306,184 +317,207 @@ export default function AdminSetupPage() {
     </div>
   )
 
+  const sessionSlotCount = timeSlots.filter((t) => !t.is_break).length
+  const roomsWithoutSlots = venues.length > 0 && timeSlots.length === 0
+
   return (
-    <div className="space-y-6">
-      {error && <div role="alert" className="rounded-xl border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">{error}</div>}
-      {status && <div role="status" className="rounded-xl border border-primary/30 bg-card p-4 text-sm">{status}</div>}
-
-      <div>
-        <h1 className="font-semibold">Spaces &amp; times</h1>
-        <p className="text-muted-foreground mt-2">Give your gathering a place to happen.</p>
-      </div>
-
-      <Card className="bg-muted/30">
-        <CardContent className="py-4">
-          <p className="text-sm text-muted-foreground">
-            Add rooms and their availability. Times are in the event&rsquo;s timezone ({event.timezone}). Then use the{' '}
-            <Link href={`/e/${event.slug}/admin/schedule`} className="text-primary hover:underline font-medium">Schedule builder</Link> to place sessions.
-          </p>
-        </CardContent>
-      </Card>
-
-      <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3">
-        <h2 className="text-lg font-semibold flex items-center gap-2"><MapPin className="h-5 w-5" />Rooms &amp; availability</h2>
-        {canManage && (
-          <div className="flex gap-2">
-            <Button onClick={() => { resetVenueForm(); setShowVenueForm(true) }} disabled={showVenueForm} className="flex-1 sm:flex-none"><Plus className="h-4 w-4 mr-2" />Add room</Button>
+    <div>
+      <PageHeader
+        title="Spaces & times"
+        subtitle={<>Add rooms and when each one is free. Times are in the gathering’s timezone ({event.timezone}).</>}
+        actions={canManage && (
+          <>
             {venues.length > 0 && (
-              <Button variant="outline" onClick={() => setShowBulkGenerator(true)} disabled={showBulkGenerator} className="flex-1 sm:flex-none">
-                <Zap className="h-4 w-4 mr-2" />
-                <span className="hidden sm:inline">Generate slots</span>
-                <span className="sm:hidden">Slots</span>
+              <Button variant="outline" onClick={() => setShowBulkGenerator(true)} disabled={showBulkGenerator}>
+                <Zap className="h-4 w-4 mr-2" aria-hidden="true" />
+                Generate slots
               </Button>
             )}
-          </div>
+            <Button onClick={openVenueForm} disabled={showVenueForm}><Plus className="h-4 w-4 mr-2" aria-hidden="true" />Add room</Button>
+          </>
         )}
-      </div>
+      />
 
-      {showBulkGenerator && venues.length > 0 && (
-        <Card className="border-primary/50">
-          <CardHeader><CardTitle className="text-lg">Generate time slots</CardTitle></CardHeader>
-          <CardContent>
-            <BulkSlotGenerator
-              venues={venues.map((v) => ({ id: v.id, name: v.name, capacity: v.capacity }))}
-              eventDays={eventDays}
-              existingSlots={timeSlots.filter(slot => slot.venue_id).map(slot => ({
-                venueId: slot.venue_id!, dayDate: toEventLocalParts(slot.start_time, event.timezone).date,
-                startTime: toEventLocalParts(slot.start_time, event.timezone).time,
-                endTime: toEventLocalParts(slot.end_time, event.timezone).time,
-              }))}
-              onGenerate={handleBulkGenerate}
-              isSaving={isSaving}
-              onCancel={() => setShowBulkGenerator(false)}
-            />
-          </CardContent>
-        </Card>
-      )}
+      <div className="space-y-6">
+        {error && (
+          <Alert variant="destructive" className="flex items-start justify-between gap-3 [&>svg~*]:pl-0">
+            <AlertDescription role="alert">{error}</AlertDescription>
+            <Button variant="ghost" size="sm" onClick={() => setError(null)}>Dismiss</Button>
+          </Alert>
+        )}
 
-      {showVenueForm && (
-        <Card className="border-primary/50">
-          <CardHeader><CardTitle className="text-lg">{editingVenue ? 'Edit room' : 'New room'}</CardTitle></CardHeader>
-          <CardContent className="space-y-4">
-            <div className="grid gap-4 sm:grid-cols-2">
-              {field('name', 'Name *', { placeholder: 'e.g., Main Hall', maxLength: 100 })}
-              {field('slug', 'Short name', { placeholder: 'Generated from the name if empty', maxLength: 60 })}
-            </div>
-            <div className="grid gap-4 sm:grid-cols-2">
-              {field('capacity', 'Capacity', { type: 'number', min: 1, placeholder: 'e.g., 100' })}
-              <div className="space-y-2">
-                <span className="text-sm font-medium">Type</span>
-                <label className="flex items-center gap-2 h-10 cursor-pointer">
-                  <input type="checkbox" checked={venueForm.is_primary} onChange={(e) => setVenueForm((f) => ({ ...f, is_primary: e.target.checked }))} className="rounded" />
-                  <span className="text-sm">Primary room (main stage)</span>
-                </label>
+        {showBulkGenerator && venues.length > 0 && (
+          <Card className="border-primary/50">
+            <CardHeader><CardTitle className="text-lg">Generate time slots</CardTitle></CardHeader>
+            <CardContent>
+              <BulkSlotGenerator
+                venues={venues.map((v) => ({ id: v.id, name: v.name, capacity: v.capacity }))}
+                eventDays={eventDays}
+                existingSlots={timeSlots.filter(slot => slot.venue_id).map(slot => ({
+                  venueId: slot.venue_id!, dayDate: toEventLocalParts(slot.start_time, event.timezone).date,
+                  startTime: toEventLocalParts(slot.start_time, event.timezone).time,
+                  endTime: toEventLocalParts(slot.end_time, event.timezone).time,
+                }))}
+                onGenerate={handleBulkGenerate}
+                isSaving={isSaving}
+                onCancel={() => setShowBulkGenerator(false)}
+              />
+            </CardContent>
+          </Card>
+        )}
+
+        {showVenueForm && (
+          <Card className="border-primary/50">
+            <CardHeader><CardTitle className="text-lg">{editingVenue ? 'Edit room' : 'New room'}</CardTitle></CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid gap-4 sm:grid-cols-2">
+                {field('name', 'Name', { placeholder: 'e.g. Main hall', maxLength: 100, 'aria-invalid': venueError && !venueForm.name.trim() ? true : undefined }, venueNameRef)}
+                {field('slug', 'Short name (optional)', { placeholder: 'Generated from the name if empty', maxLength: 60 })}
               </div>
-            </div>
-            {field('address', 'Street address', { placeholder: 'e.g., 1600 Walnut St', maxLength: 300 })}
-            <div className="grid gap-4 grid-cols-2 sm:grid-cols-4">
-              {field('locality', 'City or neighbourhood', { maxLength: 100 })}
-              {field('region', 'Region', { maxLength: 100 })}
-              {field('postal_code', 'Postal code', { maxLength: 20 })}
-              {field('country', 'Country (2 letters)', { maxLength: 2, placeholder: 'US' })}
-            </div>
-            <label className="flex items-start gap-2 text-sm cursor-pointer">
-              <input type="checkbox" checked={venueForm.is_private_residence} onChange={(e) => setVenueForm((f) => ({ ...f, is_private_residence: e.target.checked }))} className="rounded mt-0.5" />
-              <span>This is a private home. <span className="text-muted-foreground">The public calendar shows only the city or neighbourhood, never the street address.</span></span>
-            </label>
-            {field('features', 'Features (comma-separated)', { placeholder: 'e.g., projector, whiteboard, round tables' })}
-            {venueError && <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">{venueError}</p>}
-            <div className="flex gap-2 justify-end">
-              <Button variant="outline" onClick={resetVenueForm} disabled={isSaving}>Cancel</Button>
-              <Button onClick={() => void saveVenue()} disabled={!venueForm.name.trim() || isSaving}>
-                {isSaving ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Check className="h-4 w-4 mr-2" />}
-                {editingVenue ? 'Update' : 'Create'}
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      <div className="space-y-4">
-        {venues.map((venue) => {
-          const venueSlots = timeSlots.filter((t) => t.venue_id === venue.id)
-          const isExpanded = expandedVenues.has(venue.id)
-          return (
-            <Card key={venue.id}>
-              <CardContent className="p-4">
-                <div className="space-y-3">
-                  <div className="space-y-2 flex-1">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <Building className="h-5 w-5 text-primary flex-shrink-0" aria-hidden />
-                      <h3 className="font-semibold">{venue.name}</h3>
-                      {venue.is_primary && <Badge variant="default" className="text-xs">Primary</Badge>}
-                      {venue.is_private_residence && <Badge variant="outline" className="text-xs">Private home</Badge>}
-                      {venue.network_published && <Badge variant="outline" className="text-xs gap-1"><Globe className="h-3 w-3" />On the network</Badge>}
-                    </div>
-                    <div className="flex items-center gap-3 sm:gap-4 text-sm text-muted-foreground flex-wrap">
-                      {venue.capacity && <span className="flex items-center gap-1"><UsersIcon className="h-4 w-4" />{venue.capacity} cap</span>}
-                      <span className="flex items-center gap-1"><Clock className="h-4 w-4" />{venue.slot_count} slots</span>
-                      <span>{venue.scheduled_count} scheduled</span>
-                    </div>
-                    {venue.features.length > 0 && (
-                      <div className="flex flex-wrap gap-1">{venue.features.map((feature) => <Badge key={feature} variant="secondary" className="text-xs">{feature}</Badge>)}</div>
-                    )}
+              <div className="grid gap-4 sm:grid-cols-2">
+                {field('capacity', 'Capacity (optional)', { type: 'number', min: 1, placeholder: 'e.g. 100', inputMode: 'numeric' })}
+                <fieldset className="space-y-2">
+                  <legend className="text-sm font-medium">Type</legend>
+                  <div className="flex h-11 items-center gap-2">
+                    <Checkbox id="venue-is-primary" checked={venueForm.is_primary} onCheckedChange={(checked) => setVenueForm((f) => ({ ...f, is_primary: checked === true }))} />
+                    <Label htmlFor="venue-is-primary" className="font-normal">Primary room (main stage)</Label>
                   </div>
-                  {confirmDeleteVenue === venue.id ? (
-                    <div role="alertdialog" aria-label={`Remove ${venue.name}`} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm">
-                      <span>Remove {venue.name} and its {venue.slot_count} time slot{venue.slot_count === 1 ? '' : 's'}?{venue.scheduled_count ? ` ${venue.scheduled_count} scheduled session${venue.scheduled_count === 1 ? '' : 's'} will go back to the tray.` : ''}</span>
-                      <div className="flex gap-2">
-                        <Button size="sm" variant="outline" onClick={() => setConfirmDeleteVenue(null)}>Keep</Button>
-                        <Button size="sm" variant="destructive" onClick={() => void deleteVenue(venue.id)} disabled={isSaving}>Remove</Button>
+                </fieldset>
+              </div>
+              {field('address', 'Street address (optional)', { placeholder: 'e.g. 1600 Walnut St', maxLength: 300 })}
+              <div className="grid gap-4 grid-cols-2 sm:grid-cols-4">
+                {field('locality', 'City or neighborhood (optional)', { maxLength: 100 })}
+                {field('region', 'Region (optional)', { maxLength: 100 })}
+                {field('postal_code', 'Postal code (optional)', { maxLength: 20 })}
+                {field('country', 'Country (optional)', { maxLength: 2, placeholder: 'US' })}
+              </div>
+              <div className="flex items-start gap-2 text-sm">
+                <Checkbox id="venue-private" className="mt-0.5" checked={venueForm.is_private_residence} onCheckedChange={(checked) => setVenueForm((f) => ({ ...f, is_private_residence: checked === true }))} />
+                <Label htmlFor="venue-private" className="font-normal leading-snug">This is a private home. <span className="text-muted-foreground">The public calendar shows only the city or neighborhood, never the street address.</span></Label>
+              </div>
+              {field('features', 'Features (optional, comma-separated)', { placeholder: 'e.g. projector, whiteboard, round tables' })}
+              {venueError && <p role="alert" className="rounded-lg border border-destructive/20 bg-destructive/10 p-3 text-sm text-destructive">{venueError}</p>}
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" onClick={resetVenueForm} disabled={isSaving}>Cancel</Button>
+                <Button onClick={() => void saveVenue()} loading={isSaving} disabled={!venueForm.name.trim()}>
+                  {editingVenue ? 'Save changes' : 'Add room'}
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {roomsWithoutSlots && !showBulkGenerator && (
+          <Card className="border-primary/25 bg-secondary/40">
+            <CardContent className="py-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+              <div>
+                <h2 className="font-display text-lg font-semibold">Rooms are ready — now add times</h2>
+                <p className="mt-1 text-sm text-muted-foreground">Sessions can only be placed where a room has a free slot. Generate a day’s slots in one go, or add them room by room.</p>
+              </div>
+              {canManage && (
+                <Button onClick={() => setShowBulkGenerator(true)} className="shrink-0"><Zap className="h-4 w-4 mr-2" aria-hidden="true" />Generate slots</Button>
+              )}
+            </CardContent>
+          </Card>
+        )}
+
+        <section aria-labelledby="rooms-heading" className="space-y-4">
+          <h2 id="rooms-heading" className="text-lg font-semibold flex items-center gap-2"><MapPin className="h-5 w-5" aria-hidden="true" />Rooms & availability</h2>
+          {venues.map((venue) => {
+            const venueSlots = timeSlots.filter((t) => t.venue_id === venue.id)
+            const isExpanded = expandedVenues.has(venue.id)
+            return (
+              <Card key={venue.id}>
+                <CardContent className="p-4">
+                  <div className="space-y-3">
+                    <div className="space-y-2 flex-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <Building className="h-5 w-5 text-primary flex-shrink-0" aria-hidden="true" />
+                        <h3 className="font-semibold">{venue.name}</h3>
+                        {venue.is_primary && <Badge variant="default">Primary</Badge>}
+                        {venue.is_private_residence && <Badge variant="outline">Private home</Badge>}
+                        {venue.network_published && <Badge variant="outline" className="gap-1"><Globe className="h-3 w-3" aria-hidden="true" />On the network</Badge>}
                       </div>
-                    </div>
-                  ) : (
-                    <div className="flex gap-1 flex-wrap sm:flex-nowrap pt-2 border-t">
-                      <Button size="sm" variant="ghost" onClick={() => setExpandedVenues((prev) => { const next = new Set(prev); if (next.has(venue.id)) next.delete(venue.id); else next.add(venue.id); return next })} className="flex-1 sm:flex-none" aria-expanded={isExpanded}>
-                        <Calendar className="h-4 w-4 mr-1" />
-                        Availability
-                        {isExpanded ? <ChevronUp className="h-4 w-4 ml-1" /> : <ChevronDown className="h-4 w-4 ml-1" />}
-                      </Button>
-                      {canManage && (
-                        <>
-                          <Button size="icon" variant="ghost" onClick={() => startEditVenue(venue)} className="h-9 w-9" aria-label={`Edit ${venue.name}`}><Edit2 className="h-4 w-4" /></Button>
-                          <Button size="icon" variant="ghost" className="text-destructive hover:text-destructive h-9 w-9" onClick={() => setConfirmDeleteVenue(venue.id)} aria-label={`Remove ${venue.name}`}><Trash2 className="h-4 w-4" /></Button>
-                        </>
+                      <div className="flex items-center gap-3 sm:gap-4 text-sm text-muted-foreground flex-wrap">
+                        {venue.capacity && <span className="flex items-center gap-1"><UsersIcon className="h-4 w-4" aria-hidden="true" />{plural(venue.capacity, 'seat')}</span>}
+                        <span className="flex items-center gap-1"><Clock className="h-4 w-4" aria-hidden="true" />{plural(venue.slot_count, 'slot')}</span>
+                        <span>{venue.scheduled_count} scheduled</span>
+                      </div>
+                      {venue.features.length > 0 && (
+                        <div className="flex flex-wrap gap-1">{venue.features.map((feature) => <Badge key={feature} variant="secondary">{feature}</Badge>)}</div>
                       )}
                     </div>
-                  )}
-                </div>
-                {isExpanded && (
-                  <div className="mt-4 pt-4 border-t">
-                    <VenueAvailabilityEditor
-                      venue={venue}
-                      venues={venues}
-                      slots={venueSlots}
-                      eventDays={eventDays}
-                      timezone={event.timezone}
-                      canManage={canManage}
-                      isSaving={isSaving}
-                      onCreate={createSlots}
-                      onUpdate={updateSlot}
-                      onDelete={deleteSlot}
-                    />
+                    {confirmDeleteVenue === venue.id ? (
+                      <ConfirmInline
+                        layout="inline"
+                        destructive
+                        message={`Remove ${venue.name} and its ${plural(venue.slot_count, 'time slot')}?${venue.scheduled_count ? ` ${plural(venue.scheduled_count, 'scheduled session')} will go back to the tray.` : ''}`}
+                        confirmLabel="Remove"
+                        loading={isSaving}
+                        onConfirm={() => void deleteVenue(venue.id)}
+                        onCancel={() => setConfirmDeleteVenue(null)}
+                      />
+                    ) : (
+                      <div className="flex items-center gap-1 flex-wrap pt-2 border-t">
+                        <Button size="sm" variant="outline" onClick={() => setExpandedVenues((prev) => { const next = new Set(prev); if (next.has(venue.id)) next.delete(venue.id); else next.add(venue.id); return next })} aria-expanded={isExpanded} aria-controls={`availability-${venue.id}`}>
+                          <Calendar className="h-4 w-4 mr-1" aria-hidden="true" />
+                          Availability
+                          {isExpanded ? <ChevronUp className="h-4 w-4 ml-1" aria-hidden="true" /> : <ChevronDown className="h-4 w-4 ml-1" aria-hidden="true" />}
+                        </Button>
+                        {canManage && (
+                          <span className="ml-auto flex gap-1">
+                            <Button size="icon-sm" variant="ghost" onClick={() => startEditVenue(venue)} aria-label={`Edit ${venue.name}`}><Edit2 className="h-4 w-4" aria-hidden="true" /></Button>
+                            <Button size="icon-sm" variant="ghost" className="text-destructive hover:text-destructive" onClick={() => setConfirmDeleteVenue(venue.id)} aria-label={`Remove ${venue.name}`}><Trash2 className="h-4 w-4" aria-hidden="true" /></Button>
+                          </span>
+                        )}
+                      </div>
+                    )}
                   </div>
-                )}
+                  {isExpanded && (
+                    <div id={`availability-${venue.id}`} className="mt-4 pt-4 border-t">
+                      <VenueAvailabilityEditor
+                        venue={venue}
+                        venues={venues}
+                        slots={venueSlots}
+                        eventDays={eventDays}
+                        timezone={event.timezone}
+                        canManage={canManage}
+                        isSaving={isSaving}
+                        onCreate={createSlots}
+                        onUpdate={updateSlot}
+                        onDelete={deleteSlot}
+                      />
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            )
+          })}
+
+          {venues.length === 0 && !showVenueForm && (
+            <Card>
+              <CardContent className="py-12 text-center">
+                <MapPin className="h-12 w-12 mx-auto text-muted-foreground mb-4" aria-hidden="true" />
+                <h3 className="font-semibold mb-2">No rooms yet</h3>
+                <p className="text-muted-foreground mb-4">Add your first room to start building the schedule.</p>
+                {canManage && <Button onClick={openVenueForm}><Plus className="h-4 w-4 mr-2" aria-hidden="true" />Add room</Button>}
               </CardContent>
             </Card>
-          )
-        })}
-      </div>
+          )}
+        </section>
 
-      {venues.length === 0 && !showVenueForm && (
-        <Card>
-          <CardContent className="py-12 text-center">
-            <MapPin className="h-12 w-12 mx-auto text-muted-foreground mb-4" aria-hidden />
-            <h3 className="font-semibold mb-2">No rooms yet</h3>
-            <p className="text-muted-foreground mb-4">Add your first room to start building the schedule</p>
-            {canManage && <Button onClick={() => setShowVenueForm(true)}><Plus className="h-4 w-4 mr-2" />Add room</Button>}
-          </CardContent>
-        </Card>
-      )}
+        {venues.length > 0 && sessionSlotCount > 0 && can('manageSchedule') && (
+          <Card className="border-primary/25">
+            <CardContent className="py-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+              <div>
+                <p className="font-medium">Next: place sessions</p>
+                <p className="text-sm text-muted-foreground">{plural(venues.length, 'room')} and {plural(sessionSlotCount, 'session slot')} are ready for the schedule builder.</p>
+              </div>
+              <Button asChild className="shrink-0"><Link href={`/e/${event.slug}/admin/schedule`}>Open schedule builder<ArrowRight className="h-4 w-4 ml-2" aria-hidden="true" /></Link></Button>
+            </CardContent>
+          </Card>
+        )}
+      </div>
     </div>
   )
 }
@@ -566,7 +600,7 @@ function VenueAvailabilityEditor({
         id: slot.id,
         needsConfirm: slot.sessions.length > 0,
         message: slot.sessions.length > 0
-          ? `${slot.sessions.length} session${slot.sessions.length === 1 ? ' is' : 's are'} scheduled here (${slot.sessions.map((s) => s.title).join(', ')}) and will go back to the tray.`
+          ? `${plural(slot.sessions.length, 'session')} ${slot.sessions.length === 1 ? 'is' : 'are'} scheduled here (${slot.sessions.map((s) => s.title).join(', ')}) and will go back to the tray. Remove the slot?`
           : null,
       })
       return
@@ -576,9 +610,11 @@ function VenueAvailabilityEditor({
     else setDeleting(null)
   }
 
+  const dayLabel = eventDays.find((d) => d.date === selectedDay)?.label
+
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2 overflow-x-auto pb-1 -mx-1 px-1">
+      <div role="group" aria-label="Day" className="flex items-center gap-2 overflow-x-auto pb-1 -mx-1 px-1">
         {eventDays.map((day) => (
           <Button key={day.date} variant={selectedDay === day.date ? 'default' : 'outline'} size="sm" onClick={() => setSelectedDay(day.date)} aria-pressed={selectedDay === day.date} className="whitespace-nowrap flex-shrink-0">{day.label}</Button>
         ))}
@@ -586,35 +622,37 @@ function VenueAvailabilityEditor({
 
       <div className="space-y-2">
         {daySlots.length === 0 ? (
-          <p className="text-sm text-muted-foreground py-4 text-center">No time slots for this day. Add availability below.</p>
+          <p className="text-sm text-muted-foreground py-4 text-center">No time slots on {dayLabel ?? 'this day'} yet.{canManage ? ' Add one below.' : ''}</p>
         ) : (
           daySlots.map((slot) =>
             editingSlot?.id === slot.id && editingInitial ? (
               <SlotForm key={slot.id} mode="edit" initial={editingInitial} venues={venues} eventDays={eventDays} isSaving={isSaving} error={editError} confirmLabel={editNeedsConfirm ? 'Confirm and save' : undefined} sessionTitles={slot.sessions.map((s) => s.title)} onSubmit={submitEdit} onCancel={cancelEdit} />
             ) : (
-              <div key={slot.id} className={cn('rounded-lg border p-3 space-y-2', slot.is_break ? 'bg-amber-50 dark:bg-amber-950/20 border-amber-200 dark:border-amber-800' : 'bg-muted/30')}>
+              <div key={slot.id} className={cn('rounded-xl border p-3 space-y-2', slot.is_break ? 'border-signal-amber/30 bg-signal-amber/10' : 'bg-muted/30')}>
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2 sm:gap-3 flex-wrap flex-1 min-w-0">
-                    <div className="text-sm whitespace-nowrap">{formatTime(slot.start_time)} - {formatTime(slot.end_time)}</div>
-                    <Badge variant={slot.is_break ? 'secondary' : 'outline'} className="text-xs capitalize">{slot.is_break ? 'Break' : slot.slot_type || 'session'}</Badge>
+                    <div className="text-sm whitespace-nowrap tabular-nums">{formatTime(slot.start_time)}{EN_DASH}{formatTime(slot.end_time)}</div>
+                    <Badge variant={slot.is_break ? 'amber' : 'outline'} className="capitalize">{slot.is_break ? 'Break' : slot.slot_type || 'session'}</Badge>
                     {slot.label && <span className="text-sm text-muted-foreground truncate">{slot.label}</span>}
                     {slot.sessions.length > 0 && <span className="text-xs text-muted-foreground truncate">· {slot.sessions.map((s) => s.title).join(', ')}</span>}
                   </div>
-                  {canManage && (
+                  {canManage && deleting?.id !== slot.id && (
                     <div className="flex gap-1 flex-shrink-0">
-                      <Button size="icon" variant="ghost" className="h-9 w-9" onClick={() => { setShowAddForm(false); setDeleting(null); setEditError(null); setEditNeedsConfirm(false); setEditingSlot(slot) }} disabled={isSaving} aria-label={`Edit ${formatTime(slot.start_time)} slot`}><Edit2 className="h-4 w-4" /></Button>
-                      <Button size="icon" variant="ghost" className="h-9 w-9 text-destructive hover:text-destructive" onClick={() => void requestDelete(slot, false)} disabled={isSaving} aria-label={`Remove ${formatTime(slot.start_time)} slot`}><Trash2 className="h-4 w-4" /></Button>
+                      <Button size="icon-sm" variant="ghost" onClick={() => { setShowAddForm(false); setDeleting(null); setEditError(null); setEditNeedsConfirm(false); setEditingSlot(slot) }} disabled={isSaving} aria-label={`Edit the ${formatTime(slot.start_time)} slot`}><Edit2 className="h-4 w-4" aria-hidden="true" /></Button>
+                      <Button size="icon-sm" variant="ghost" className="text-destructive hover:text-destructive" onClick={() => void requestDelete(slot, false)} disabled={isSaving} aria-label={`Remove the ${formatTime(slot.start_time)} slot`}><Trash2 className="h-4 w-4" aria-hidden="true" /></Button>
                     </div>
                   )}
                 </div>
                 {deleting?.id === slot.id && (
-                  <div role="alertdialog" aria-label="Remove time slot" className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-2 text-sm">
-                    <span>{deleting.message ?? 'Remove this time slot?'}</span>
-                    <div className="flex gap-2">
-                      <Button size="sm" variant="outline" onClick={() => setDeleting(null)}>Keep</Button>
-                      <Button size="sm" variant="destructive" onClick={() => void requestDelete(slot, true)} disabled={isSaving}>Remove</Button>
-                    </div>
-                  </div>
+                  <ConfirmInline
+                    layout="inline"
+                    destructive
+                    message={deleting.message ?? 'Remove this time slot?'}
+                    confirmLabel="Remove"
+                    loading={isSaving}
+                    onConfirm={() => void requestDelete(slot, true)}
+                    onCancel={() => setDeleting(null)}
+                  />
                 )}
               </div>
             ),
@@ -644,8 +682,8 @@ function VenueAvailabilityEditor({
         />
       ) : (
         <Button variant="outline" size="sm" onClick={() => { cancelEdit(); setShowAddForm(true) }} className="w-full">
-          <Plus className="h-4 w-4 mr-2" />
-          Add a time slot for {eventDays.find((d) => d.date === selectedDay)?.label}
+          <Plus className="h-4 w-4 mr-2" aria-hidden="true" />
+          Add a time slot for {dayLabel}
         </Button>
       ))}
     </div>
@@ -678,60 +716,62 @@ function SlotForm({
   const id = React.useId()
   const [form, setForm] = React.useState<SlotInput>(initial)
   const isEdit = mode === 'edit'
-  const selectClass = 'w-full min-h-[44px] rounded-md border bg-background px-3 text-sm'
   const set = (key: keyof SlotInput) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setForm((f) => ({ ...f, [key]: e.target.value }))
+  const invalidRange = form.endTime <= form.startTime
 
   return (
     <Card className={cn(isEdit ? 'border-primary/50' : 'border-dashed')} role="group" aria-labelledby={`${id}-title`}>
       <CardContent className="p-4 space-y-4">
         <h4 id={`${id}-title`} className="text-sm font-semibold">{isEdit ? 'Edit time slot' : 'New time slot'}</h4>
         {isEdit && sessionTitles.length > 0 && (
-          <p role="status" className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/20 dark:text-amber-200">
-            Scheduled here: {sessionTitles.join(', ')}. Changing the time or room moves {sessionTitles.length === 1 ? 'it' : 'them'} and notifies the host{sessionTitles.length === 1 ? '' : 's'}.
-          </p>
+          <Alert variant="warning" role="status">
+            <AlertDescription>
+              Scheduled here: {sessionTitles.join(', ')}. Changing the time or room moves {sessionTitles.length === 1 ? 'it' : 'them'} and notifies the host{sessionTitles.length === 1 ? '' : 's'}.
+            </AlertDescription>
+          </Alert>
         )}
         {isEdit && (
           <div className="grid gap-3 grid-cols-1 sm:grid-cols-2">
             <div className="space-y-2">
-              <label htmlFor={`${id}-venue`} className="text-xs font-medium">Room</label>
-              <select id={`${id}-venue`} value={form.venueId} onChange={set('venueId')} className={selectClass}>
+              <Label htmlFor={`${id}-venue`}>Room</Label>
+              <Select id={`${id}-venue`} value={form.venueId} onChange={set('venueId')}>
                 {venues.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
-              </select>
+              </Select>
             </div>
             <div className="space-y-2">
-              <label htmlFor={`${id}-day`} className="text-xs font-medium">Day</label>
-              <select id={`${id}-day`} value={form.dayDate} onChange={set('dayDate')} className={selectClass}>
+              <Label htmlFor={`${id}-day`}>Day</Label>
+              <Select id={`${id}-day`} value={form.dayDate} onChange={set('dayDate')}>
                 {eventDays.map((day) => <option key={day.date} value={day.date}>{day.label}</option>)}
-              </select>
+              </Select>
             </div>
           </div>
         )}
         <div className="grid gap-3 grid-cols-2 sm:grid-cols-4">
           <div className="space-y-2">
-            <label htmlFor={`${id}-start`} className="text-xs font-medium">Start</label>
-            <Input id={`${id}-start`} type="time" value={form.startTime} onChange={set('startTime')} className="min-h-[44px]" />
+            <Label htmlFor={`${id}-start`}>Start</Label>
+            <Input id={`${id}-start`} type="time" value={form.startTime} onChange={set('startTime')} />
           </div>
           <div className="space-y-2">
-            <label htmlFor={`${id}-end`} className="text-xs font-medium">End</label>
-            <Input id={`${id}-end`} type="time" value={form.endTime} onChange={set('endTime')} className="min-h-[44px]" />
+            <Label htmlFor={`${id}-end`}>End</Label>
+            <Input id={`${id}-end`} type="time" value={form.endTime} onChange={set('endTime')} aria-invalid={invalidRange ? true : undefined} aria-describedby={invalidRange ? `${id}-range` : undefined} />
           </div>
           <div className="space-y-2">
-            <label htmlFor={`${id}-type`} className="text-xs font-medium">Type</label>
-            <select id={`${id}-type`} value={form.slotType} onChange={set('slotType')} className={selectClass}>
+            <Label htmlFor={`${id}-type`}>Type</Label>
+            <Select id={`${id}-type`} value={form.slotType} onChange={set('slotType')}>
               {SLOT_TYPE_OPTIONS.map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
-            </select>
+            </Select>
           </div>
           <div className="space-y-2">
-            <label htmlFor={`${id}-label`} className="text-xs font-medium">Label</label>
-            <Input id={`${id}-label`} placeholder="Optional" value={form.label} onChange={set('label')} maxLength={80} className="min-h-[44px]" />
+            <Label htmlFor={`${id}-label`}>Label (optional)</Label>
+            <Input id={`${id}-label`} placeholder="e.g. Lunch" value={form.label} onChange={set('label')} maxLength={80} />
           </div>
         </div>
-        {error && <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">{error}</p>}
-        <div className="flex gap-2">
-          <Button size="sm" variant="outline" onClick={onCancel} disabled={isSaving} className="flex-1 sm:flex-none">Cancel</Button>
-          <Button size="sm" onClick={() => onSubmit(form)} disabled={isSaving || form.endTime <= form.startTime} className="flex-1 sm:flex-none">
-            {isEdit ? <Check className="h-4 w-4 mr-1" /> : <Plus className="h-4 w-4 mr-1" />}
-            {confirmLabel ?? (isEdit ? 'Update' : 'Add')}
+        {invalidRange && <p id={`${id}-range`} className="text-sm text-destructive">The end time must be after the start time.</p>}
+        {error && <p role="alert" className="rounded-lg border border-destructive/20 bg-destructive/10 p-3 text-sm text-destructive">{error}</p>}
+        <div className="flex justify-end gap-2">
+          <Button size="sm" variant="outline" onClick={onCancel} disabled={isSaving}>Cancel</Button>
+          <Button size="sm" onClick={() => onSubmit(form)} loading={isSaving} disabled={invalidRange}>
+            {confirmLabel ?? (isEdit ? 'Save changes' : 'Add slot')}
           </Button>
         </div>
       </CardContent>

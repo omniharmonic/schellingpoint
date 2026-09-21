@@ -2,7 +2,7 @@
 
 import * as React from 'react'
 import { Calendar, ChevronDown, Download, ExternalLink } from 'lucide-react'
-import { Button } from '@/components/ui/button'
+import { Button, type ButtonProps } from '@/components/ui/button'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -35,18 +35,19 @@ interface AddToCalendarProps {
   eventSlug: string
   /** Event location fallback */
   eventLocation?: string | null
-  /** Variant: 'default' for full button, 'icon' for icon-only */
-  variant?: 'default' | 'icon' | 'outline'
-  /** Size of the button */
-  size?: 'default' | 'sm' | 'lg' | 'icon'
+  /** 'icon' renders an icon-only trigger (with an accessible name); any Button variant otherwise. */
+  variant?: NonNullable<ButtonProps['variant']> | 'icon'
+  size?: ButtonProps['size']
+  className?: string
 }
 
 export function AddToCalendar({
   session,
   eventSlug,
   eventLocation,
-  variant = 'default',
+  variant = 'ghost',
   size = 'default',
+  className,
 }: AddToCalendarProps) {
   const start = session.time_slot?.start_time ?? (session.is_self_hosted ? session.self_hosted_start_time : null)
   const end = session.time_slot?.end_time ?? (session.is_self_hosted ? session.self_hosted_end_time : null)
@@ -68,57 +69,49 @@ export function AddToCalendar({
     eventSlug,
   }, origin)
 
-  const handleGoogleCalendar = () => {
-    const url = generateGoogleCalendarURL(icsEvent)
-    window.open(url, '_blank', 'noopener,noreferrer')
-  }
-
-  const handleOutlookCalendar = () => {
-    const url = generateOutlookCalendarURL(icsEvent)
-    window.open(url, '_blank', 'noopener,noreferrer')
-  }
-
-  const handleYahooCalendar = () => {
-    const url = generateYahooCalendarURL(icsEvent)
-    window.open(url, '_blank', 'noopener,noreferrer')
-  }
+  const open = (url: string) => window.open(url, '_blank', 'noopener,noreferrer')
 
   const handleDownloadICS = () => {
-    const icsUrl = `/api/v1/events/${eventSlug}/sessions/${session.id}/calendar`
-    window.location.href = icsUrl
+    window.location.href = `/api/v1/events/${eventSlug}/sessions/${session.id}/calendar`
   }
 
-  const buttonVariant = variant === 'outline' ? 'outline' : 'ghost'
+  const iconOnly = variant === 'icon'
 
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant={buttonVariant} size={size}>
-          <Calendar className="h-4 w-4" />
-          {variant !== 'icon' && (
+        <Button
+          variant={iconOnly ? 'ghost' : variant}
+          size={iconOnly ? 'icon-sm' : size}
+          className={className}
+          aria-label={iconOnly ? 'Add to calendar' : undefined}
+          title={iconOnly ? 'Add to calendar' : undefined}
+        >
+          <Calendar className="h-4 w-4" aria-hidden />
+          {!iconOnly && (
             <>
-              <span className="ml-2 hidden sm:inline">Add to Calendar</span>
-              <ChevronDown className="h-4 w-4 ml-1 hidden sm:inline" />
+              <span className="ml-2">Add to calendar</span>
+              <ChevronDown className="ml-auto h-4 w-4 opacity-60" aria-hidden />
             </>
           )}
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-48">
-        <DropdownMenuItem onClick={handleGoogleCalendar}>
-          <ExternalLink className="h-4 w-4 mr-2" />
+        <DropdownMenuItem onClick={() => open(generateGoogleCalendarURL(icsEvent))}>
+          <ExternalLink className="mr-2 h-4 w-4" aria-hidden />
           Google Calendar
         </DropdownMenuItem>
-        <DropdownMenuItem onClick={handleOutlookCalendar}>
-          <ExternalLink className="h-4 w-4 mr-2" />
+        <DropdownMenuItem onClick={() => open(generateOutlookCalendarURL(icsEvent))}>
+          <ExternalLink className="mr-2 h-4 w-4" aria-hidden />
           Outlook
         </DropdownMenuItem>
-        <DropdownMenuItem onClick={handleYahooCalendar}>
-          <ExternalLink className="h-4 w-4 mr-2" />
+        <DropdownMenuItem onClick={() => open(generateYahooCalendarURL(icsEvent))}>
+          <ExternalLink className="mr-2 h-4 w-4" aria-hidden />
           Yahoo Calendar
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem onClick={handleDownloadICS}>
-          <Download className="h-4 w-4 mr-2" />
+          <Download className="mr-2 h-4 w-4" aria-hidden />
           Download .ics
         </DropdownMenuItem>
       </DropdownMenuContent>
@@ -126,13 +119,11 @@ export function AddToCalendar({
   )
 }
 
-interface ExportScheduleButtonProps {
+interface ExportScheduleButtonProps extends Pick<ButtonProps, 'variant' | 'size' | 'className'> {
   eventSlug: string
   eventName: string
   /** Whether to export favorites only */
   favoritesOnly?: boolean
-  variant?: 'default' | 'outline' | 'ghost'
-  size?: 'default' | 'sm' | 'lg'
 }
 
 export function ExportScheduleButton({
@@ -141,6 +132,7 @@ export function ExportScheduleButton({
   favoritesOnly = false,
   variant = 'outline',
   size = 'default',
+  className,
 }: ExportScheduleButtonProps) {
   const handleDownload = () => {
     const params = favoritesOnly ? '?favorites=true' : ''
@@ -148,9 +140,9 @@ export function ExportScheduleButton({
   }
 
   return (
-    <Button variant={variant} size={size} onClick={handleDownload}>
-      <Download className="h-4 w-4 mr-2" />
-      {favoritesOnly ? 'Export My Schedule' : 'Export Full Schedule'}
+    <Button variant={variant} size={size} className={className} onClick={handleDownload} title={`Download the ${eventName} schedule as .ics`}>
+      <Download className="mr-2 h-4 w-4" aria-hidden />
+      {favoritesOnly ? 'Export my schedule' : 'Export full schedule'}
     </Button>
   )
 }

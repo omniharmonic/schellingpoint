@@ -1,36 +1,22 @@
 'use client'
 
-import Link from 'next/link'
-import { ArrowLeft } from 'lucide-react'
-import { Button } from '@/components/ui/button'
+import { SiteHeader } from '@/components/SiteHeader'
 import { Footer } from '@/components/Footer'
 
 export default function CodeOfConductPage() {
   return (
-    <div className="min-h-screen bg-background">
-      {/* Header */}
-      <header className="border-b sticky top-0 bg-background/95 backdrop-blur z-10">
-        <div className="container mx-auto px-4">
-          <div className="flex items-center h-14">
-            <Button variant="ghost" size="sm" asChild>
-              <Link href="/">
-                <ArrowLeft className="h-4 w-4 mr-2" />
-                Back
-              </Link>
-            </Button>
-          </div>
-        </div>
-      </header>
+    <div className="min-h-screen bg-background flex flex-col">
+      <SiteHeader />
 
       {/* Content */}
-      <main className="container mx-auto px-4 py-12 max-w-3xl">
-        <h1 className="text-3xl font-bold mb-2">unconference Code of Conduct</h1>
+      <main className="container mx-auto px-5 py-12 max-w-3xl flex-1">
+        <h1 className="page-title mb-2">Code of conduct</h1>
         <p className="text-muted-foreground mb-8">Last updated: February 2026</p>
 
         <div className="prose prose-invert prose-sm max-w-none space-y-8">
           {/* 1. Our Pledge */}
           <section>
-            <h2 className="text-xl font-semibold mb-3">1. Our Pledge</h2>
+            <h2 className="text-xl font-semibold mb-3">1. Our pledge</h2>
             <p className="text-muted-foreground leading-relaxed">
               unconference brings together builders, researchers, organizers, and community members who share a commitment to decentralized technology in service of local communities. We pledge to make participation in our event, online spaces, and ongoing community a harassment-free experience for everyone — regardless of age, body size, disability, ethnicity, sex characteristics, gender identity and expression, level of experience, education, socio-economic status, nationality, personal appearance, race, religion, sexual identity, or orientation.
             </p>
@@ -45,18 +31,18 @@ export default function CodeOfConductPage() {
           <section>
             <h2 className="text-xl font-semibold mb-3">2. Scope</h2>
             <p className="text-muted-foreground leading-relaxed mb-3">
-              This Code of Conduct applies across all unconference spaces, including:
+              This code of conduct applies across all unconference spaces, including:
             </p>
             <ul className="list-disc list-inside text-muted-foreground space-y-2">
               <li><strong className="text-foreground">In-person events</strong> — the main conference, workshops, fireside chats, side events, and social gatherings, including setup and teardown</li>
-              <li><strong className="text-foreground">Online spaces</strong> — Telegram groups, Discord servers, forum threads, and any other digital channels operated by or affiliated with unconference</li>
+              <li><strong className="text-foreground">Online spaces</strong> — chat groups and other community channels, forum threads, and any other digital channels operated by or affiliated with a gathering</li>
               <li><strong className="text-foreground">Public representation</strong> — when an individual is representing unconference or its community in public (e.g., posting via official social media accounts, using an official email address, or acting as a representative at external events)</li>
             </ul>
           </section>
 
           {/* 3. Expected Behavior */}
           <section>
-            <h2 className="text-xl font-semibold mb-3">3. Expected Behavior</h2>
+            <h2 className="text-xl font-semibold mb-3">3. Expected behavior</h2>
 
             <h3 className="text-lg font-medium mt-5 mb-2">Respect</h3>
             <ul className="list-disc list-inside text-muted-foreground space-y-2">
@@ -87,13 +73,13 @@ export default function CodeOfConductPage() {
               <li>Whether on a panel or in informal conversation, avoid grandstanding and create space for others to participate.</li>
             </ul>
 
-            <h3 className="text-lg font-medium mt-5 mb-2">Integrity (Online Spaces)</h3>
+            <h3 className="text-lg font-medium mt-5 mb-2">Integrity (online spaces)</h3>
             <ul className="list-disc list-inside text-muted-foreground space-y-2">
               <li>Demonstrate transparency and honesty in all interactions.</li>
               <li>Take responsibility for mistakes — acknowledge them, learn, and move on.</li>
               <li>Keep discussions organized by posting in their appropriate channels or threads.</li>
               <li>Never share API keys, secret keys, or other sensitive credentials.</li>
-              <li>Do not post unsolicited referral links, Discord invitations, or promotional content unless specifically requested.</li>
+              <li>Do not post unsolicited referral links, invitations to other communities, or promotional content unless specifically requested.</li>
               <li>Do not impersonate organizers, moderators, or other community members.</li>
               <li>Buy tickets only through the event’s official ticket page. Report unsolicited payment requests to the event organizers.</li>
             </ul>
@@ -101,7 +87,7 @@ export default function CodeOfConductPage() {
 
           {/* 4. Unacceptable Behavior */}
           <section>
-            <h2 className="text-xl font-semibold mb-3">4. Unacceptable Behavior</h2>
+            <h2 className="text-xl font-semibold mb-3">4. Unacceptable behavior</h2>
             <p className="text-muted-foreground leading-relaxed mb-3">
               The following will not be tolerated in any unconference space:
             </p>
@@ -135,7 +121,7 @@ export default function CodeOfConductPage() {
               All reports will be reviewed and investigated. The event organizer is obligated to maintain confidentiality regarding the identity of the reporter.
             </p>
 
-            <h3 className="text-lg font-medium mt-5 mb-2">Response: Warning &rarr; Removal</h3>
+            <h3 className="text-lg font-medium mt-5 mb-2">Response: warning, then removal</h3>
             <p className="text-muted-foreground leading-relaxed mb-3">
               unconference uses a straightforward two-step enforcement model:
             </p>
@@ -147,7 +133,7 @@ export default function CodeOfConductPage() {
                 <strong className="text-foreground">Removal</strong> — If the behavior continues after a warning — or if the initial violation is severe enough to warrant immediate action — the individual may be removed from the event and/or banned from online community spaces. This may include:
                 <ul className="list-disc list-inside ml-6 mt-2 space-y-1">
                   <li>Expulsion from the in-person event with no refund</li>
-                  <li>Removal from Telegram, Discord, or other community channels</li>
+                  <li>Removal from chat groups and other community channels</li>
                   <li>A ban from future unconference events and activities</li>
                 </ul>
               </li>
@@ -168,7 +154,7 @@ export default function CodeOfConductPage() {
           <section>
             <h2 className="text-xl font-semibold mb-3">6. Acknowledgments</h2>
             <p className="text-muted-foreground leading-relaxed mb-3">
-              This Code of Conduct is adapted from and inspired by:
+              This code of conduct is adapted from and inspired by:
             </p>
             <ul className="list-disc list-inside text-muted-foreground space-y-2">
               <li>DWeb Camp Code of Conduct</li>
@@ -180,7 +166,7 @@ export default function CodeOfConductPage() {
         </div>
       </main>
 
-      <Footer />
+      <Footer variant="minimal" className="mt-auto" />
     </div>
   )
 }

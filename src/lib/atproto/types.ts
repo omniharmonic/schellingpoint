@@ -255,6 +255,17 @@ export interface GatheringRecord {
   createdAt: string
 }
 
+/**
+ * The gathering account's `app.bsky.actor.profile` (borrowed, vendored under
+ * `lexicons/vendor/bsky/`). Only the text fields are written: no blobs, labels or pinned post.
+ */
+export interface ActorProfileRecord {
+  $type: typeof NSID.actorProfile
+  displayName?: string
+  description?: string
+  createdAt?: string
+}
+
 export type ProposalFormat = 'talk' | 'workshop' | 'discussion' | 'panel' | 'demo' | (string & {})
 
 export interface ProposalRecord {
@@ -402,6 +413,7 @@ export type AnyRecord =
   | PolicyRecord
   | ApprovalRecord
   | GatheringRecord
+  | ActorProfileRecord
   | ProposalRecord
   | CohostRecord
   | TimePreferenceRecord

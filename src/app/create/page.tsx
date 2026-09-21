@@ -1,33 +1,40 @@
 'use client';
 
 import * as React from 'react';
-import * as Dialog from '@radix-ui/react-dialog';
 import { Suspense } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { ArrowLeft, Loader2, AlertCircle, LogIn } from 'lucide-react';
+import { Loader2, AlertCircle, LogIn } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { SiteHeader } from '@/components/SiteHeader';
+import { Footer } from '@/components/Footer';
+import { PageHeader } from '@/components/PageHeader';
+import { ELLIPSIS } from '@/lib/format';
 import { validateWizardState } from '@/lib/events/validate-creation';
 import { useAuth } from '@/hooks/useAuth';
 
 import { useWizardStateWithPersistence } from './useWizardPersistence';
+import { WizardStepTabs, WizardNavButtons, WizardValidationErrors, getMaxNavigableStep } from './WizardNavigation';
 import {
-  WizardStepTabs,
-  WizardNavButtons,
-  WizardValidationErrors,
-} from './WizardNavigation';
-import { WIZARD_STEPS, getStepFromNumber, isStepValid, type WizardState, type WizardAction } from './useWizardState';
+  getStepFromNumber,
+  getNumberFromStep,
+  stepForValidationArea,
+  type WizardState,
+  type WizardAction,
+} from './useWizardState';
 
+import IdentityStep from './steps/IdentityStep';
 import BasicsStep from './steps/BasicsStep';
 import DatesStep from './steps/DatesStep';
 import VenuesStep from './steps/VenuesStep';
 import ScheduleStep from './steps/ScheduleStep';
 import TracksStep from './steps/TracksStep';
+import ParticipationStep from './steps/ParticipationStep';
 import VotingStep from './steps/VotingStep';
 import BrandingStep from './steps/BrandingStep';
-import IdentityStep from './steps/IdentityStep';
 import ReviewStep from './steps/ReviewStep';
 
 // ============================================================================
@@ -39,60 +46,41 @@ interface StepProps {
   dispatch: React.Dispatch<WizardAction>;
 }
 
-// ============================================================================
-// Step Loading Fallback
-// ============================================================================
-
-function StepLoadingFallback() {
-  return (
-    <Card>
-      <CardContent className="flex items-center justify-center py-12">
-        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-      </CardContent>
-    </Card>
-  );
-}
+const LOGIN_HREF = '/login?returnTo=%2Fcreate';
 
 // ============================================================================
 // Resume Draft Dialog
 // ============================================================================
 
 interface ResumeDraftDialogProps {
+  open: boolean;
   timestamp: Date | null;
   onResume: () => void;
   onStartFresh: () => void;
 }
 
-function ResumeDraftDialog({ timestamp, onResume, onStartFresh }: ResumeDraftDialogProps) {
+function ResumeDraftDialog({ open, timestamp, onResume, onStartFresh }: ResumeDraftDialogProps) {
   const formattedTime = timestamp
-    ? new Intl.DateTimeFormat('en-US', {
-        dateStyle: 'medium',
-        timeStyle: 'short',
-      }).format(timestamp)
-    : 'Unknown';
+    ? new Intl.DateTimeFormat('en-US', { dateStyle: 'medium', timeStyle: 'short' }).format(timestamp)
+    : null;
 
   return (
-    <Dialog.Root open><Dialog.Portal><Dialog.Overlay className="fixed inset-0 z-50 bg-foreground/20 backdrop-blur-sm"/><Dialog.Content onEscapeKeyDown={e => e.preventDefault()} onPointerDownOutside={e => e.preventDefault()} className="fixed inset-0 z-50 flex items-center justify-center">
-      <Card className="w-full max-w-md mx-4">
-        <CardHeader>
-          <Dialog.Title className="text-xl font-semibold">Pick up where you left off?</Dialog.Title>
-          <Dialog.Description className="text-sm text-muted-foreground">Your event draft was saved on {formattedTime}.</Dialog.Description>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <p className="text-sm text-muted-foreground">
-            Would you like to continue where you left off, or start fresh?
-          </p>
-          <div className="flex gap-3">
-            <Button variant="outline" onClick={onStartFresh} className="flex-1">
-              Start Fresh
-            </Button>
-            <Button onClick={onResume} className="flex-1">
-              Resume Draft
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-    </Dialog.Content></Dialog.Portal></Dialog.Root>
+    // Escape and clicking outside keep the draft: resuming is the safe choice.
+    <Dialog open={open} onOpenChange={(next) => { if (!next) onResume(); }}>
+      <DialogContent size="sm">
+        <DialogHeader>
+          <DialogTitle>Pick up where you left off?</DialogTitle>
+          <DialogDescription>
+            {formattedTime ? `A draft of your gathering was saved on this device on ${formattedTime}.` : 'A draft of your gathering was saved on this device.'}
+          </DialogDescription>
+        </DialogHeader>
+        <p className="text-sm text-muted-foreground">Starting fresh deletes that saved draft. This cannot be undone.</p>
+        <DialogFooter>
+          <Button variant="ghost" onClick={onStartFresh}>Start fresh</Button>
+          <Button onClick={onResume}>Resume draft</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -106,12 +94,10 @@ function CreateWizardContent() {
   const {
     state,
     dispatch,
-    nextStep,
-    prevStep,
     clearDraft,
     hasSavedDraft,
     getDraftTimestamp,
-    currentStepName,
+    lastSavedAt,
   } = useWizardStateWithPersistence();
 
   // State for showing resume dialog
@@ -124,7 +110,7 @@ function CreateWizardContent() {
   // Redirect to login if not authenticated
   React.useEffect(() => {
     if (!authLoading && !user) {
-      router.push('/login?redirect=/create');
+      router.push(LOGIN_HREF);
     }
   }, [user, authLoading, router]);
 
@@ -153,17 +139,6 @@ function CreateWizardContent() {
     setShowResumeDialog(false);
   }, [clearDraft]);
 
-  // Handler for next step (called after WizardNavigation validation)
-  const handleNext = React.useCallback(() => {
-    // WizardNavigation handles validation
-    // This callback is called after successful navigation
-  }, []);
-
-  // Handler for previous step
-  const handlePrev = React.useCallback(() => {
-    // No additional logic needed
-  }, []);
-
   // Scroll to top whenever the step changes so the new step loads at the top
   // of the viewport (fixes the review page opening scrolled to the bottom).
   React.useEffect(() => {
@@ -177,20 +152,22 @@ function CreateWizardContent() {
     if (isSubmitting) return;
     const validation = validateWizardState(state);
     if (!validation.valid) {
-      setSubmitError(validation.error || 'Review your event details.');
-      dispatch({ type: 'SET_STEP', payload: validation.step ?? 0 });
+      setSubmitError(validation.error || 'Review your gathering’s details.');
+      dispatch({ type: 'SET_STEP', payload: stepForValidationArea(validation.step, validation.error) });
+      return;
+    }
+    if (!state.identity.acknowledged) {
+      setSubmitError('Confirm what becomes public before creating the gathering.');
+      dispatch({ type: 'SET_STEP', payload: getNumberFromStep('identity') });
+      return;
+    }
+    if (!state.identity.termsAccepted) {
+      setSubmitError('Accept the terms and privacy policy before creating the gathering.');
       return;
     }
     setIsSubmitting(true);
     setSubmitError(null);
     setSlugSuggestions([]);
-
-    if (!state.identity.acknowledged) {
-      setSubmitError('Confirm what becomes public before creating the gathering.');
-      dispatch({ type: 'SET_STEP', payload: WIZARD_STEPS.indexOf('identity') });
-      setIsSubmitting(false);
-      return;
-    }
 
     try {
       // Same-origin with the session cookie (plan §3.3). Read the body directly: a 409
@@ -212,12 +189,13 @@ function CreateWizardContent() {
 
       if (!response.ok || !data.success) {
         if (response.status === 401) {
-          setSubmitError('Your session has expired. Please sign in again.');
+          setSubmitError('Your session has expired. Sign in again to continue.');
         } else if (response.status === 409) {
           setSubmitError(data.error || 'This event URL is already taken.');
           if (data.suggestions?.length) setSlugSuggestions(data.suggestions);
+          dispatch({ type: 'SET_STEP', payload: getNumberFromStep('identity') });
         } else {
-          setSubmitError(data.error || 'Failed to create event. Please try again.');
+          setSubmitError(data.error || 'The gathering could not be created. Try again.');
         }
         setIsSubmitting(false);
         return;
@@ -225,12 +203,15 @@ function CreateWizardContent() {
 
       clearDraft();
       const eventSlug = data.eventSlug || data.event?.slug;
+      // The organizer workspace shows the "your gathering is ready" banner for `created=1`.
       // A pending identity is surfaced, with a retry, in Event settings.
-      const destination = data.identity?.status === 'pending' ? 'admin/settings?identity=pending#network' : 'admin';
+      const destination = data.identity?.status === 'pending'
+        ? 'admin/settings?identity=pending&created=1#network'
+        : 'admin?created=1';
       router.push(eventSlug ? `/e/${eventSlug}/${destination}` : '/');
     } catch (error) {
       console.error('Error creating event:', error);
-      setSubmitError('An unexpected error occurred. Please try again.');
+      setSubmitError('Something went wrong. Your draft is safe; try again.');
       setIsSubmitting(false);
     }
   }, [state, clearDraft, router, dispatch, isSubmitting]);
@@ -252,64 +233,32 @@ function CreateWizardContent() {
     const props: StepProps = { state, dispatch };
 
     switch (stepName) {
-      case 'basics':
-        return (
-          <Suspense fallback={<StepLoadingFallback />}>
-            <BasicsStep {...props} />
-          </Suspense>
-        );
-      case 'dates':
-        return (
-          <Suspense fallback={<StepLoadingFallback />}>
-            <DatesStep {...props} />
-          </Suspense>
-        );
-      case 'venues':
-        return (
-          <Suspense fallback={<StepLoadingFallback />}>
-            <VenuesStep {...props} />
-          </Suspense>
-        );
-      case 'schedule':
-        return (
-          <Suspense fallback={<StepLoadingFallback />}>
-            <ScheduleStep {...props} />
-          </Suspense>
-        );
-      case 'tracks':
-        return (
-          <Suspense fallback={<StepLoadingFallback />}>
-            <TracksStep {...props} />
-          </Suspense>
-        );
-      case 'voting':
-        return (
-          <Suspense fallback={<StepLoadingFallback />}>
-            <VotingStep {...props} />
-          </Suspense>
-        );
-      case 'branding':
-        return (
-          <Suspense fallback={<StepLoadingFallback />}>
-            <BrandingStep {...props} />
-          </Suspense>
-        );
       case 'identity':
-        return (
-          <Suspense fallback={<StepLoadingFallback />}>
-            <IdentityStep {...props} />
-          </Suspense>
-        );
+        return <IdentityStep {...props} />;
+      case 'basics':
+        return <BasicsStep {...props} />;
+      case 'dates':
+        return <DatesStep {...props} />;
+      case 'venues':
+        return <VenuesStep {...props} />;
+      case 'schedule':
+        return <ScheduleStep {...props} />;
+      case 'tracks':
+        return <TracksStep {...props} />;
+      case 'participation':
+        return <ParticipationStep {...props} />;
+      case 'voting':
+        return <VotingStep {...props} />;
+      case 'branding':
+        return <BrandingStep {...props} />;
       case 'review':
         return (
-          <Suspense fallback={<StepLoadingFallback />}>
-            <ReviewStep
-              state={state}
-              dispatch={dispatch}
-              onSubmit={handleSubmit}
-              isSubmitting={isSubmitting}
-            />
-          </Suspense>
+          <ReviewStep
+            state={state}
+            dispatch={dispatch}
+            onSubmit={handleSubmit}
+            isSubmitting={isSubmitting}
+          />
         );
       default:
         return <div>Unknown step</div>;
@@ -321,60 +270,51 @@ function CreateWizardContent() {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">
         <div className="text-center space-y-4">
-          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground mx-auto" />
+          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground mx-auto" aria-hidden="true" />
           <p className="text-sm text-muted-foreground">
-            {authLoading ? 'Loading...' : 'Redirecting to sign in...'}
+            {authLoading ? `Loading${ELLIPSIS}` : `Redirecting to sign in${ELLIPSIS}`}
           </p>
         </div>
       </div>
     );
   }
 
+  const datesStep = getNumberFromStep('dates');
+  const reviewStep = getNumberFromStep('review');
+  const canSkipToReview = getMaxNavigableStep(state) >= reviewStep;
+  const draftSavedLabel = lastSavedAt
+    ? `Draft saved on this device at ${new Intl.DateTimeFormat('en-US', { timeStyle: 'short' }).format(lastSavedAt)}`
+    : null;
+
   return (
-    <div className="min-h-screen bg-background">
-      {/* Header */}
-      <header className="border-b border-border bg-background sticky top-0 z-10 ruler-edge">
-        <div className="container mx-auto px-4">
-          <div className="flex items-center justify-between h-14">
-            <Link
-              href="/"
-              className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground"
-            >
-              <ArrowLeft className="h-4 w-4 mr-1" />
-              Back to home
-            </Link>
-            <div className="text-sm text-muted-foreground">
-              Draft saved on this device
-            </div>
-          </div>
-        </div>
-      </header>
+    <div className="min-h-screen bg-background flex flex-col">
+      <SiteHeader />
 
       {/* Main Content */}
-      <main className="container mx-auto px-4 py-8">
+      <main className="container mx-auto px-5 py-8 flex-1">
         <div className="max-w-5xl mx-auto space-y-8">
-          {/* Page Title */}
-          <div className="space-y-3 max-w-2xl">
-            <h1 className="text-4xl sm:text-5xl font-display font-semibold">Make room for your people.</h1>
-            <p className="text-muted-foreground">
-              Start with the essentials. Add the spaces, topics, and small details that make this gathering yours.
-            </p>
-          </div>
+          <PageHeader
+            eyebrow="Create a gathering"
+            title="Make room for your people."
+            subtitle="Start with the essentials. Add the spaces, topics, and small details that make this gathering yours."
+            actions={draftSavedLabel ? <p className="text-sm text-muted-foreground" aria-live="polite">{draftSavedLabel}</p> : undefined}
+            className="mb-0"
+          />
 
           {/* Wizard Content */}
           <div className="space-y-6">
             {/* Error Alert */}
             {submitError && (
               <Alert id="create-submit-error" variant="destructive">
-                <AlertCircle className="h-4 w-4" />
+                <AlertCircle className="h-4 w-4" aria-hidden="true" />
                 <AlertDescription className="space-y-3">
                   <p>{submitError}</p>
                   {/* Login button for auth errors */}
-                  {(submitError.includes('logged in') || submitError.includes('session has expired')) && (
+                  {(submitError.includes('signed in') || submitError.includes('session has expired')) && (
                     <Button asChild size="sm" variant="outline">
-                      <Link href="/login?redirect=/create">
-                        <LogIn className="h-4 w-4 mr-2" />
-                        Sign In
+                      <Link href={LOGIN_HREF}>
+                        <LogIn className="h-4 w-4 mr-2" aria-hidden="true" />
+                        Sign in
                       </Link>
                     </Button>
                   )}
@@ -388,7 +328,6 @@ function CreateWizardContent() {
                             variant="outline"
                             size="sm"
                             onClick={() => handleApplySlugSuggestion(suggestion)}
-                            className="text-xs"
                           >
                             {suggestion}
                           </Button>
@@ -400,63 +339,57 @@ function CreateWizardContent() {
               </Alert>
             )}
 
-            {/* Top Navigation: step tabs + back/next (hidden on review) */}
+            {/* Step tabs and the current step's validation errors */}
             <Card>
               <CardContent className="py-4 space-y-4">
-                <WizardStepTabs
-                  state={state}
-                  dispatch={dispatch}
-                  onNext={handleNext}
-                  onPrev={handlePrev}
-                />
+                <WizardStepTabs state={state} dispatch={dispatch} />
                 <WizardValidationErrors state={state} />
-                <WizardNavButtons
-                  state={state}
-                  dispatch={dispatch}
-                  onNext={handleNext}
-                  onPrev={handlePrev}
-                  hideOnLastStep
-                />
               </CardContent>
             </Card>
 
             {/* Step Content */}
-            <div className="min-h-[400px]">
+            <div className="min-h-[400px] space-y-6">
               {renderStep()}
-              {state.currentStep === 1 && (
+              {state.currentStep === datesStep && (
                 <div className="rounded-xl border bg-secondary/40 p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                  <div><h2 className="font-semibold">Start simple.</h2><p className="mt-1 text-sm text-muted-foreground">Use the defaults for now. Add rooms, time slots and program details from your organizer workspace.</p></div>
-                  <Button variant="outline" disabled={!isStepValid(state, 0) || !isStepValid(state, 1)}
-                    onClick={() => dispatch({ type: 'SET_STEP', payload: WIZARD_STEPS.indexOf('identity') })}>Continue with defaults</Button>
+                  <div>
+                    <h2 className="font-semibold">Start simple.</h2>
+                    <p className="mt-1 text-sm text-muted-foreground">
+                      Use the defaults for now. Add rooms, time slots and program details from your organizer workspace.
+                    </p>
+                    {!canSkipToReview && (
+                      <p className="mt-1 text-xs text-muted-foreground">Choose your dates first, then you can skip straight to the review.</p>
+                    )}
+                  </div>
+                  <Button
+                    disabled={!canSkipToReview}
+                    onClick={() => dispatch({ type: 'SET_STEP', payload: reviewStep })}
+                  >
+                    Continue with defaults
+                  </Button>
                 </div>
               )}
             </div>
 
-            {/* Keep the next action available after the form. */}
-            {state.currentStep < WIZARD_STEPS.length - 1 && (
-              <Card className="sticky bottom-3 z-10 shadow-lg">
-                <CardContent className="py-4">
-                  <WizardNavButtons
-                    state={state}
-                    dispatch={dispatch}
-                    onNext={handleNext}
-                    onPrev={handlePrev}
-                  />
-                </CardContent>
-              </Card>
-            )}
+            {/* The one sticky navigation bar: Back on every step after the first, Continue until Review. */}
+            <Card className="sticky bottom-3 z-10 shadow-lg">
+              <CardContent className="py-4">
+                <WizardNavButtons state={state} dispatch={dispatch} />
+              </CardContent>
+            </Card>
           </div>
         </div>
       </main>
 
+      <Footer variant="minimal" />
+
       {/* Resume Draft Dialog */}
-      {showResumeDialog && (
-        <ResumeDraftDialog
-          timestamp={getDraftTimestamp()}
-          onResume={handleResume}
-          onStartFresh={handleStartFresh}
-        />
-      )}
+      <ResumeDraftDialog
+        open={showResumeDialog}
+        timestamp={getDraftTimestamp()}
+        onResume={handleResume}
+        onStartFresh={handleStartFresh}
+      />
     </div>
   );
 }
@@ -470,7 +403,7 @@ export default function CreateEventPage() {
     <Suspense
       fallback={
         <div className="min-h-screen flex items-center justify-center bg-background">
-          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" aria-hidden="true" />
         </div>
       }
     >

@@ -6,10 +6,12 @@ import { NO_STORE, memberCardColumns, type Participant } from './people'
 
 /**
  * The gathering's directory — members only, never public (spec §8: "the roster is never
- * public"; §10: profile, ENS, Telegram are members-only).
+ * public"; §10: profile, ENS and the messaging handle are members-only).
  *
  *   GET /api/v1/events/[slug]/participants
- *     → { participants: Participant[], me: { role, directory_listing, public_role } }
+ *     → { participants: Participant[],
+ *         me: { role, directory_listing, public_role },
+ *         sharedInterests: { id, interests: string[] }[] }
  *
  *   404  no such gathering, or a private/draft one the viewer is not a member of
  *   401  signed out (visible gathering)
@@ -17,10 +19,40 @@ import { NO_STORE, memberCardColumns, type Participant } from './people'
  *        members-only)
  *
  * Members who opted out (`directory_listing = false`) are omitted, except to themselves.
+ *
+ * `sharedInterests` is "People who share your interests" (release design §6): computed here for
+ * the viewer only, from interest overlap with the listed members, ordered by overlap. It is never
+ * stored and never a record; votes are not an input.
  */
 export const dynamic = 'force-dynamic'
 
 const ANY_ROLE: readonly EventRoleName[] = ['owner', 'admin', 'moderator', 'track_lead', 'volunteer', 'attendee']
+
+/** How many "people who share your interests" to suggest. */
+const SHARED_INTERESTS_LIMIT = 6
+
+export interface SharedInterests {
+  /** accounts.id of the other member. */
+  id: string
+  /** The viewer's interests this person also lists, in the viewer's order. */
+  interests: string[]
+}
+
+// Not exported: Next's route module type-check allows only handlers and config as value exports.
+function sharedInterestsFor(participants: Participant[]): SharedInterests[] {
+  const me = participants.find((p) => p.is_self)
+  const mine = (me?.interests ?? []).map((i) => i.trim()).filter(Boolean)
+  if (!mine.length) return []
+  const mineByKey = new Map(mine.map((i) => [i.toLowerCase(), i] as const))
+  const out: SharedInterests[] = []
+  for (const p of participants) {
+    if (p.is_self || !p.interests?.length) continue
+    const theirs = new Set(p.interests.map((i) => i.trim().toLowerCase()))
+    const overlap = [...mineByKey.entries()].filter(([key]) => theirs.has(key)).map(([, label]) => label)
+    if (overlap.length) out.push({ id: p.id, interests: overlap })
+  }
+  return out.sort((a, b) => b.interests.length - a.interests.length).slice(0, SHARED_INTERESTS_LIMIT)
+}
 
 export async function GET(request: Request, { params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params
@@ -44,5 +76,8 @@ export async function GET(request: Request, { params }: { params: Promise<{ slug
     `,
   ])
 
-  return NextResponse.json({ participants, me: me ?? null }, { headers: NO_STORE })
+  return NextResponse.json(
+    { participants, me: me ?? null, sharedInterests: sharedInterestsFor(participants) },
+    { headers: NO_STORE },
+  )
 }

@@ -18,6 +18,7 @@ import { Check, Loader2, Minus, Plus } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useVoting } from '@/hooks/useVoting'
 import { costLabel, maxVotesFor, voteCost } from '@/lib/voting/mechanism'
+import { plural } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
 export interface VoteControlProps {
@@ -34,6 +35,9 @@ function stop(e: React.SyntheticEvent) {
   e.preventDefault()
   e.stopPropagation()
 }
+
+/** One width for the helper text under the control, in both layouts. */
+const NOTE_WIDTH = 'max-w-[16rem]'
 
 export function VoteControl({ eventSlug, sessionId, compact = false, className, sessionTitle }: VoteControlProps) {
   const voting = useVoting(eventSlug)
@@ -68,6 +72,8 @@ export function VoteControl({ eventSlug, sessionId, compact = false, className, 
       )
   } else if (!voting.canVote) {
     note = voting.reason ?? 'Voting is not open right now.'
+  } else if (mechanism === 'approval' && votes === 0 && !affordable) {
+    note = `No approvals left (${voting.budget} used).`
   } else if (mechanism !== 'approval' && !atMax && !affordable) {
     note = `Not enough credits for another vote (needs ${nextCost}, ${voting.remaining} left).`
   } else if (mechanism !== 'approval') {
@@ -80,9 +86,10 @@ export function VoteControl({ eventSlug, sessionId, compact = false, className, 
     setActed(true)
     void voting.setVotes(sessionId, value)
   }
+  const noteClass = cn('text-xs text-muted-foreground', NOTE_WIDTH, compact && 'text-right')
   const errorNote =
     acted && voting.error ? (
-      <p role="alert" className={cn('text-xs text-destructive', compact ? 'max-w-[14rem] text-right' : 'max-w-[18rem]')}>
+      <p role="alert" className={cn('text-xs text-destructive', NOTE_WIDTH, compact && 'text-right')}>
         {voting.error}
       </p>
     ) : null
@@ -102,7 +109,7 @@ export function VoteControl({ eventSlug, sessionId, compact = false, className, 
           size={compact ? 'sm' : 'default'}
           variant={approved ? 'default' : 'outline'}
           aria-pressed={approved}
-          aria-describedby={note || (!affordable && !approved) ? describedBy : undefined}
+          aria-describedby={note ? describedBy : undefined}
           disabled={disabled}
           aria-busy={busy || undefined}
           onClick={(e) => {
@@ -110,12 +117,14 @@ export function VoteControl({ eventSlug, sessionId, compact = false, className, 
             setVotes(approved ? 0 : 1)
           }}
         >
-          {busy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : approved ? <Check className="h-4 w-4" aria-hidden /> : null}
-          <span className={busy || approved ? 'ml-1.5' : undefined}>{approved ? 'Approved' : 'Approve'}</span>
+          <span className="mr-1.5 inline-flex h-4 w-4 items-center justify-center" aria-hidden>
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : approved ? <Check className="h-4 w-4" /> : null}
+          </span>
+          {approved ? 'Approved' : 'Approve'}
         </Button>
-        {(note || (!approved && !affordable && voting.canVote)) && (
-          <p id={describedBy} className="text-xs text-muted-foreground max-w-[16rem]">
-            {note ?? `No approvals left (${voting.budget} used).`}
+        {note && (
+          <p id={describedBy} className={noteClass}>
+            {note}
           </p>
         )}
         {errorNote}
@@ -145,21 +154,19 @@ export function VoteControl({ eventSlug, sessionId, compact = false, className, 
         >
           <Minus className="h-4 w-4" aria-hidden />
         </Button>
-        <div className={cn('text-center tabular-nums', compact ? 'min-w-[2.5rem]' : 'min-w-[3.5rem]')}>
-          <output aria-live="polite" aria-label={`${votes} ${votes === 1 ? 'vote' : 'votes'}${name}`} className={cn('block font-bold text-primary', compact ? 'text-base' : 'text-xl')}>
+        <div className="min-w-[3rem] text-center tabular-nums">
+          <output aria-live="polite" aria-label={`${plural(votes, 'vote')}${name}`} className={cn('block font-bold text-primary', compact ? 'text-base' : 'text-xl')}>
             {votes}
           </output>
           {!compact && (
-            <span className="block text-xs text-muted-foreground">
-              {voteCost(votes, mechanism)} {voteCost(votes, mechanism) === 1 ? 'credit' : 'credits'}
-            </span>
+            <span className="block text-xs text-muted-foreground">{plural(voteCost(votes, mechanism), 'credit')}</span>
           )}
         </div>
         <Button
           type="button"
           variant="outline"
           size={compact ? 'icon-sm' : 'icon'}
-          aria-label={`Add a vote${name}${canAdd ? ` (costs ${nextCost} ${nextCost === 1 ? 'credit' : 'credits'})` : ''}`}
+          aria-label={`Add a vote${name}${canAdd ? ` (costs ${plural(nextCost, 'credit')})` : ''}`}
           aria-describedby={note ? describedBy : undefined}
           disabled={!canAdd}
           aria-busy={busy || undefined}
@@ -172,7 +179,7 @@ export function VoteControl({ eventSlug, sessionId, compact = false, className, 
         </Button>
       </div>
       {note && (
-        <p id={describedBy} className={cn('text-xs text-muted-foreground', compact ? 'max-w-[14rem] text-right' : 'max-w-[18rem]')}>
+        <p id={describedBy} className={noteClass}>
           {note}
         </p>
       )}

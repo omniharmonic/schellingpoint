@@ -5,20 +5,22 @@ import Link from 'next/link'
 import { useEvent } from '@/contexts/EventContext'
 import { Heart, Mic, Wrench, MessageSquare, Users, Monitor, MapPin, Clock, ChevronRight } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { RSVPIndicator } from '@/components/RSVPButton'
 import { VoteControl } from '@/components/VoteControl'
 import { apiFetch } from '@/lib/api/client'
+import { formatLabel } from '@/lib/sessions/constants'
 import { cn } from '@/lib/utils'
 import type { SessionView } from '@/app/api/v1/sessions/_lib/read'
 import { hostByline } from '@/app/api/v1/sessions/_lib/byline'
 
-
 const formatIcons: Record<string, React.ReactNode> = {
-  talk: <Mic className="h-3.5 w-3.5" strokeWidth={1.5} />,
-  workshop: <Wrench className="h-3.5 w-3.5" strokeWidth={1.5} />,
-  discussion: <MessageSquare className="h-3.5 w-3.5" strokeWidth={1.5} />,
-  panel: <Users className="h-3.5 w-3.5" strokeWidth={1.5} />,
-  demo: <Monitor className="h-3.5 w-3.5" strokeWidth={1.5} />,
+  talk: <Mic className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden />,
+  workshop: <Wrench className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden />,
+  discussion: <MessageSquare className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden />,
+  panel: <Users className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden />,
+  demo: <Monitor className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden />,
 }
 
 function formatTime(isoString: string, timeZone: string): string {
@@ -41,6 +43,7 @@ interface SessionCardProps {
   session: SessionView
   eventSlug: string
   isFavorited?: boolean
+  /** Called for signed-out viewers too; the page decides whether to send them to sign in. */
   onToggleFavorite?: (sessionId: string) => void
   /** Render the ballot control (C) for this session. */
   showVoting?: boolean
@@ -57,120 +60,112 @@ export function SessionCard({
 }: SessionCardProps) {
   const event = useEvent()
   const eventIsOver = event.status === 'completed' || event.status === 'archived'
-  const trackColor = session.track?.color || 'hsl(var(--signal))'
+  const trackColor = session.track?.color || undefined
   const startsAt = session.time_slot?.start_time || (session.is_self_hosted ? session.self_hosted_start_time : null)
+  const href = `/e/${eventSlug}/sessions/${session.id}`
+  // Handles are optional on the API payload; show one under the byline when present.
+  const hostHandle = session.host?.handle ?? null
+  const showFooter = (session.status === 'scheduled' && !!session.venue?.capacity) || (showVoting && !eventIsOver)
 
   return (
     <Card
-      accent="top"
+      accent={trackColor ? 'top' : undefined}
       accentColor={trackColor}
       className={cn(
-        'overflow-hidden group border-t-4 transition-all duration-200',
-        'hover:border-[hsl(var(--signal)_/_0.3)]',
-        'hover:shadow-[0_6px_0_hsl(var(--foreground)/.06)]',
+        'group overflow-hidden transition-all duration-200',
+        'hover:border-primary/30 hover:shadow-[0_6px_0_hsl(var(--foreground)/.06)]'
       )}
-      style={{ '--tw-shadow-color': trackColor } as React.CSSProperties}
     >
-      <CardContent className="p-3.5 sm:p-5">
-        <div className="space-y-2.5 sm:space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 text-muted-foreground">
-              <span className="flex items-center gap-1.5 text-[11px] tracking-wider">
-                {formatIcons[session.format ?? ''] || <Mic className="h-3.5 w-3.5" strokeWidth={1.5} />}
-                {session.format}
+      <CardContent className="p-4 pt-4 sm:p-6 sm:pt-5">
+        <div className="space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs text-muted-foreground">
+              <span className="flex items-center gap-1.5">
+                {formatIcons[session.format ?? ''] || <Mic className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden />}
+                {formatLabel(session.format)}
               </span>
-              <span className="text-border">·</span>
-              <span className="text-[11px] tracking-wider">{session.duration} min</span>
+              {session.duration != null && (
+                <>
+                  <span className="text-border" aria-hidden>·</span>
+                  <span>{session.duration} min</span>
+                </>
+              )}
               {session.track && (
                 <>
-                  <span className="text-border hidden sm:inline">·</span>
-                  <span className="hidden sm:flex items-center gap-1.5 text-xs">
-                    <span
-                      className="w-2 h-2 rounded-full flex-shrink-0"
-                      style={{ backgroundColor: session.track.color || undefined }}
-                    />
+                  <span className="hidden text-border sm:inline" aria-hidden>·</span>
+                  <span className="hidden items-center gap-1.5 sm:flex">
+                    <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: session.track.color || undefined }} aria-hidden />
                     {session.track.name}
                   </span>
                 </>
               )}
             </div>
 
-            {onToggleFavorite && isLoggedIn && (
-              <button
-                aria-label={isFavorited ? `Unsave ${session.title}` : `Save ${session.title}`}
+            {onToggleFavorite && (
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-label={isFavorited ? `Remove ${session.title} from my schedule` : `Save ${session.title} to my schedule`}
                 aria-pressed={isFavorited}
                 onClick={() => onToggleFavorite(session.id)}
-                title={isFavorited ? 'Remove from My Schedule' : 'Save to My Schedule'}
-                className={cn(
-                  'p-2 rounded-md transition-colors',
-                  isFavorited
-                    ? 'text-red-500 bg-red-500/10 hover:bg-red-500/20'
-                    : 'text-muted-foreground hover:text-red-500 hover:bg-muted'
-                )}
+                title={isFavorited ? 'Remove from my schedule' : isLoggedIn ? 'Save to my schedule' : 'Sign in to save this session'}
+                className={cn('-mr-2 -mt-1 shrink-0', isFavorited ? 'text-favorite hover:text-favorite' : 'text-muted-foreground hover:text-favorite')}
               >
-                <Heart className={cn('h-4 w-4', isFavorited && 'fill-current')} />
-              </button>
+                <Heart className={cn('h-4 w-4', isFavorited && 'fill-favorite')} aria-hidden />
+              </Button>
             )}
           </div>
 
-          <Link href={`/e/${eventSlug}/sessions/${session.id}`} className="block">
-            <h3 className="font-display font-semibold text-lg leading-snug line-clamp-2 group-hover:text-primary transition-colors">
+          <Link href={href} className="block rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2">
+            <h3 className="line-clamp-2 font-display text-lg font-semibold leading-snug transition-colors group-hover:text-primary">
               {session.title}
-              <ChevronRight className="inline h-3.5 w-3.5 ml-1 opacity-0 group-hover:opacity-100 transition-opacity" />
+              <ChevronRight className="ml-1 inline h-3.5 w-3.5 opacity-0 transition-opacity group-hover:opacity-100" aria-hidden />
             </h3>
           </Link>
 
-          <p className={cn('text-xs', session.host ? 'text-muted-foreground' : 'text-muted-foreground italic')}>
+          <p className={cn('text-xs text-muted-foreground', !session.host && 'italic')}>
             {hostByline(session)}
+            {hostHandle && <span className="ml-1.5 not-italic">@{hostHandle}</span>}
           </p>
 
           {session.description && (
-            <Link href={`/e/${eventSlug}/sessions/${session.id}`} className="block">
-              <p className="text-sm text-muted-foreground line-clamp-2 hover:text-foreground/80 transition-colors">
-                {session.description}
-              </p>
-            </Link>
+            <p className="line-clamp-2 text-sm text-muted-foreground">{session.description}</p>
           )}
 
           {session.topic_tags.length > 0 && (
             <div className="flex flex-wrap gap-1.5">
               {session.topic_tags.slice(0, 3).map((tag) => (
-                <span
-                  key={tag}
-                  className="inline-flex items-center rounded-sm border border-border bg-surface-2 px-2 py-0.5 text-xs text-muted-foreground"
-                >
-                  {tag}
-                </span>
+                <Badge key={tag} variant="muted">{tag}</Badge>
               ))}
             </div>
           )}
 
           {(session.venue || session.is_self_hosted) && (
-            <div className="flex items-center gap-3 text-xs text-muted-foreground bg-surface-2 rounded-md p-2.5">
+            <div className="flex items-center gap-3 rounded-lg bg-surface-2 p-2.5 text-xs text-muted-foreground">
               <span className="flex items-center gap-1.5">
-                <MapPin className="h-3.5 w-3.5" strokeWidth={1.5} />
+                <MapPin className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden />
                 {session.is_self_hosted ? 'Self-hosted' : session.venue?.name}
               </span>
               {startsAt && (
                 <span className="flex items-center gap-1.5">
-                  <Clock className="h-3.5 w-3.5" strokeWidth={1.5} />
+                  <Clock className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden />
                   {formatTime(startsAt, event.timezone)}
                 </span>
               )}
             </div>
           )}
 
-          {((session.status === 'scheduled' && session.venue?.capacity) || (showVoting && !eventIsOver)) && (
-            <div className="flex items-center justify-between gap-3 pt-3 border-t border-border/50">
-              <div className="flex items-center gap-3">
-                {session.status === 'scheduled' && session.venue?.capacity ? (
-                  <RSVPIndicator
-                    rsvpCount={session.rsvp_count}
-                    capacity={session.venue.capacity}
-                    userStatus={session.my_rsvp?.status ?? null}
-                  />
-                ) : null}
-              </div>
+          {showFooter && (
+            <div className="flex items-center justify-between gap-3 border-t border-border/50 pt-3">
+              {session.status === 'scheduled' && session.venue?.capacity ? (
+                <RSVPIndicator
+                  rsvpCount={session.rsvp_count}
+                  capacity={session.venue.capacity}
+                  userStatus={session.my_rsvp?.status ?? null}
+                />
+              ) : (
+                <span />
+              )}
               {showVoting && !eventIsOver && (
                 <VoteControl eventSlug={eventSlug} sessionId={session.id} sessionTitle={session.title} compact />
               )}

@@ -8,6 +8,10 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { FilterChip } from '@/components/ui/filter-chip'
+import { SegmentedControl } from '@/components/ui/segmented-control'
+import { useToast } from '@/components/ui/toast'
+import { PageHeader } from '@/components/PageHeader'
 import { DashboardLayout } from '@/components/DashboardLayout'
 import { ExportScheduleButton } from '@/components/AddToCalendar'
 import { useAuth } from '@/hooks/useAuth'
@@ -16,11 +20,14 @@ import { cn } from '@/lib/utils'
 import { apiFetch } from '@/lib/api/client'
 import { useTracks } from '@/hooks/useTracks'
 import { setFavorite } from '@/components/SessionCard'
+import { EN_DASH, plural } from '@/lib/format'
+import { formatLabel } from '@/lib/sessions/constants'
 import { hostByline } from '@/app/api/v1/sessions/_lib/byline'
 import type { SessionView } from '@/app/api/v1/sessions/_lib/read'
 
 type Session = SessionView
 type TimeSlot = NonNullable<SessionView['time_slot']>
+type SortBy = 'time' | 'venue'
 
 function formatTime(isoString: string, timeZone: string): string {
   return new Date(isoString).toLocaleTimeString('en-US', { timeZone, hour: 'numeric', minute: '2-digit', hour12: true })
@@ -35,10 +42,109 @@ function getDateKey(isoString: string, timeZone: string): string {
   return new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(isoString))
 }
 
+/** One sticky group heading for a time slot, a venue or the self-hosted block. */
+function GroupHeading({ icon, children, trailing }: { icon: React.ReactNode; children: React.ReactNode; trailing?: React.ReactNode }) {
+  return (
+    <div className="sticky-under-header z-10 -mx-4 mb-2 bg-background/95 px-4 py-1.5 backdrop-blur-sm sm:mx-0 sm:px-0">
+      <div className="flex items-center gap-2">
+        <h2 className="flex items-center gap-1.5 text-base font-semibold text-foreground">
+          {icon}
+          <span>{children}</span>
+        </h2>
+        <div className="h-px flex-1 bg-border" aria-hidden />
+        {trailing}
+      </div>
+    </div>
+  )
+}
+
+interface ScheduleCardProps {
+  session: Session
+  eventSlug: string
+  timeZone: string
+  signedIn: boolean
+  isFavorited: boolean
+  toggling: boolean
+  onToggleFavorite: (e: React.MouseEvent, id: string) => void
+  /** Which secondary details to show under the title. */
+  show: { time?: boolean; venue?: boolean; track?: boolean }
+}
+
+function ScheduleCard({ session, eventSlug, timeZone, signedIn, isFavorited, toggling, onToggleFavorite, show }: ScheduleCardProps) {
+  const href = `/e/${eventSlug}/sessions/${session.id}`
+  const startsAt = session.time_slot?.start_time ?? session.self_hosted_start_time
+  return (
+    <Card
+      className={cn(
+        'card-hover h-full',
+        session.is_self_hosted ? 'border-signal-amber/30 hover:border-signal-amber/50' : 'schedule-session hover:border-primary/50'
+      )}
+      style={session.is_self_hosted ? undefined : ({ '--session-color': session.track?.color || 'hsl(var(--primary))' } as React.CSSProperties)}
+    >
+      <CardContent className="p-3 pt-3">
+        <div className="space-y-1.5">
+          <div className="flex items-start justify-between gap-2">
+            <Link href={href} className="min-w-0 flex-1 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+              <h3 className="line-clamp-2 text-sm font-semibold leading-snug">{session.title}</h3>
+            </Link>
+            <div className="flex shrink-0 items-center gap-1">
+              {session.is_self_hosted ? (
+                <Badge variant="amber">Self-hosted</Badge>
+              ) : (
+                <Badge variant="secondary">{formatLabel(session.format)}</Badge>
+              )}
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={(e) => onToggleFavorite(e, session.id)}
+                disabled={toggling}
+                className={cn('-my-2 -mr-2', isFavorited ? 'text-favorite hover:text-favorite' : 'text-muted-foreground hover:text-favorite')}
+                aria-pressed={isFavorited}
+                aria-label={isFavorited ? `Remove ${session.title} from my schedule` : `Save ${session.title} to my schedule`}
+                title={isFavorited ? 'Remove from my schedule' : signedIn ? 'Save to my schedule' : 'Sign in to save this session'}
+              >
+                <Heart className={cn('h-4 w-4', isFavorited && 'fill-favorite')} aria-hidden />
+              </Button>
+            </div>
+          </div>
+
+          <Link href={href} className="block rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+              {show.time && startsAt && (
+                <span className="flex items-center gap-1">
+                  <Clock className="h-3 w-3 shrink-0" aria-hidden />
+                  {formatTime(startsAt, timeZone)}
+                </span>
+              )}
+              <span className="flex min-w-0 items-center gap-1">
+                <User className="h-3 w-3 shrink-0" aria-hidden />
+                <span className="truncate">{hostByline(session)}</span>
+              </span>
+              {show.venue && session.venue && (
+                <span className="flex min-w-0 items-center gap-1">
+                  <MapPin className="h-3 w-3 shrink-0" aria-hidden />
+                  <span className="truncate">{session.venue.name}</span>
+                </span>
+              )}
+              {show.track && session.track && (
+                <span className="flex min-w-0 items-center gap-1">
+                  {session.track.color && <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: session.track.color }} aria-hidden />}
+                  <span className="truncate">{session.track.name}</span>
+                </span>
+              )}
+            </div>
+          </Link>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
 export default function SchedulePage() {
   const router = useRouter()
   const { user, isLoading: authLoading } = useAuth()
   const event = useEvent()
+  const { toast } = useToast()
 
   const { tracks } = useTracks(event.slug)
   const tz = event.timezone
@@ -47,7 +153,7 @@ export default function SchedulePage() {
   const [loadError, setLoadError] = React.useState<string | null>(null)
   const [selectedDay, setSelectedDay] = React.useState<string | null>(null)
   const [trackFilter, setTrackFilter] = React.useState<string>('all')
-  const [sortBy, setSortBy] = React.useState<'time' | 'venue'>('time')
+  const [sortBy, setSortBy] = React.useState<SortBy>('time')
   const [showSelfHosted, setShowSelfHosted] = React.useState(true)
   const [search, setSearch] = React.useState('')
   const [favoriteIds, setFavoriteIds] = React.useState<Set<string>>(new Set())
@@ -63,7 +169,7 @@ export default function SchedulePage() {
         setLoadError(null)
       })
       .catch((err) => {
-        if (mounted) setLoadError(err instanceof Error ? err.message : 'The schedule could not load')
+        if (mounted) setLoadError(err instanceof Error ? err.message : 'The schedule could not be loaded.')
       })
       .finally(() => {
         if (mounted) setIsLoading(false)
@@ -98,9 +204,14 @@ export default function SchedulePage() {
     setTogglingIds((prev) => new Set(prev).add(sessionId))
     try {
       await setFavorite(event.slug, sessionId, !isFavorited)
+      toast({
+        title: isFavorited ? 'Removed from my schedule' : 'Saved to my schedule',
+        variant: 'success',
+        action: isFavorited ? undefined : { label: 'View my schedule', onClick: () => router.push(`/e/${event.slug}/my-schedule`) },
+      })
     } catch (err) {
-      console.error('Error toggling favorite:', err instanceof Error ? err.message : err)
       flip(isFavorited)
+      toast({ title: 'Your saved schedule could not be updated', description: err instanceof Error ? err.message : 'Please try again.', variant: 'destructive' })
     } finally {
       setTogglingIds((prev) => {
         const next = new Set(prev)
@@ -143,12 +254,10 @@ export default function SchedulePage() {
       if (session.is_self_hosted) {
         if (!showSelfHosted) return false
         if (!session.self_hosted_start_time) return false
-        const slotDate = getDateKey(session.self_hosted_start_time, tz)
-        if (slotDate !== selectedDay) return false
+        if (getDateKey(session.self_hosted_start_time, tz) !== selectedDay) return false
       } else {
         if (!session.time_slot) return false
-        const slotDate = getDateKey(session.time_slot.start_time, tz)
-        if (slotDate !== selectedDay) return false
+        if (getDateKey(session.time_slot.start_time, tz) !== selectedDay) return false
       }
       if (trackFilter !== 'all' && session.track?.id !== trackFilter) return false
       return true
@@ -169,15 +278,10 @@ export default function SchedulePage() {
   const sessionsBySlot = React.useMemo(() => {
     const grouped: Record<string, Session[]> = {}
     filteredSessions.forEach((session) => {
-      if (session.is_self_hosted) {
-        const key = 'self-hosted'
-        if (!grouped[key]) grouped[key] = []
-        grouped[key].push(session)
-      } else if (session.time_slot) {
-        const slotId = session.time_slot.id
-        if (!grouped[slotId]) grouped[slotId] = []
-        grouped[slotId].push(session)
-      }
+      const key = session.is_self_hosted ? 'self-hosted' : session.time_slot?.id
+      if (!key) return
+      if (!grouped[key]) grouped[key] = []
+      grouped[key].push(session)
     })
     return grouped
   }, [filteredSessions])
@@ -187,13 +291,10 @@ export default function SchedulePage() {
     if (sortBy !== 'venue') return null
     const grouped: Record<string, Session[]> = {}
     filteredSessions.forEach((session) => {
-      const venueName = session.is_self_hosted ? 'Self-Hosted' : (session.venue?.name || 'Unassigned')
-      if (!grouped[venueName]) {
-        grouped[venueName] = []
-      }
+      const venueName = session.is_self_hosted ? 'Self-hosted' : (session.venue?.name || 'Unassigned')
+      if (!grouped[venueName]) grouped[venueName] = []
       grouped[venueName].push(session)
     })
-    // Sort sessions within each venue by start time
     Object.values(grouped).forEach((arr) => {
       arr.sort((a, b) => {
         const aTime = a.time_slot?.start_time || a.self_hosted_start_time || ''
@@ -207,73 +308,69 @@ export default function SchedulePage() {
   if (authLoading || isLoading) {
     return (
       <DashboardLayout>
-        <div className="flex items-center justify-center py-12">
+        <div className="flex items-center justify-center py-12" role="status" aria-label="Loading the schedule">
           <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
         </div>
       </DashboardLayout>
     )
   }
 
+  const cardProps = {
+    eventSlug: event.slug,
+    timeZone: tz,
+    signedIn: !!user,
+    onToggleFavorite: handleToggleFavorite,
+  }
+  const selfHostedSessions = sessionsBySlot['self-hosted'] ?? []
+  const filtersActive = !!search || trackFilter !== 'all' || !showSelfHosted
+
   return (
     <DashboardLayout>
       <div className="space-y-6">
-        <div className="page-heading">
-          <div>
-            <h1 className="text-2xl font-bold">Schedule</h1>
-            <p className="text-muted-foreground mt-1">
-              Browse sessions by day
-            </p>
-          </div>
-          <div className="flex gap-2">
-            <ExportScheduleButton
-              eventSlug={event.slug}
-              eventName={event.name}
-              favoritesOnly={false}
-              variant="outline"
-              size="sm"
-            />
-          </div>
-        </div>
+        <PageHeader
+          title="Schedule"
+          subtitle="Browse sessions by day."
+          actions={
+            sessions.length > 0 ? (
+              <ExportScheduleButton eventSlug={event.slug} eventName={event.name} favoritesOnly={false} variant="outline" size="sm" />
+            ) : undefined
+          }
+        />
 
         {loadError && (
-          <div role="alert" className="rounded-xl border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">{loadError}</div>
+          <div role="alert" className="rounded-lg border border-destructive/20 bg-destructive/10 p-3 text-sm text-destructive">{loadError}</div>
         )}
 
         {sessions.length === 0 ? (
           <Card>
             <CardContent className="py-12 text-center">
-              <Calendar className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
-              <h2 className="text-lg font-semibold mb-2">No sessions scheduled yet</h2>
-              <p className="text-muted-foreground">
-                Check back later once the schedule has been published.
+              <Calendar className="mx-auto mb-4 h-12 w-12 text-muted-foreground" aria-hidden />
+              <h2 className="mb-2 text-lg font-semibold">No sessions scheduled yet</h2>
+              <p className="mb-4 text-muted-foreground">
+                The schedule appears here once organizers publish it. Until then, browse the proposals.
               </p>
+              <Button asChild variant="outline">
+                <Link href={`/e/${event.slug}/sessions`}>Browse sessions</Link>
+              </Button>
             </CardContent>
           </Card>
         ) : (
           <>
-            {/* Day Tabs and Controls */}
             <div className="space-y-3">
-              <div className="flex gap-2 overflow-x-auto pb-2 -mx-4 px-4 sm:mx-0 sm:px-0">
-                {days.map((day) => (
-                  <Button
-                    key={day.key}
-                    variant={selectedDay === day.key ? 'default' : 'outline'}
-                    onClick={() => setSelectedDay(day.key)}
-                    aria-label={day.label}
-                    aria-pressed={selectedDay === day.key}
-                    className={cn(
-                      'calendar-day whitespace-nowrap flex-col items-start gap-1 h-auto',
-                      selectedDay === day.key && 'btn-primary-glow'
-                    )}
-                  >
-                    <span className="text-xs font-medium opacity-75">{day.label.split(',')[0]}</span><span className="text-lg font-semibold">{day.label.split(',').slice(1).join(',').trim() || day.label}</span>
-                  </Button>
-                ))}
-              </div>
+              {days.length > 1 && (
+                <div className="-mx-4 overflow-x-auto px-4 sm:mx-0 sm:px-0">
+                  <div className="flex gap-2 pb-2 sm:flex-wrap sm:pb-0" role="group" aria-label="Day">
+                    {days.map((day) => (
+                      <FilterChip key={day.key} pressed={selectedDay === day.key} onClick={() => setSelectedDay(day.key)}>
+                        {day.label}
+                      </FilterChip>
+                    ))}
+                  </div>
+                </div>
+              )}
 
-              {/* Search */}
               <div className="relative">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
                 <Input
                   aria-label="Search the schedule"
                   placeholder="Search the schedule"
@@ -283,84 +380,35 @@ export default function SchedulePage() {
                 />
               </div>
 
-              {/* Track filter and sort toggle */}
-              <div className="space-y-3 sm:space-y-0 sm:flex sm:flex-wrap sm:items-center sm:gap-4">
-                {/* Sort toggle */}
-                <div className="flex items-center gap-1.5 bg-muted/50 rounded-lg p-1">
-                  <button
-                    onClick={() => setSortBy('time')}
-                    className={cn(
-                      'px-3 py-1.5 text-sm rounded-md transition-colors flex items-center gap-1.5 min-h-[36px]',
-                      sortBy === 'time'
-                        ? 'bg-background shadow-sm'
-                        : 'hover:bg-background/50'
-                    )}
-                  >
-                    <Clock className="h-3.5 w-3.5" />
-                    By Time
-                  </button>
-                  <button
-                    onClick={() => setSortBy('venue')}
-                    className={cn(
-                      'px-3 py-1.5 text-sm rounded-md transition-colors flex items-center gap-1.5 min-h-[36px]',
-                      sortBy === 'venue'
-                        ? 'bg-background shadow-sm'
-                        : 'hover:bg-background/50'
-                    )}
-                  >
-                    <MapPin className="h-3.5 w-3.5" />
-                    By Venue
-                  </button>
-                </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <SegmentedControl<SortBy>
+                  aria-label="Group by"
+                  value={sortBy}
+                  onValueChange={setSortBy}
+                  options={[
+                    { value: 'time', label: 'By time', icon: <Clock className="h-3.5 w-3.5" aria-hidden /> },
+                    { value: 'venue', label: 'By venue', icon: <MapPin className="h-3.5 w-3.5" aria-hidden /> },
+                  ]}
+                />
 
-                <button
-                  onClick={() => setShowSelfHosted(!showSelfHosted)}
-                  className={cn(
-                    'px-3 py-1.5 text-sm rounded-md transition-colors flex items-center gap-1.5 min-h-[36px] border',
-                    showSelfHosted
-                      ? 'bg-orange-500/10 border-orange-500/50 text-orange-700 dark:text-orange-400'
-                      : 'border-border text-muted-foreground hover:bg-muted'
-                  )}
-                >
-                  <MapPin className="h-3.5 w-3.5" />
-                  Self-Hosted
-                </button>
+                <FilterChip pressed={showSelfHosted} onClick={() => setShowSelfHosted(!showSelfHosted)} icon={<MapPin className="h-3.5 w-3.5" aria-hidden />}>
+                  Self-hosted
+                </FilterChip>
 
-                {/* Track filter */}
                 {tracks.length > 0 && (
-                  <div className="w-full sm:w-auto overflow-x-auto -mx-4 px-4 sm:mx-0 sm:px-0">
-                    <div className="flex items-center gap-1.5 sm:gap-2 pb-2 sm:pb-0 sm:flex-wrap">
-                      <span className="text-xs text-muted-foreground mr-1 whitespace-nowrap">Track:</span>
-                      <button
-                        onClick={() => setTrackFilter('all')}
-                        className={cn(
-                          'px-3 py-1.5 text-xs rounded-md transition-colors whitespace-nowrap min-h-[32px]',
-                          trackFilter === 'all'
-                            ? 'bg-primary text-primary-foreground'
-                            : 'bg-muted hover:bg-muted/80'
-                        )}
-                      >
-                        All
-                      </button>
+                  <div className="-mx-4 w-full overflow-x-auto px-4 sm:mx-0 sm:w-auto sm:px-0">
+                    <div className="flex items-center gap-2 pb-2 sm:flex-wrap sm:pb-0" role="group" aria-label="Track">
+                      <span className="mr-1 whitespace-nowrap text-xs text-muted-foreground">Track:</span>
+                      <FilterChip pressed={trackFilter === 'all'} onClick={() => setTrackFilter('all')}>All</FilterChip>
                       {tracks.map((t) => (
-                        <button
+                        <FilterChip
                           key={t.id}
+                          pressed={trackFilter === t.id}
                           onClick={() => setTrackFilter(t.id)}
-                          className={cn(
-                            'px-3 py-1.5 text-xs rounded-md transition-colors flex items-center gap-1.5 whitespace-nowrap min-h-[32px]',
-                            trackFilter === t.id
-                              ? 'bg-primary text-primary-foreground'
-                              : 'bg-muted hover:bg-muted/80'
-                          )}
+                          icon={t.color ? <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: t.color }} aria-hidden /> : undefined}
                         >
-                          {t.color && (
-                            <span
-                              className="w-2 h-2 rounded-full flex-shrink-0"
-                              style={{ backgroundColor: t.color }}
-                            />
-                          )}
                           {t.name}
-                        </button>
+                        </FilterChip>
                       ))}
                     </div>
                   </div>
@@ -368,245 +416,73 @@ export default function SchedulePage() {
               </div>
             </div>
 
-            {/* Sessions for selected day */}
             <div className="space-y-4">
               {sortBy === 'time' ? (
-                // Group by time slot
                 <>
                   {filteredSlots.map((slot) => {
                     const slotSessions = sessionsBySlot[slot.id] || []
                     if (slotSessions.length === 0) return null
-
-                    const startTime = formatTime(slot.start_time, tz)
-                    const endTime = formatTime(slot.end_time, tz)
-
                     return (
                       <div key={slot.id}>
-                        {/* Time header - more compact */}
-                        <div className="sticky top-[104px] z-10 bg-background/95 backdrop-blur-sm py-1.5 -mx-4 px-4 sm:mx-0 sm:px-0 mb-2">
-                          <div className="flex items-center gap-2">
-                            <div className="flex items-center gap-1.5 text-foreground font-semibold text-lg">
-                              <Clock className="h-3.5 w-3.5" />
-                              <span>{startTime} - {endTime}</span>
-                            </div>
-                            <div className="flex-1 h-px bg-border" />
-                          </div>
-                        </div>
-
-                        {/* Session cards - compact layout */}
+                        <GroupHeading icon={<Clock className="h-3.5 w-3.5" aria-hidden />}>
+                          {formatTime(slot.start_time, tz)} {EN_DASH} {formatTime(slot.end_time, tz)}
+                        </GroupHeading>
                         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
                           {slotSessions.map((session) => (
-                            <Card key={session.id} className="schedule-session h-full card-hover hover:border-primary/50" style={{ '--session-color': session.track?.color || 'hsl(var(--primary))' } as React.CSSProperties}>
-                              <CardContent className="p-3">
-                                <div className="space-y-1.5">
-                                  {/* Title row with favorite button */}
-                                  <div className="flex items-start justify-between gap-2">
-                                    <Link href={`/e/${event.slug}/sessions/${session.id}`} className="flex-1 min-w-0">
-                                      <h3 className="font-semibold text-sm leading-snug line-clamp-2">{session.title}</h3>
-                                    </Link>
-                                    <div className="flex items-center gap-1.5 flex-shrink-0">
-                                      <Badge variant="secondary" className="capitalize text-xs">
-                                        {session.format}
-                                      </Badge>
-                                      {user && (
-                                        <button
-                                          onClick={(e) => handleToggleFavorite(e, session.id)}
-                                          disabled={togglingIds.has(session.id)}
-                                          className={cn(
-                                            'p-1.5 rounded-full transition-colors',
-                                            favoriteIds.has(session.id)
-                                              ? 'text-red-500'
-                                              : 'text-muted-foreground hover:text-red-500'
-                                          )}
-                                          aria-label={favoriteIds.has(session.id) ? 'Remove from favorites' : 'Add to favorites'}
-                                        >
-                                          <Heart className={cn('h-4 w-4', favoriteIds.has(session.id) && 'fill-current')} />
-                                        </button>
-                                      )}
-                                    </div>
-                                  </div>
-
-                                  {/* Host and venue inline */}
-                                  <Link href={`/e/${event.slug}/sessions/${session.id}`} className="block">
-                                    <div className="flex items-center gap-3 text-xs text-muted-foreground">
-                                      <div className="flex items-center gap-1 truncate">
-                                          <User className="h-3 w-3 flex-shrink-0" />
-                                          <span className="truncate">{hostByline(session)}</span>
-                                        </div>
-                                      {session.venue && (
-                                        <div className="flex items-center gap-1 truncate">
-                                          <MapPin className="h-3 w-3 flex-shrink-0" />
-                                          <span className="truncate">{session.venue.name}</span>
-                                        </div>
-                                      )}
-                                      {session.track && (
-                                        <div className="flex items-center gap-1 truncate">
-                                          {session.track.color && (
-                                            <span
-                                              className="w-2 h-2 rounded-full flex-shrink-0"
-                                              style={{ backgroundColor: session.track.color }}
-                                            />
-                                          )}
-                                          <span className="truncate">{session.track.name}</span>
-                                        </div>
-                                      )}
-                                    </div>
-                                  </Link>
-                                </div>
-                              </CardContent>
-                            </Card>
+                            <ScheduleCard
+                              key={session.id}
+                              session={session}
+                              {...cardProps}
+                              isFavorited={favoriteIds.has(session.id)}
+                              toggling={togglingIds.has(session.id)}
+                              show={{ venue: true, track: true }}
+                            />
                           ))}
                         </div>
                       </div>
                     )
                   })}
 
-                  {/* Self-hosted sessions */}
-                  {sessionsBySlot['self-hosted'] && sessionsBySlot['self-hosted'].length > 0 && (
+                  {selfHostedSessions.length > 0 && (
                     <div>
-                      <div className="sticky top-[104px] z-10 bg-background/95 backdrop-blur-sm py-1.5 -mx-4 px-4 sm:mx-0 sm:px-0 mb-2">
-                        <div className="flex items-center gap-2">
-                          <div className="flex items-center gap-1.5 text-orange-600 dark:text-orange-400 font-semibold text-sm">
-                            <MapPin className="h-3.5 w-3.5" />
-                            <span>Self-Hosted</span>
-                          </div>
-                          <div className="flex-1 h-px bg-border" />
-                        </div>
-                      </div>
+                      <GroupHeading icon={<MapPin className="h-3.5 w-3.5 text-signal-amber" aria-hidden />}>Self-hosted</GroupHeading>
                       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                        {sessionsBySlot['self-hosted'].map((session) => (
-                          <Card key={session.id} className="h-full card-hover border-orange-500/30 hover:border-orange-500/50">
-                            <CardContent className="p-3">
-                              <div className="space-y-1.5">
-                                {/* Title row with favorite button */}
-                                <div className="flex items-start justify-between gap-2">
-                                  <Link href={`/e/${event.slug}/sessions/${session.id}`} className="flex-1 min-w-0">
-                                    <h3 className="font-semibold text-sm leading-snug line-clamp-2">{session.title}</h3>
-                                  </Link>
-                                  <div className="flex items-center gap-1.5 flex-shrink-0">
-                                    <Badge variant="secondary" className="text-xs bg-orange-500/10 text-orange-700 dark:text-orange-400 border-orange-500/30">
-                                      Self-Hosted
-                                    </Badge>
-                                    {user && (
-                                      <button
-                                        onClick={(e) => handleToggleFavorite(e, session.id)}
-                                        disabled={togglingIds.has(session.id)}
-                                        className={cn(
-                                          'p-1.5 rounded-full transition-colors',
-                                          favoriteIds.has(session.id)
-                                            ? 'text-red-500'
-                                            : 'text-muted-foreground hover:text-red-500'
-                                        )}
-                                        aria-label={favoriteIds.has(session.id) ? 'Remove from favorites' : 'Add to favorites'}
-                                      >
-                                        <Heart className={cn('h-4 w-4', favoriteIds.has(session.id) && 'fill-current')} />
-                                      </button>
-                                    )}
-                                  </div>
-                                </div>
-                                <Link href={`/e/${event.slug}/sessions/${session.id}`} className="block">
-                                  <div className="flex items-center gap-3 text-xs text-muted-foreground">
-                                    {session.self_hosted_start_time && (
-                                      <div className="flex items-center gap-1">
-                                        <Clock className="h-3 w-3 flex-shrink-0" />
-                                        <span>{formatTime(session.self_hosted_start_time, tz)}</span>
-                                      </div>
-                                    )}
-                                    <div className="flex items-center gap-1 truncate">
-                                        <User className="h-3 w-3 flex-shrink-0" />
-                                        <span className="truncate">{hostByline(session)}</span>
-                                      </div>
-                                  </div>
-                                </Link>
-                              </div>
-                            </CardContent>
-                          </Card>
+                        {selfHostedSessions.map((session) => (
+                          <ScheduleCard
+                            key={session.id}
+                            session={session}
+                            {...cardProps}
+                            isFavorited={favoriteIds.has(session.id)}
+                            toggling={togglingIds.has(session.id)}
+                            show={{ time: true }}
+                          />
                         ))}
                       </div>
                     </div>
                   )}
                 </>
               ) : (
-                // Group by venue
                 <>
                   {sessionsByVenue && Object.entries(sessionsByVenue)
                     .sort(([a], [b]) => a.localeCompare(b))
                     .map(([venueName, venueSessions]) => (
                       <div key={venueName}>
-                        {/* Venue header */}
-                        <div className="sticky top-[104px] z-10 bg-background/95 backdrop-blur-sm py-1.5 -mx-4 px-4 sm:mx-0 sm:px-0 mb-2">
-                          <div className="flex items-center gap-2">
-                            <div className="flex items-center gap-1.5 text-foreground font-semibold text-lg">
-                              <MapPin className="h-3.5 w-3.5" />
-                              <span>{venueName}</span>
-                            </div>
-                            <div className="flex-1 h-px bg-border" />
-                            <span className="text-xs text-muted-foreground">{venueSessions.length} sessions</span>
-                          </div>
-                        </div>
-
-                        {/* Session cards - compact layout */}
+                        <GroupHeading
+                          icon={<MapPin className="h-3.5 w-3.5" aria-hidden />}
+                          trailing={<span className="text-xs text-muted-foreground">{plural(venueSessions.length, 'session')}</span>}
+                        >
+                          {venueName}
+                        </GroupHeading>
                         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
                           {venueSessions.map((session) => (
-                            <Card key={session.id} className="schedule-session h-full card-hover hover:border-primary/50" style={{ '--session-color': session.track?.color || 'hsl(var(--primary))' } as React.CSSProperties}>
-                              <CardContent className="p-3">
-                                <div className="space-y-1.5">
-                                  {/* Title row with favorite button */}
-                                  <div className="flex items-start justify-between gap-2">
-                                    <Link href={`/e/${event.slug}/sessions/${session.id}`} className="flex-1 min-w-0">
-                                      <h3 className="font-semibold text-sm leading-snug line-clamp-2">{session.title}</h3>
-                                    </Link>
-                                    <div className="flex items-center gap-1.5 flex-shrink-0">
-                                      <Badge variant="secondary" className="capitalize text-xs">
-                                        {session.format}
-                                      </Badge>
-                                      {user && (
-                                        <button
-                                          onClick={(e) => handleToggleFavorite(e, session.id)}
-                                          disabled={togglingIds.has(session.id)}
-                                          className={cn(
-                                            'p-1.5 rounded-full transition-colors',
-                                            favoriteIds.has(session.id)
-                                              ? 'text-red-500'
-                                              : 'text-muted-foreground hover:text-red-500'
-                                          )}
-                                          aria-label={favoriteIds.has(session.id) ? 'Remove from favorites' : 'Add to favorites'}
-                                        >
-                                          <Heart className={cn('h-4 w-4', favoriteIds.has(session.id) && 'fill-current')} />
-                                        </button>
-                                      )}
-                                    </div>
-                                  </div>
-
-                                  {/* Host and time inline */}
-                                  <Link href={`/e/${event.slug}/sessions/${session.id}`} className="block">
-                                    <div className="flex items-center gap-3 text-xs text-muted-foreground">
-                                      {session.time_slot && (
-                                        <div className="flex items-center gap-1">
-                                          <Clock className="h-3 w-3 flex-shrink-0" />
-                                          <span>{formatTime(session.time_slot.start_time, tz)}</span>
-                                        </div>
-                                      )}
-                                      <div className="flex items-center gap-1 truncate">
-                                          <User className="h-3 w-3 flex-shrink-0" />
-                                          <span className="truncate">{hostByline(session)}</span>
-                                        </div>
-                                      {session.track && (
-                                        <div className="flex items-center gap-1 truncate">
-                                          {session.track.color && (
-                                            <span
-                                              className="w-2 h-2 rounded-full flex-shrink-0"
-                                              style={{ backgroundColor: session.track.color }}
-                                            />
-                                          )}
-                                          <span className="truncate">{session.track.name}</span>
-                                        </div>
-                                      )}
-                                    </div>
-                                  </Link>
-                                </div>
-                              </CardContent>
-                            </Card>
+                            <ScheduleCard
+                              key={session.id}
+                              session={session}
+                              {...cardProps}
+                              isFavorited={favoriteIds.has(session.id)}
+                              toggling={togglingIds.has(session.id)}
+                              show={{ time: true, track: true }}
+                            />
                           ))}
                         </div>
                       </div>
@@ -621,9 +497,14 @@ export default function SchedulePage() {
                       {search
                         ? 'No sessions match your search.'
                         : trackFilter !== 'all'
-                        ? 'No sessions match the selected track.'
-                        : 'No sessions scheduled for this day yet.'}
+                          ? 'No sessions match the selected track.'
+                          : 'No sessions scheduled for this day yet.'}
                     </p>
+                    {filtersActive && (
+                      <Button variant="outline" size="sm" className="mt-4" onClick={() => { setSearch(''); setTrackFilter('all'); setShowSelfHosted(true) }}>
+                        Clear filters
+                      </Button>
+                    )}
                   </CardContent>
                 </Card>
               )}

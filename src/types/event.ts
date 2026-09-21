@@ -48,6 +48,8 @@ export interface EventTheme {
     telegram?: string;
     discord?: string;
     website?: string;
+    /** Any other links the organizer lists (Bluesky, Signal, Luma…); label is typed by them. Max 8. */
+    links?: { label: string; url: string }[];
   };
   heroTitle?: string;
   heroSubtitle?: string;

@@ -33,12 +33,12 @@ export function EventAccessGate({ reason = 'unknown' }: EventAccessGateProps) {
   }, [isLoading, user, router])
 
   const returnTo = safeReturnPath(pathname)
-  const signInHref = `/login?redirect=${encodeURIComponent(returnTo)}`
+  const signInHref = `/login?returnTo=${encodeURIComponent(returnTo)}`
 
   let title = 'This gathering isn’t available'
   let body = user
     ? 'The link may have changed, or this gathering may need an invitation. Drafts are available to their organizers.'
-    : 'Sign in to access a private gathering or an event you’re organizing.'
+    : 'Sign in to open a private gathering or one you’re organizing.'
   if (reason === 'draft') {
     title = 'This gathering hasn’t been published yet'
     body = user
@@ -51,13 +51,32 @@ export function EventAccessGate({ reason = 'unknown' }: EventAccessGateProps) {
       : 'If you received an invitation link, open it to join. Already a member? Sign in to continue.'
   }
 
-  return <><SiteHeader /><main className="mx-auto max-w-xl px-6 py-24 text-center">
-    <p className="eyebrow mb-4">unconference</p>
-    <h1 className="text-4xl font-semibold tracking-tight">{isLoading ? 'Finding your gathering…' : title}</h1>
-    <p className="mt-5 text-muted-foreground">{isLoading ? 'Checking your access.' : body}</p>
-    {!isLoading && <div className="mt-8 flex flex-wrap justify-center gap-3">
-      {!user && <Button asChild><Link href={signInHref}>Sign in</Link></Button>}
-      <Button variant="outline" asChild><Link href="/#upcoming">Explore gatherings</Link></Button>
-    </div>}
-  </main></>
+  return (
+    <>
+      <SiteHeader />
+      <main className="mx-auto max-w-xl px-6 py-24 text-center">
+        <p className="eyebrow mb-4">unconference</p>
+        <h1 className="page-title">{isLoading ? 'Finding your gathering…' : title}</h1>
+        <p className="mt-5 text-muted-foreground">{isLoading ? 'Checking your access.' : body}</p>
+        {!isLoading && reason === 'private' && (
+          <p className="mt-3 text-sm text-muted-foreground">
+            Invitation links look like <span className="font-mono text-xs">unconference.events/invite/e/…</span> — open
+            the one you were sent in this browser, or ask the organizer for a new one.
+          </p>
+        )}
+        {!isLoading && (
+          <div className="mt-8 flex flex-wrap justify-center gap-3">
+            {!user && (
+              <Button asChild>
+                <Link href={signInHref}>Sign in</Link>
+              </Button>
+            )}
+            <Button variant="outline" asChild>
+              <Link href="/events">Explore gatherings</Link>
+            </Button>
+          </div>
+        )}
+      </main>
+    </>
+  )
 }

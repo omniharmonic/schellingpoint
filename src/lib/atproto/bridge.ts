@@ -150,7 +150,7 @@ export interface BridgedAccount {
 /**
  * The account a DID signs in as through the Bluesky door: its existing `accounts` row
  * (whatever the kind), else a new `kind = 'oauth'` row with `email = NULL`. The profile
- * row is created by the accounts trigger; its `did` / `atproto_handle` are filled here.
+ * row is created by the accounts trigger; its `did` is filled here (the handle lives on `accounts`).
  */
 export async function findOrCreateOAuthAccount(did: string, handle: string | null): Promise<BridgedAccount> {
   return tx(async (t) => {
@@ -162,7 +162,6 @@ export async function findOrCreateOAuthAccount(did: string, handle: string | nul
       const row = existing[0]
       if (handle && handle !== row.handle) {
         await t`update accounts set handle = ${handle} where id = ${row.id}`
-        await t`update profiles set atproto_handle = ${handle} where id = ${row.id}`
       }
       return { accountId: row.id, did, kind: row.kind, created: false }
     }
@@ -171,7 +170,7 @@ export async function findOrCreateOAuthAccount(did: string, handle: string | nul
     `
     const accountId = inserted[0]!.id
     await t`
-      update profiles set did = ${did}, atproto_handle = ${handle}, atproto_linked_at = coalesce(atproto_linked_at, now())
+      update profiles set did = ${did}, atproto_linked_at = coalesce(atproto_linked_at, now())
       where id = ${accountId}
     `
     return { accountId, did, kind: 'oauth' as const, created: true }

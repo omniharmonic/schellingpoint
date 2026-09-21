@@ -1,11 +1,18 @@
 'use client'
 
 import * as React from 'react'
-import { X, Loader2, Send, ShieldCheck, MessageSquareWarning, Lock } from 'lucide-react'
+import { MessageSquareWarning, ShieldCheck, Lock, MessageCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
+import { Label } from '@/components/ui/label'
+import { Select } from '@/components/ui/select'
+import { FilterChip } from '@/components/ui/filter-chip'
+import { RemovableChip } from '@/components/ui/removable-chip'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { useToast } from '@/components/ui/toast'
 import { cn } from '@/lib/utils'
 import { useTracks } from '@/hooks/useTracks'
 import { useEvent } from '@/contexts/EventContext'
@@ -14,16 +21,9 @@ import { parseTimeInTimezone } from '@/lib/events/timezone'
 import { apiFetch } from '@/lib/api/client'
 import { SkillPicker } from '@/components/SkillPicker'
 import { TimePreferences, type TimePreferenceValue, type TimeWindowValue } from '@/components/TimePreferences'
-import { Checkbox } from '@/components/ui/checkbox'
+import { SESSION_STATUS } from '@/lib/labels'
+import { allowedFormatOptions, MAX_TAGS, TIME_OPTIONS } from '@/lib/sessions/constants'
 import type { SessionView } from '@/app/api/v1/sessions/_lib/read'
-
-const FORMATS = [
-  { value: 'talk', label: 'Talk', description: 'A presentation or lecture' },
-  { value: 'workshop', label: 'Workshop', description: 'Hands-on interactive session' },
-  { value: 'discussion', label: 'Discussion', description: 'Open group conversation' },
-  { value: 'panel', label: 'Panel', description: 'Multiple speakers discussing' },
-  { value: 'demo', label: 'Demo', description: 'Live demonstration' },
-]
 
 const SESSION_TYPES = [
   { value: 'proposed', label: 'Proposed' },
@@ -32,21 +32,7 @@ const SESSION_TYPES = [
   { value: 'track_reserved', label: 'Track reserved' },
 ]
 
-const REVIEW_STATUSES = [
-  { value: 'pending', label: 'Pending review' },
-  { value: 'approved', label: 'Approved' },
-  { value: 'rejected', label: 'Declined' },
-]
-
-const TIME_OPTIONS: { value: string; label: string }[] = []
-for (let h = 9; h <= 22; h++) {
-  for (const m of [0, 30]) {
-    if (h === 22 && m === 30) continue
-    const hh = String(h).padStart(2, '0')
-    const mm = String(m).padStart(2, '0')
-    TIME_OPTIONS.push({ value: `${hh}:${mm}`, label: `${h > 12 ? h - 12 : h}:${mm} ${h >= 12 ? 'PM' : 'AM'}` })
-  }
-}
+const REVIEW_STATUSES = (['pending', 'approved', 'rejected'] as const).map((value) => ({ value, label: SESSION_STATUS[value].label }))
 
 /** Split a stored timestamp into the event-timezone calendar day and HH:MM. */
 function parseTimestamp(iso: string | null | undefined, timezone: string): { day: string; time: string } {
@@ -62,6 +48,34 @@ function parseTimestamp(iso: string | null | undefined, timezone: string): { day
   return { day: `${part('year')}-${part('month')}-${part('day')}`, time: `${part('hour')}:${part('minute')}` }
 }
 
+/** A selectable option card (format, hosting, track). */
+function OptionButton({
+  selected,
+  onClick,
+  className,
+  children,
+}: {
+  selected: boolean
+  onClick: () => void
+  className?: string
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={selected}
+      onClick={onClick}
+      className={cn(
+        'rounded-xl border p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
+        selected ? 'border-primary bg-primary/10' : 'border-border hover:border-muted-foreground/50',
+        className
+      )}
+    >
+      {children}
+    </button>
+  )
+}
+
 interface EditSessionModalProps {
   isOpen: boolean
   onClose: () => void
@@ -74,7 +88,8 @@ interface EditSessionModalProps {
  *   - proposal content: only its author (the record lives in their repository); organizers
  *     edit content only on a host-less session, and otherwise "ask the proposer to update"
  *   - track: the author's suggestion or an organizer's curation (never rewrites the record)
- *   - attendee logistics (Telegram group): hosts, co-hosts, organizers
+ *   - attendee logistics (the chat group link; stored as `telegram_group_url`, labelled
+ *     generically in the UI): hosts, co-hosts, organizers
  *   - review status and session type: organizers
  * Hosts are never assigned here: co-hosts accept invites themselves (R9). Scheduling happens
  * in the schedule builder.
@@ -82,6 +97,7 @@ interface EditSessionModalProps {
 export function EditSessionModal({ isOpen, onClose, session, onSave }: EditSessionModalProps) {
   const event = useEvent()
   const { tracks } = useTracks(event.slug)
+  const { toast } = useToast()
   const isOrganizer = session.viewer.is_organizer
   const canEditContent = session.viewer.can_edit_content
   const canSetTrack = session.viewer.is_host || isOrganizer
@@ -95,12 +111,10 @@ export function EditSessionModal({ isOpen, onClose, session, onSave }: EditSessi
     [event.startDate, event.endDate],
   )
 
-  const allowedFormats = React.useMemo(() => {
-    if (!event.allowedFormats.length) return FORMATS
-    const preset = FORMATS.filter((f) => event.allowedFormats.includes(f.value))
-    const current = FORMATS.find((f) => f.value === session.format)
-    return current && !preset.includes(current) ? [...preset, current] : preset
-  }, [event.allowedFormats, session.format])
+  const allowedFormats = React.useMemo(
+    () => allowedFormatOptions(event.allowedFormats, session.format),
+    [event.allowedFormats, session.format],
+  )
 
   const initial = React.useCallback(() => {
     const start = parseTimestamp(session.self_hosted_start_time, event.timezone)
@@ -112,7 +126,7 @@ export function EditSessionModal({ isOpen, onClose, session, onSave }: EditSessi
       tags: session.topic_tags,
       skills: session.skills,
       trackId: session.track_id,
-      telegram: session.telegram_group_url || '',
+      chatUrl: session.telegram_group_url || '',
       isSelfHosted: session.is_self_hosted,
       customLocation: session.custom_location || '',
       publicPlace: session.public_place || '',
@@ -144,6 +158,7 @@ export function EditSessionModal({ isOpen, onClose, session, onSave }: EditSessi
       setError(null)
       setAskMessage('')
       setAskState('idle')
+      setCustomTag('')
     }
   }, [isOpen, initial])
 
@@ -160,21 +175,22 @@ export function EditSessionModal({ isOpen, onClose, session, onSave }: EditSessi
       await apiFetch(`/api/v1/sessions/${session.id}/request-update`, { method: 'POST', json: { message: askMessage.trim() } })
       setAskState('sent')
       setAskMessage('')
+      toast({ title: 'Request sent', description: 'The proposer was notified.', variant: 'success' })
     } catch (err) {
       setAskState('idle')
-      setError(err instanceof Error ? err.message : 'The request could not be sent')
+      setError(err instanceof Error ? err.message : 'The request could not be sent. Please try again.')
     }
   }
 
   const handleAddTag = (tag: string) => {
     const normalized = tag.toLowerCase().trim()
-    if (normalized && !form.tags.includes(normalized) && form.tags.length < 5) set('tags', [...form.tags, normalized])
+    if (normalized && !form.tags.includes(normalized) && form.tags.length < MAX_TAGS) set('tags', [...form.tags, normalized])
     setCustomTag('')
   }
 
   const handleSave = async () => {
     if (canEditContent && !form.title.trim()) {
-      setError('Title is required')
+      setError('Give the session a title.')
       return
     }
     if (form.isSelfHosted && form.day && form.startTime && form.endTime && form.endTime <= form.startTime) {
@@ -204,7 +220,8 @@ export function EditSessionModal({ isOpen, onClose, session, onSave }: EditSessi
         }
       }
       if (canSetTrack && form.trackId !== session.track_id) body.track_id = form.trackId
-      if (canManageLogistics) body.telegram_group_url = form.telegram.trim() || null
+      // The UI says "chat group link"; the column and API field keep their historical name.
+      if (canManageLogistics) body.telegram_group_url = form.chatUrl.trim() || null
 
       if (session.viewer.is_host) {
         const before = initial()
@@ -235,59 +252,54 @@ export function EditSessionModal({ isOpen, onClose, session, onSave }: EditSessi
       })
       onSave(result.session)
       if (result.atproto?.error) {
-        setError(`Saved. Updating the public proposal record failed: ${result.atproto.error}`)
+        setError(`Saved in this gathering, but updating the public proposal record failed: ${result.atproto.error}`)
         return
       }
+      toast({ title: 'Changes saved', variant: 'success' })
       onClose()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to update session')
+      setError(err instanceof Error ? err.message : 'The session could not be updated. Please try again.')
     } finally {
       setIsSaving(false)
     }
   }
 
-  if (!isOpen) return null
+  const tagsFull = form.tags.length >= MAX_TAGS
 
   return (
-    <>
-      <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50" onClick={onClose} />
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="edit-session-title"
-        className="fixed inset-4 md:inset-auto md:left-1/2 md:top-1/2 md:-translate-x-1/2 md:-translate-y-1/2 md:w-full md:max-w-lg bg-card border rounded-2xl shadow-2xl z-50 flex flex-col max-h-[90vh] overflow-hidden"
-      >
-        <div className="flex items-center justify-between p-4 border-b">
-          <h2 id="edit-session-title" className="text-lg font-semibold">Edit Session</h2>
-          <button onClick={onClose} className="p-2 rounded-full hover:bg-muted transition-colors" aria-label="Close">
-            <X className="h-5 w-5" />
-          </button>
+    <Dialog open={isOpen} onOpenChange={(open) => { if (!open && !isSaving) onClose() }}>
+      <DialogContent size="lg" className="max-h-[calc(100dvh-2rem)] gap-0 p-0">
+        <div className="p-6 pb-4">
+          <DialogHeader>
+            <DialogTitle>Edit session</DialogTitle>
+            <DialogDescription>
+              {canEditContent && session.viewer.is_host && session.proposal_uri
+                ? 'This proposal is a public record in your own repository. Saving content changes updates that record.'
+                : 'Changes are visible to organizers right away.'}
+            </DialogDescription>
+          </DialogHeader>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-4 space-y-5">
+        <div className="space-y-6 px-6 pb-6">
           {error && (
-            <div role="alert" className="rounded-lg bg-destructive/10 border border-destructive/20 p-3 text-sm text-destructive">{error}</div>
-          )}
-
-          {canEditContent && session.viewer.is_host && session.proposal_uri && (
-            <p className="text-xs text-muted-foreground rounded-lg border p-3">
-              This proposal is a public record in your own repository. Saving content changes updates that record.
-            </p>
+            <div role="alert" className="rounded-lg border border-destructive/20 bg-destructive/10 p-3 text-sm text-destructive">{error}</div>
           )}
 
           {authored && !canEditContent && (
-            <div className="rounded-lg border p-3 space-y-3">
-              <p className="text-xs text-muted-foreground flex items-start gap-2">
-                <Lock className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-                This proposal belongs to its proposer: its title, description, format, skills, place and time are theirs to change.
-                {isOrganizer ? ' You can still set its track, review status and type.' : ''}
+            <div className="space-y-3 rounded-xl border p-4">
+              <p className="flex items-start gap-2 text-sm text-muted-foreground">
+                <Lock className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+                <span>
+                  This proposal belongs to its proposer: its title, description, format, skills, place and time are theirs to change.
+                  {isOrganizer ? ' You can still set its track, review status and type.' : ''}
+                </span>
               </p>
               {isOrganizer && (
                 <div className="space-y-2">
-                  <label htmlFor="ask-proposer" className="text-sm font-medium flex items-center gap-2">
-                    <MessageSquareWarning className="h-4 w-4" />
+                  <Label htmlFor="ask-proposer" className="flex items-center gap-2">
+                    <MessageSquareWarning className="h-4 w-4" aria-hidden />
                     Ask the proposer to update
-                  </label>
+                  </Label>
                   <Textarea
                     id="ask-proposer"
                     value={askMessage}
@@ -296,153 +308,133 @@ export function EditSessionModal({ isOpen, onClose, session, onSave }: EditSessi
                     rows={3}
                     maxLength={1000}
                   />
-                  <div className="flex items-center gap-3">
-                    <Button type="button" variant="outline" size="sm" onClick={handleAskToUpdate} disabled={!askMessage.trim() || askState === 'sending'}>
-                      {askState === 'sending' && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+                  <div className="flex flex-wrap items-center gap-3">
+                    <Button type="button" variant="outline" size="sm" onClick={handleAskToUpdate} loading={askState === 'sending'} disabled={!askMessage.trim()}>
                       Send request
                     </Button>
-                    {askState === 'sent' && <span role="status" className="text-xs text-muted-foreground">Sent. The proposer was notified.</span>}
+                    {askState === 'sent' && <span role="status" className="text-sm text-success">Sent. The proposer was notified.</span>}
                   </div>
                 </div>
               )}
             </div>
           )}
 
-          {canEditContent && (<>
-          <div className="space-y-2">
-            <label htmlFor="edit-title" className="text-sm font-medium">Title <span className="text-destructive">*</span></label>
-            <Input id="edit-title" value={form.title} onChange={(e) => set('title', e.target.value)} placeholder="What's your session about?" maxLength={100} />
-            <p className="text-xs text-muted-foreground">{form.title.length}/100</p>
-          </div>
-
-          <div className="space-y-2">
-            <label htmlFor="edit-description" className="text-sm font-medium">Description</label>
-            <Textarea id="edit-description" value={form.description} onChange={(e) => set('description', e.target.value)} placeholder="Describe what participants will learn or experience..." rows={4} maxLength={500} />
-            <p className="text-xs text-muted-foreground">{form.description.length}/500</p>
-          </div>
-
-          <div className="space-y-2">
-            <span className="text-sm font-medium">Format</span>
-            <div className="grid grid-cols-2 gap-2">
-              {allowedFormats.map((f) => (
-                <button
-                  key={f.value}
-                  type="button"
-                  aria-pressed={form.format === f.value}
-                  onClick={() => set('format', f.value)}
-                  className={cn('p-3 rounded-lg border text-left transition-colors', form.format === f.value ? 'border-primary bg-primary/10' : 'hover:border-muted-foreground/50')}
-                >
-                  <div className="font-medium text-sm">{f.label}</div>
-                  <div className="text-xs text-muted-foreground">{f.description}</div>
-                </button>
-              ))}
-            </div>
-          </div>
-          </>)}
-
-          {canSetTrack && tracks.length > 0 && (
-            <div className="space-y-2">
-              <span className="text-sm font-medium">Track</span>
-              <div className="grid grid-cols-2 gap-2">
-                {[{ id: null as string | null, name: 'None', color: null as string | null }, ...tracks].map((track) => (
-                  <button
-                    key={track.id ?? 'none'}
-                    type="button"
-                    aria-pressed={form.trackId === track.id}
-                    onClick={() => set('trackId', track.id)}
-                    className={cn('px-3 py-2 rounded-lg border text-sm transition-colors text-left flex items-center gap-2', form.trackId === track.id ? 'border-primary bg-primary/10' : 'hover:border-muted-foreground/50')}
-                  >
-                    {track.color && <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: track.color }} />}
-                    <span className="truncate">{track.name}</span>
-                  </button>
-                ))}
+          {canEditContent && (
+            <>
+              <div className="space-y-2">
+                <Label htmlFor="edit-title">Title</Label>
+                <Input id="edit-title" value={form.title} onChange={(e) => set('title', e.target.value)} placeholder="What’s your session about?" maxLength={100} required aria-describedby="edit-title-count" />
+                <p id="edit-title-count" className="text-xs text-muted-foreground">{form.title.length}/100</p>
               </div>
-            </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="edit-description">Description (optional)</Label>
+                <Textarea id="edit-description" value={form.description} onChange={(e) => set('description', e.target.value)} placeholder="Describe what participants will learn or experience…" rows={4} maxLength={500} aria-describedby="edit-description-count" />
+                <p id="edit-description-count" className="text-xs text-muted-foreground">{form.description.length}/500</p>
+              </div>
+
+              <fieldset className="space-y-2">
+                <legend className="text-sm font-medium leading-none">Format</legend>
+                <div className="grid grid-cols-2 gap-3 pt-2">
+                  {allowedFormats.map((f) => (
+                    <OptionButton key={f.value} selected={form.format === f.value} onClick={() => set('format', f.value)}>
+                      <div className="text-sm font-medium">{f.label}</div>
+                      <div className="text-xs text-muted-foreground">{f.description}</div>
+                    </OptionButton>
+                  ))}
+                </div>
+              </fieldset>
+            </>
           )}
 
-          {canEditContent && (<>
-          <SkillPicker
-            value={form.skills}
-            onChange={(skills) => set('skills', skills.slice(0, 5))}
-            max={5}
-            label="Skills (up to 5)"
-            description="From the shared skill taxonomy."
-          />
-
-          <div className="space-y-3">
-            <span className="text-sm font-medium">Hosting</span>
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                type="button"
-                aria-pressed={!form.isSelfHosted}
-                onClick={() => set('isSelfHosted', false)}
-                className={cn('p-3 rounded-lg border text-left transition-colors', !form.isSelfHosted ? 'border-primary bg-primary/10' : 'hover:border-muted-foreground/50')}
-              >
-                <div className="font-medium text-sm">Official Venue</div>
-                <div className="text-xs text-muted-foreground">Assigned by organizers</div>
-              </button>
-              <button
-                type="button"
-                aria-pressed={form.isSelfHosted}
-                onClick={() => set('isSelfHosted', true)}
-                className={cn('p-3 rounded-lg border text-left transition-colors', form.isSelfHosted ? 'border-primary bg-primary/10' : 'hover:border-muted-foreground/50')}
-              >
-                <div className="font-medium text-sm">Self-Hosted</div>
-                <div className="text-xs text-muted-foreground">Your own location</div>
-              </button>
-            </div>
-
-            {form.isSelfHosted && (
-              <div className="space-y-3 rounded-lg border bg-muted/30 p-3">
-                <div className="space-y-1.5">
-                  <span className="text-xs font-medium text-muted-foreground">Day</span>
-                  <div className="flex flex-wrap gap-1.5">
-                    {eventDays.map((day) => (
-                      <button
-                        key={day.value}
-                        type="button"
-                        aria-pressed={form.day === day.value}
-                        onClick={() => set('day', form.day === day.value ? '' : day.value)}
-                        className={cn('px-2.5 py-1.5 rounded-md border text-xs transition-colors', form.day === day.value ? 'border-primary bg-primary/10 font-medium' : 'hover:border-muted-foreground/50')}
-                      >
-                        {day.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                {form.day && (
-                  <div className="flex items-center gap-2">
-                    <select aria-label="Start time" value={form.startTime} onChange={(e) => set('startTime', e.target.value)} className="flex-1 rounded-md border bg-background px-2 py-1.5 text-sm">
-                      <option value="">Start</option>
-                      {TIME_OPTIONS.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
-                    </select>
-                    <span className="text-xs text-muted-foreground">to</span>
-                    <select aria-label="End time" value={form.endTime} onChange={(e) => set('endTime', e.target.value)} className="flex-1 rounded-md border bg-background px-2 py-1.5 text-sm">
-                      <option value="">End</option>
-                      {TIME_OPTIONS.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
-                    </select>
-                  </div>
-                )}
-                {canSeeAttendeeDetails && (
-                  <div className="space-y-1.5">
-                    <label htmlFor="edit-location" className="text-xs font-medium text-muted-foreground">Location / Address</label>
-                    <Textarea id="edit-location" value={form.customLocation} onChange={(e) => set('customLocation', e.target.value)} placeholder="Address or directions for attendees..." rows={2} maxLength={300} />
-                    <p className="text-xs text-muted-foreground">Shown only to confirmed attendees, hosts and organizers.</p>
-                  </div>
-                )}
-                <div className="space-y-1.5">
-                  <label htmlFor="edit-public-place" className="text-xs font-medium text-muted-foreground">Public area (optional)</label>
-                  <input id="edit-public-place" type="text" value={form.publicPlace} onChange={(e) => set('publicPlace', e.target.value)} placeholder="e.g. Near Pearl St, Boulder" maxLength={80} className="w-full rounded-md border bg-background px-3 py-1.5 text-sm" />
-                  <p className="text-xs text-muted-foreground">A neighbourhood or landmark, never a street address. It appears on your public proposal record.</p>
-                </div>
+          {canSetTrack && tracks.length > 0 && (
+            <fieldset className="space-y-2">
+              <legend className="text-sm font-medium leading-none">Track</legend>
+              <div className="grid grid-cols-2 gap-3 pt-2">
+                {[{ id: null as string | null, name: 'None', color: null as string | null }, ...tracks].map((track) => (
+                  <OptionButton
+                    key={track.id ?? 'none'}
+                    selected={form.trackId === track.id}
+                    onClick={() => set('trackId', track.id)}
+                    className="flex items-center gap-2 text-sm"
+                  >
+                    {track.color && <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: track.color }} aria-hidden />}
+                    <span className="truncate">{track.name}</span>
+                  </OptionButton>
+                ))}
               </div>
-            )}
-          </div>
-          </>)}
+            </fieldset>
+          )}
+
+          {canEditContent && (
+            <>
+              <SkillPicker
+                value={form.skills}
+                onChange={(skills) => set('skills', skills.slice(0, 5))}
+                max={5}
+                label="Skills (optional, up to 5)"
+                description="From the shared skill taxonomy."
+              />
+
+              <fieldset className="space-y-3">
+                <legend className="text-sm font-medium leading-none">Hosting</legend>
+                <div className="grid grid-cols-2 gap-3 pt-2">
+                  <OptionButton selected={!form.isSelfHosted} onClick={() => set('isSelfHosted', false)}>
+                    <div className="text-sm font-medium">Official venue</div>
+                    <div className="text-xs text-muted-foreground">Assigned by organizers</div>
+                  </OptionButton>
+                  <OptionButton selected={form.isSelfHosted} onClick={() => set('isSelfHosted', true)}>
+                    <div className="text-sm font-medium">Self-hosted</div>
+                    <div className="text-xs text-muted-foreground">Your own location</div>
+                  </OptionButton>
+                </div>
+
+                {form.isSelfHosted && (
+                  <div className="space-y-4 rounded-xl border bg-muted/40 p-4">
+                    <fieldset className="space-y-2">
+                      <legend className="text-sm font-medium leading-none">Day (optional)</legend>
+                      <div className="flex flex-wrap gap-2 pt-2">
+                        {eventDays.map((day) => (
+                          <FilterChip key={day.value} pressed={form.day === day.value} onClick={() => set('day', form.day === day.value ? '' : day.value)}>
+                            {day.label}
+                          </FilterChip>
+                        ))}
+                      </div>
+                    </fieldset>
+                    {form.day && (
+                      <div className="flex items-center gap-2">
+                        <Select aria-label="Start time" value={form.startTime} onChange={(e) => set('startTime', e.target.value)}>
+                          <option value="">Start time</option>
+                          {TIME_OPTIONS.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                        </Select>
+                        <span className="text-sm text-muted-foreground">to</span>
+                        <Select aria-label="End time" value={form.endTime} onChange={(e) => set('endTime', e.target.value)}>
+                          <option value="">End time</option>
+                          {TIME_OPTIONS.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                        </Select>
+                      </div>
+                    )}
+                    {canSeeAttendeeDetails && (
+                      <div className="space-y-2">
+                        <Label htmlFor="edit-location">Location details</Label>
+                        <Textarea id="edit-location" value={form.customLocation} onChange={(e) => set('customLocation', e.target.value)} placeholder="Address or directions for attendees…" rows={2} maxLength={300} aria-describedby="edit-location-hint" />
+                        <p id="edit-location-hint" className="text-xs text-muted-foreground">Shown only to confirmed attendees, hosts and organizers.</p>
+                      </div>
+                    )}
+                    <div className="space-y-2">
+                      <Label htmlFor="edit-public-place">Public area (optional)</Label>
+                      <Input id="edit-public-place" value={form.publicPlace} onChange={(e) => set('publicPlace', e.target.value)} placeholder="e.g. Near Pearl St, Boulder" maxLength={80} aria-describedby="edit-public-place-hint" />
+                      <p id="edit-public-place-hint" className="text-xs text-muted-foreground">A neighborhood or landmark, never a street address. It appears on your public proposal record.</p>
+                    </div>
+                  </div>
+                )}
+              </fieldset>
+            </>
+          )}
 
           {session.viewer.is_host && eventDays.length > 0 && (
-            <div className="space-y-2">
-              <span className="text-sm font-medium">Your availability</span>
+            <fieldset className="space-y-2">
+              <legend className="text-sm font-medium leading-none">Your availability (optional)</legend>
               <p className="text-xs text-muted-foreground">Organizers use this to schedule you. It stays in this gathering unless you publish it.</p>
               <TimePreferences
                 value={form.availability}
@@ -451,7 +443,7 @@ export function EditSessionModal({ isOpen, onClose, session, onSave }: EditSessi
                 startDate={eventDays[0].value}
                 endDate={eventDays[eventDays.length - 1].value}
               />
-              <label className="flex items-start gap-3 cursor-pointer rounded-lg border p-3">
+              <label className="flex cursor-pointer items-start gap-3 rounded-xl border p-3">
                 <Checkbox
                   checked={form.publishAvailability}
                   onCheckedChange={(checked) => set('publishAvailability', checked === true)}
@@ -462,98 +454,110 @@ export function EditSessionModal({ isOpen, onClose, session, onSave }: EditSessi
                   Writes a public record to your repository saying when you can and cannot attend. Public records can be deleted later, but copies may persist on the network.
                 </span>
               </label>
-            </div>
+            </fieldset>
           )}
 
           {canManageLogistics && (
             <div className="space-y-2">
-              <label htmlFor="edit-telegram" className="text-sm font-medium flex items-center gap-2">
-                <Send className="h-4 w-4" />
-                Telegram Group URL (optional)
-              </label>
-              <Input id="edit-telegram" type="url" placeholder="https://t.me/your_group" value={form.telegram} onChange={(e) => set('telegram', e.target.value)} />
-              <p className="text-xs text-muted-foreground">Shared with confirmed attendees only.</p>
+              <Label htmlFor="edit-chat-url" className="flex items-center gap-2">
+                <MessageCircle className="h-4 w-4" aria-hidden />
+                Chat group link (optional)
+              </Label>
+              <Input id="edit-chat-url" type="url" placeholder="https://…" value={form.chatUrl} onChange={(e) => set('chatUrl', e.target.value)} aria-describedby="edit-chat-url-hint" />
+              <p id="edit-chat-url-hint" className="text-xs text-muted-foreground">Telegram, Signal, Discord, Matrix — any link. Shared with confirmed attendees only.</p>
             </div>
           )}
 
           {canEditContent && (
-          <div className="space-y-2">
-            <span className="text-sm font-medium">Tags (up to 5)</span>
-            <div className="flex flex-wrap gap-1.5 mb-2">
-              {form.tags.map((tag) => (
-                <Badge key={tag} variant="secondary" className="cursor-pointer hover:bg-destructive/20" onClick={() => set('tags', form.tags.filter((t) => t !== tag))}>
-                  {tag} ×
-                </Badge>
-              ))}
-            </div>
-            <div className="flex gap-2">
-              <Input
-                aria-label="Add a tag"
-                value={customTag}
-                onChange={(e) => setCustomTag(e.target.value)}
-                placeholder="Add a tag..."
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault()
-                    handleAddTag(customTag)
-                  }
-                }}
-              />
-              <Button type="button" variant="outline" onClick={() => handleAddTag(customTag)} disabled={!customTag.trim() || form.tags.length >= 5}>Add</Button>
-            </div>
-            {event.suggestedTopics.length > 0 && (
-              <div className="flex flex-wrap gap-1.5 mt-2">
-                {event.suggestedTopics.map((t) => t.toLowerCase()).filter((t) => !form.tags.includes(t)).slice(0, 6).map((tag) => (
-                  <button key={tag} type="button" onClick={() => handleAddTag(tag)} className="px-2 py-1 text-xs rounded border hover:bg-accent" disabled={form.tags.length >= 5}>
-                    + {tag}
-                  </button>
-                ))}
+            <div className="space-y-2">
+              <Label htmlFor="edit-tag">Tags (optional)</Label>
+              {form.tags.length > 0 && (
+                <div className="flex flex-wrap gap-1.5">
+                  {form.tags.map((tag) => (
+                    <RemovableChip key={tag} label={tag} onRemove={() => set('tags', form.tags.filter((t) => t !== tag))} />
+                  ))}
+                </div>
+              )}
+              <div className="flex gap-2">
+                <Input
+                  id="edit-tag"
+                  value={customTag}
+                  onChange={(e) => setCustomTag(e.target.value)}
+                  placeholder="Add a tag…"
+                  maxLength={40}
+                  disabled={tagsFull}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault()
+                      handleAddTag(customTag)
+                    }
+                  }}
+                  aria-describedby="edit-tag-count"
+                />
+                <Button type="button" variant="outline" onClick={() => handleAddTag(customTag)} disabled={!customTag.trim() || tagsFull}>Add</Button>
               </div>
-            )}
-          </div>
+              <p id="edit-tag-count" className="text-xs text-muted-foreground">
+                {tagsFull ? `${MAX_TAGS} of ${MAX_TAGS} tags used. Remove one to add another.` : `${form.tags.length} of ${MAX_TAGS} tags used.`}
+              </p>
+              {!tagsFull && event.suggestedTopics.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-xs text-muted-foreground">Suggested:</span>
+                  {event.suggestedTopics.map((t) => t.toLowerCase()).filter((t) => !form.tags.includes(t)).slice(0, 6).map((tag) => (
+                    <button
+                      key={tag}
+                      type="button"
+                      onClick={() => handleAddTag(tag)}
+                      className="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                      aria-label={`Add tag ${tag}`}
+                    >
+                      <Badge variant="muted" className="cursor-pointer hover:bg-accent hover:text-foreground">+ {tag}</Badge>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           )}
 
           {isOrganizer && (
-            <div className="space-y-3 rounded-lg border border-primary/20 bg-primary/5 p-4">
-              <p className="text-sm font-medium flex items-center gap-2">
-                <ShieldCheck className="h-4 w-4" />
-                Organizer settings
-              </p>
+            <div className="space-y-4 rounded-xl border bg-muted/40 p-4">
+              <div className="flex items-center gap-2">
+                <Badge variant="secondary" className="gap-1.5">
+                  <ShieldCheck className="h-3.5 w-3.5" aria-hidden />
+                  Organizer settings
+                </Badge>
+              </div>
               {session.unclaimed && (
                 <p className="text-xs text-muted-foreground">
                   {session.listed_as ? <>Listed as <span className="font-medium text-foreground">{session.listed_as}</span>. </> : null}
-                  Unclaimed: no participant has proposed or claimed this session. Listing labels are managed in the admin sessions view and are never shown publicly.
+                  Unclaimed: no participant has proposed or claimed this session. Listing labels are managed in the organizer sessions view and are never shown publicly.
                 </p>
               )}
               {session.status !== 'scheduled' && (
-                <div className="space-y-1.5">
-                  <label htmlFor="edit-review-status" className="text-xs font-medium text-muted-foreground">Review status</label>
-                  <select id="edit-review-status" value={form.status} onChange={(e) => set('status', e.target.value)} className="w-full rounded-md border bg-background px-2 py-1.5 text-sm">
+                <div className="space-y-2">
+                  <Label htmlFor="edit-review-status">Review status</Label>
+                  <Select id="edit-review-status" value={form.status} onChange={(e) => set('status', e.target.value)}>
                     {REVIEW_STATUSES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
-                  </select>
+                  </Select>
                 </div>
               )}
-              <div className="space-y-1.5">
-                <label htmlFor="edit-session-type" className="text-xs font-medium text-muted-foreground">Session type</label>
-                <select id="edit-session-type" value={form.sessionType} onChange={(e) => set('sessionType', e.target.value)} className="w-full rounded-md border bg-background px-2 py-1.5 text-sm">
+              <div className="space-y-2">
+                <Label htmlFor="edit-session-type">Session type</Label>
+                <Select id="edit-session-type" value={form.sessionType} onChange={(e) => set('sessionType', e.target.value)}>
                   {SESSION_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
-                </select>
+                </Select>
               </div>
               <p className="text-xs text-muted-foreground">
-                Venue and time are set in the schedule builder. None of these settings change the proposer&apos;s record.
+                Venue and time are set in the schedule builder. None of these settings change the proposer’s record.
               </p>
             </div>
           )}
         </div>
 
-        <div className="flex gap-3 p-4 border-t">
-          <Button variant="outline" onClick={onClose} className="flex-1">Cancel</Button>
-          <Button onClick={handleSave} disabled={isSaving} className="flex-1">
-            {isSaving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-            Save Changes
-          </Button>
-        </div>
-      </div>
-    </>
+        <DialogFooter className="border-t px-6 py-4">
+          <Button type="button" variant="outline" onClick={onClose} disabled={isSaving}>Cancel</Button>
+          <Button type="button" onClick={handleSave} loading={isSaving}>Save changes</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }

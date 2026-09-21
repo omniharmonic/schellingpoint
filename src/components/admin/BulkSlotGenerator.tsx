@@ -4,8 +4,11 @@ import * as React from 'react'
 import { CalendarPlus, Coffee } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
+import { Select } from '@/components/ui/select'
+import { Switch } from '@/components/ui/switch'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
+import { plural } from '@/lib/format'
 
 interface BulkSlotGeneratorProps {
   venues: { id: string; name: string; capacity: number | null }[]
@@ -106,11 +109,10 @@ export function BulkSlotGenerator({
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div className="space-y-2">
           <Label htmlFor={`${id}-venue`}>Room</Label>
-          <select
+          <Select
             id={`${id}-venue`}
             value={venueId}
             onChange={(e) => setVenueId(e.target.value)}
-            className="w-full h-10 rounded-md border bg-background px-3 text-sm"
           >
             {venues.map((venue) => (
               <option key={venue.id} value={venue.id}>
@@ -118,16 +120,15 @@ export function BulkSlotGenerator({
               </option>
             ))}
             {venues.length > 1 && <option value={ALL}>Every room</option>}
-          </select>
+          </Select>
         </div>
 
         <div className="space-y-2">
           <Label htmlFor={`${id}-day`}>Day</Label>
-          <select
+          <Select
             id={`${id}-day`}
             value={dayDate}
             onChange={(e) => setDayDate(e.target.value)}
-            className="w-full h-10 rounded-md border bg-background px-3 text-sm"
           >
             {eventDays.map((day) => (
               <option key={day.date} value={day.date}>
@@ -135,91 +136,71 @@ export function BulkSlotGenerator({
               </option>
             ))}
             {eventDays.length > 1 && <option value={ALL}>Every day</option>}
-          </select>
+          </Select>
         </div>
 
         <div className="space-y-2">
           <Label htmlFor={`${id}-start`}>Start time</Label>
-          <select
+          <Select
             id={`${id}-start`}
             value={startHour}
             onChange={(e) => setStartHour(Number(e.target.value))}
-            className="w-full h-10 rounded-md border bg-background px-3 text-sm"
           >
             {Array.from({ length: 96 }, (_, i) => (
               <option key={i} value={i * 15}>
                 {formatTime(minutesToTime(i * 15))}
               </option>
             ))}
-          </select>
+          </Select>
         </div>
 
         <div className="space-y-2">
           <Label htmlFor={`${id}-end`}>End time</Label>
-          <select
+          <Select
             id={`${id}-end`}
             value={endHour}
             onChange={(e) => setEndHour(Number(e.target.value))}
-            className="w-full h-10 rounded-md border bg-background px-3 text-sm"
           >
             {Array.from({ length: 96 }, (_, i) => (
               <option key={i} value={i * 15}>
                 {formatTime(minutesToTime(i * 15))}
               </option>
             ))}
-          </select>
+          </Select>
         </div>
 
         <div className="space-y-2">
           <Label htmlFor={`${id}-duration`}>Slot length</Label>
-          <select
+          <Select
             id={`${id}-duration`}
             value={duration}
             onChange={(e) => setDuration(Number(e.target.value))}
-            className="w-full h-10 rounded-md border bg-background px-3 text-sm"
           >
             {DURATION_OPTIONS.map((opt) => (
               <option key={opt.value} value={opt.value}>
                 {opt.label}
               </option>
             ))}
-          </select>
+          </Select>
         </div>
 
         <div className="space-y-2">
           <Label id={`${id}-breaks`}>Breaks between slots</Label>
-          <div className="flex items-center gap-3 h-10">
-            <button
-              type="button"
-              role="switch"
-              aria-checked={includeBreaks}
-              aria-labelledby={`${id}-breaks`}
-              onClick={() => setIncludeBreaks(!includeBreaks)}
-              className={cn(
-                'relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors',
-                includeBreaks ? 'bg-primary' : 'bg-input'
-              )}
-            >
-              <span
-                className={cn(
-                  'pointer-events-none inline-block h-5 w-5 rounded-full bg-background shadow-lg transition-transform',
-                  includeBreaks ? 'translate-x-5' : 'translate-x-0'
-                )}
-              />
-            </button>
+          <div className="flex items-center gap-3 h-11">
+            <Switch checked={includeBreaks} onCheckedChange={setIncludeBreaks} aria-labelledby={`${id}-breaks`} />
             {includeBreaks && (
-              <select
+              <Select
                 aria-label="Break length"
                 value={breakDuration}
                 onChange={(e) => setBreakDuration(Number(e.target.value))}
-                className="h-10 rounded-md border bg-background px-3 text-sm"
+                wrapperClassName="w-auto"
               >
                 {BREAK_DURATION_OPTIONS.map((opt) => (
                   <option key={opt.value} value={opt.value}>
                     {opt.label}
                   </option>
                 ))}
-              </select>
+              </Select>
             )}
           </div>
         </div>
@@ -228,7 +209,7 @@ export function BulkSlotGenerator({
       {/* Preview */}
       {pattern.length > 0 && (
         <div className="space-y-2">
-          <Label>Each day: {pattern.filter(s => !s.isBreak).length} sessions, {pattern.filter(s => s.isBreak).length} breaks</Label>
+          <p className="text-sm font-medium">Each day: {plural(pattern.filter(s => !s.isBreak).length, 'session')}, {plural(pattern.filter(s => s.isBreak).length, 'break')}</p>
           <div className="rounded-lg border bg-muted/30 p-3 max-h-48 overflow-y-auto">
             <div className="space-y-1.5">
               {pattern.map((slot, index) => (
@@ -236,11 +217,11 @@ export function BulkSlotGenerator({
                   key={index}
                   className={cn(
                     'flex items-center justify-between text-sm px-2 py-1 rounded',
-                    slot.isBreak ? 'bg-amber-100 dark:bg-amber-950/30 text-amber-700 dark:text-amber-300' : 'bg-background'
+                    slot.isBreak ? 'bg-signal-amber/10 text-signal-amber' : 'bg-background'
                   )}
                 >
                   <span>
-                    {formatTime(slot.startTime)} - {formatTime(slot.endTime)}
+                    {formatTime(slot.startTime)}–{formatTime(slot.endTime)}
                   </span>
                   {slot.isBreak && (
                     <Badge variant="secondary" className="text-xs">
@@ -253,28 +234,29 @@ export function BulkSlotGenerator({
             </div>
           </div>
           <p className="text-xs text-muted-foreground">
-            {venueId === ALL ? 'Every room' : selectedVenue?.name} · {dayDate === ALL ? 'every day' : eventDays.find(d => d.date === dayDate)?.label} · {preview.length} slots in total, saved together or not at all
+            {venueId === ALL ? 'Every room' : selectedVenue?.name} · {dayDate === ALL ? 'every day' : eventDays.find(d => d.date === dayDate)?.label} · {plural(preview.length, 'slot')} in total, saved together or not at all
           </p>
         </div>
       )}
 
       {conflicts.length > 0 && <p role="alert" className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-sm text-destructive">
-        {conflicts.length} proposed slots overlap existing availability. Choose another time, room or day before adding slots.
+        {plural(conflicts.length, 'proposed slot')} {conflicts.length === 1 ? 'overlaps' : 'overlap'} existing availability. Choose another time, room or day before adding slots.
       </p>}
       {startHour >= endHour && (
         <p className="text-sm text-destructive">End time must be after start time</p>
       )}
 
-      <div className="flex flex-wrap gap-3 pt-2">
+      <div className="flex flex-wrap justify-end gap-2 pt-2">
+        <Button variant="outline" onClick={onCancel} disabled={isSaving}>
+          Cancel
+        </Button>
         <Button
           onClick={() => onGenerate(preview)}
-          disabled={isSaving || preview.length === 0 || conflicts.length > 0}
+          loading={isSaving}
+          disabled={preview.length === 0 || conflicts.length > 0}
         >
-          <CalendarPlus className="h-4 w-4 mr-2" />
-          {isSaving ? 'Adding slots…' : `Add ${preview.length} slots`}
-        </Button>
-        <Button variant="outline" onClick={onCancel}>
-          Cancel
+          {!isSaving && <CalendarPlus className="h-4 w-4 mr-2" aria-hidden="true" />}
+          Add {plural(preview.length, 'slot')}
         </Button>
       </div>
     </div>

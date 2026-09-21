@@ -4,10 +4,15 @@ import { isParticipationOpen } from '@/lib/events/lifecycle'
 import * as React from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { Search, SlidersHorizontal, Loader2, Heart, Calendar, Mic, X } from 'lucide-react'
+import { Search, SlidersHorizontal, Loader2, Heart, Calendar, Mic } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
+import { FilterChip } from '@/components/ui/filter-chip'
+import { RemovableChip } from '@/components/ui/removable-chip'
+import { SegmentedControl } from '@/components/ui/segmented-control'
+import { useToast } from '@/components/ui/toast'
+import { PageHeader } from '@/components/PageHeader'
 import { SessionCard, setFavorite } from '@/components/SessionCard'
 import { DashboardLayout } from '@/components/DashboardLayout'
 import { useAuth } from '@/hooks/useAuth'
@@ -15,36 +20,39 @@ import { useTracks } from '@/hooks/useTracks'
 import { useEvent } from '@/contexts/EventContext'
 import { getEventDays, formatCalendarDate } from '@/lib/events/dates'
 import { apiFetch } from '@/lib/api/client'
+import { sessionStatusBadge } from '@/lib/labels'
+import { EN_DASH } from '@/lib/format'
+import { formatLabel, SESSION_FORMATS } from '@/lib/sessions/constants'
 import { cn } from '@/lib/utils'
 import type { SessionView } from '@/app/api/v1/sessions/_lib/read'
 
-const formats = ['all', 'talk', 'workshop', 'discussion', 'panel', 'demo']
+const formats = ['all', ...SESSION_FORMATS.slice(0, 5).map((f) => f.value)]
 const statusOptions = [
   { value: 'all', label: 'All' },
   { value: 'scheduled', label: 'Scheduled' },
   { value: 'proposed', label: 'Proposed' },
-]
+] as const
+type StatusValue = (typeof statusOptions)[number]['value']
 // No "most voted": vote counts are never shown while a round is open (spec §5.3); results
 // after close are an organizer view.
 const sortOptions = [
   { value: 'newest', label: 'Newest' },
-  { value: 'title', label: 'A-Z' },
+  { value: 'title', label: `A${EN_DASH}Z` },
   { value: 'track', label: 'Track' },
-  { value: 'time', label: 'By Time' },
+  { value: 'time', label: 'By time' },
 ] as const
 type SortValue = (typeof sortOptions)[number]['value']
 
 // Statuses that are not publicly listed; shown only in the "My sessions" view
-const ownerOnlyStatus: Record<string, { label: string; className: string }> = {
-  pending: { label: 'Pending review', className: 'bg-yellow-500/15 text-yellow-700 dark:text-yellow-400 border-yellow-500/40' },
-  rejected: { label: 'Not selected', className: 'bg-destructive/10 text-destructive border-destructive/30' },
-}
+const OWNER_ONLY_STATUSES = new Set(['pending', 'rejected'])
 
 export default function EventSessionsPage() {
   const router = useRouter()
   const { user } = useAuth()
   const event = useEvent()
+  const { toast } = useToast()
   const votingOpen = isParticipationOpen(event, 'vote')
+  const proposalsOpen = isParticipationOpen(event, 'propose')
   const { tracks } = useTracks(event.slug)
 
   const [actionError, setActionError] = React.useState<string | null>(null)
@@ -57,7 +65,7 @@ export default function EventSessionsPage() {
   const [debouncedSearch, setDebouncedSearch] = React.useState('')
   const [format, setFormat] = React.useState('all')
   const [track, setTrack] = React.useState<string>('all')
-  const [status, setStatus] = React.useState('all')
+  const [status, setStatus] = React.useState<StatusValue>('all')
   const [sort, setSort] = React.useState<SortValue>('newest')
   const [showFilters, setShowFilters] = React.useState(false)
   const [day, setDay] = React.useState<string>('all')
@@ -163,6 +171,11 @@ export default function EventSessionsPage() {
     })
     try {
       await setFavorite(event.slug, sessionId, !isFavorited)
+      toast({
+        title: isFavorited ? 'Removed from my schedule' : 'Saved to my schedule',
+        variant: 'success',
+        action: isFavorited ? undefined : { label: 'View my schedule', onClick: () => router.push(`/e/${event.slug}/my-schedule`) },
+      })
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Your saved schedule could not be updated. Please try again.')
       setFavorites((prev) => {
@@ -183,44 +196,42 @@ export default function EventSessionsPage() {
     setShowFavoritesOnly(false)
   }
   const filtersActive = !!debouncedSearch || format !== 'all' || track !== 'all' || status !== 'all' || day !== 'all' || showFavoritesOnly
+  const activeFilterCount = [format !== 'all', track !== 'all', status !== 'all', day !== 'all', showFavoritesOnly].filter(Boolean).length
 
   if (!hasLoaded) {
     return (
       <DashboardLayout>
-        <div className="flex items-center justify-center py-12">
+        <div className="flex items-center justify-center py-12" role="status" aria-label="Loading sessions">
           <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
         </div>
       </DashboardLayout>
     )
   }
 
+  const showEmpty = !loadError && !isLoading && sessions.length === 0
+  const proposeButton = user && proposalsOpen ? (
+    <Button asChild>
+      <Link href={`/e/${event.slug}/propose`}>Propose a session</Link>
+    </Button>
+  ) : null
+
   return (
     <DashboardLayout>
       <div className="space-y-6">
-        <div>
-          <h1 className="text-2xl font-display font-bold">Sessions</h1>
-          <p className="text-muted-foreground mt-1">
-            {votingOpen
+        <PageHeader
+          title="Sessions"
+          subtitle={
+            votingOpen
               ? 'Find something that sparks your curiosity. Your votes help shape what happens.'
-              : 'Explore the ideas and people that shaped this gathering.'}
-          </p>
-        </div>
+              : 'Explore the ideas and people that shaped this gathering.'
+          }
+          actions={proposeButton}
+        />
 
         {mineOnly && (
           <div className="flex flex-wrap items-center gap-3 rounded-xl border bg-muted/30 p-4">
-            <Badge variant="secondary" className="flex items-center gap-1.5 px-2.5 py-1 text-sm">
-              <Mic className="h-3.5 w-3.5" />
-              My sessions
-              <button
-                type="button"
-                aria-label="Show all sessions"
-                onClick={() => updateMineOnly(false)}
-                className="ml-1 rounded-full p-0.5 hover:bg-foreground/10"
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
-            </Badge>
-            <p className="text-sm text-muted-foreground flex-1 min-w-[12rem]">
+            <RemovableChip label="My sessions" removeLabel="Show all sessions" onRemove={() => updateMineOnly(false)} />
+            <p className="min-w-[12rem] flex-1 text-sm text-muted-foreground">
               {user
                 ? 'Sessions you host or co-host, including proposals still under review.'
                 : 'Sign in to see the sessions you host or co-host.'}
@@ -233,7 +244,9 @@ export default function EventSessionsPage() {
           </div>
         )}
 
-        {actionError && <p role="alert" className="sticky top-20 z-10 rounded-xl border bg-card p-4 text-sm text-destructive">{actionError}</p>}
+        {actionError && (
+          <p role="alert" className="sticky-under-header z-10 rounded-lg border border-destructive/20 bg-destructive/10 p-3 text-sm text-destructive">{actionError}</p>
+        )}
         {loadError && (
           <div role="alert" className="rounded-xl border p-5">
             <p>{mineOnly ? 'Your sessions couldn’t load.' : 'Sessions couldn’t load.'} Please try again.</p>
@@ -244,15 +257,15 @@ export default function EventSessionsPage() {
         <div className="space-y-4">
           <div className="flex gap-3">
             <div className="relative flex-1">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
               <Input
                 aria-label="Search sessions"
-                placeholder="Search ideas, hosts, or topics"
+                placeholder="Search ideas, hosts or topics"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 className="pl-10"
               />
-              {isLoading && <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />}
+              {isLoading && <Loader2 className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-muted-foreground" aria-hidden />}
             </div>
             <Button
               variant="outline"
@@ -260,212 +273,155 @@ export default function EventSessionsPage() {
               onClick={() => setShowFilters(!showFilters)}
               className={cn(showFilters && 'bg-accent')}
             >
-              <SlidersHorizontal className="h-4 w-4 mr-2" />
+              <SlidersHorizontal className="mr-2 h-4 w-4" aria-hidden />
               Filters
+              {activeFilterCount > 0 && <Badge variant="default" className="ml-2 px-1.5 py-0">{activeFilterCount}</Badge>}
             </Button>
           </div>
 
           {showFilters && (
-            <div className="flex flex-wrap gap-4 p-4 rounded-lg border bg-muted/30">
+            <div className="flex flex-wrap gap-5 rounded-xl border bg-muted/30 p-4">
               {user && (
-                <div className="w-full flex flex-wrap gap-2">
-                  <button
-                    onClick={() => updateMineOnly(!mineOnly)}
-                    aria-pressed={mineOnly}
-                    className={cn(
-                      'flex items-center gap-2 px-3 py-1.5 text-sm rounded-md transition-colors',
-                      mineOnly ? 'bg-primary text-primary-foreground' : 'bg-background border hover:bg-accent'
-                    )}
-                  >
-                    <Mic className="h-4 w-4" />
-                    My Sessions
-                  </button>
-                  <button
+                <div className="flex w-full flex-wrap gap-2">
+                  <FilterChip pressed={mineOnly} onClick={() => updateMineOnly(!mineOnly)} icon={<Mic className="h-4 w-4" aria-hidden />}>
+                    My sessions
+                  </FilterChip>
+                  <FilterChip
+                    pressed={showFavoritesOnly}
                     onClick={() => setShowFavoritesOnly(!showFavoritesOnly)}
-                    aria-pressed={showFavoritesOnly}
-                    className={cn(
-                      'flex items-center gap-2 px-3 py-1.5 text-sm rounded-md transition-colors',
-                      showFavoritesOnly ? 'bg-primary text-primary-foreground' : 'bg-background border hover:bg-accent'
-                    )}
+                    icon={<Heart className={cn('h-4 w-4', showFavoritesOnly && 'fill-current')} aria-hidden />}
                   >
-                    <Heart className={cn('h-4 w-4', showFavoritesOnly && 'fill-current')} />
-                    My Favorites Only
-                  </button>
+                    Saved only
+                  </FilterChip>
                 </div>
               )}
 
               {eventDays.length > 1 && (
-                <div className="space-y-1.5 w-full sm:w-auto">
-                  <span className="text-xs font-medium text-muted-foreground flex items-center gap-1">
-                    <Calendar className="h-3 w-3" />
+                <div className="w-full space-y-2 sm:w-auto">
+                  <span className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
+                    <Calendar className="h-3 w-3" aria-hidden />
                     Day
                   </span>
-                  <div className="overflow-x-auto -mx-4 px-4 sm:mx-0 sm:px-0">
-                    <div className="flex gap-1.5 pb-2 sm:pb-0 sm:flex-wrap">
-                      {[{ date: 'all', label: 'All Days' }, ...eventDays].map((d) => (
-                        <button
-                          key={d.date}
-                          onClick={() => setDay(d.date)}
-                          aria-pressed={day === d.date}
-                          className={cn(
-                            'px-3 py-1.5 text-sm rounded-md transition-colors whitespace-nowrap',
-                            day === d.date ? 'bg-primary text-primary-foreground' : 'bg-background border hover:bg-accent'
-                          )}
-                        >
+                  <div className="-mx-4 overflow-x-auto px-4 sm:mx-0 sm:px-0">
+                    <div className="flex gap-2 pb-2 sm:flex-wrap sm:pb-0">
+                      {[{ date: 'all', label: 'All days' }, ...eventDays].map((d) => (
+                        <FilterChip key={d.date} pressed={day === d.date} onClick={() => setDay(d.date)}>
                           {d.label}
-                        </button>
+                        </FilterChip>
                       ))}
                     </div>
                   </div>
                 </div>
               )}
 
-              <div className="space-y-1.5">
+              <div className="space-y-2">
                 <span className="text-xs font-medium text-muted-foreground">Format</span>
-                <div className="flex flex-wrap gap-1.5">
+                <div className="flex flex-wrap gap-2">
                   {formats.map((f) => (
-                    <button
-                      key={f}
-                      onClick={() => setFormat(f)}
-                      aria-pressed={format === f}
-                      className={cn(
-                        'px-3 py-1.5 text-sm rounded-md transition-colors capitalize',
-                        format === f ? 'bg-primary text-primary-foreground' : 'bg-background border hover:bg-accent'
-                      )}
-                    >
-                      {f === 'all' ? 'All' : f}
-                    </button>
+                    <FilterChip key={f} pressed={format === f} onClick={() => setFormat(f)}>
+                      {f === 'all' ? 'All' : formatLabel(f)}
+                    </FilterChip>
                   ))}
                 </div>
               </div>
 
               {tracks.length > 0 && (
-                <div className="space-y-1.5 w-full sm:w-auto">
+                <div className="w-full space-y-2 sm:w-auto">
                   <span className="text-xs font-medium text-muted-foreground">Track</span>
-                  <div className="overflow-x-auto -mx-4 px-4 sm:mx-0 sm:px-0">
-                    <div className="flex gap-1.5 pb-2 sm:pb-0 sm:flex-wrap">
-                      <button
-                        onClick={() => setTrack('all')}
-                        aria-pressed={track === 'all'}
-                        className={cn(
-                          'px-3 py-1.5 text-sm rounded-md transition-colors whitespace-nowrap min-h-[36px]',
-                          track === 'all' ? 'bg-primary text-primary-foreground' : 'bg-background border hover:bg-accent'
-                        )}
-                      >
-                        All
-                      </button>
+                  <div className="-mx-4 overflow-x-auto px-4 sm:mx-0 sm:px-0">
+                    <div className="flex gap-2 pb-2 sm:flex-wrap sm:pb-0">
+                      <FilterChip pressed={track === 'all'} onClick={() => setTrack('all')}>All</FilterChip>
                       {tracks.map((t) => (
-                        <button
+                        <FilterChip
                           key={t.id}
+                          pressed={track === t.id}
                           onClick={() => setTrack(t.id)}
-                          aria-pressed={track === t.id}
-                          className={cn(
-                            'px-3 py-1.5 text-sm rounded-md transition-colors flex items-center gap-1.5 whitespace-nowrap min-h-[36px]',
-                            track === t.id ? 'bg-primary text-primary-foreground' : 'bg-background border hover:bg-accent'
-                          )}
+                          icon={t.color ? <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: t.color }} aria-hidden /> : undefined}
                         >
-                          {t.color && <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: t.color }} />}
                           {t.name}
-                        </button>
+                        </FilterChip>
                       ))}
                     </div>
                   </div>
                 </div>
               )}
 
-              <div className="space-y-1.5">
+              <div className="space-y-2">
                 <span className="text-xs font-medium text-muted-foreground">Status</span>
-                <div className="flex gap-1.5">
-                  {statusOptions.map((s) => (
-                    <button
-                      key={s.value}
-                      onClick={() => setStatus(s.value)}
-                      aria-pressed={status === s.value}
-                      className={cn(
-                        'px-3 py-1.5 text-sm rounded-md transition-colors',
-                        status === s.value ? 'bg-primary text-primary-foreground' : 'bg-background border hover:bg-accent'
-                      )}
-                    >
-                      {s.label}
-                    </button>
-                  ))}
+                <div>
+                  <SegmentedControl<StatusValue> aria-label="Status" value={status} onValueChange={setStatus} options={statusOptions} />
                 </div>
               </div>
 
-              <div className="space-y-1.5">
+              <div className="space-y-2">
                 <span className="text-xs font-medium text-muted-foreground">Sort by</span>
-                <div className="flex gap-1.5">
-                  {sortOptions.map((s) => (
-                    <button
-                      key={s.value}
-                      onClick={() => setSort(s.value)}
-                      aria-pressed={sort === s.value}
-                      className={cn(
-                        'px-3 py-1.5 text-sm rounded-md transition-colors',
-                        sort === s.value ? 'bg-primary text-primary-foreground' : 'bg-background border hover:bg-accent'
-                      )}
-                    >
-                      {s.label}
-                    </button>
-                  ))}
+                <div>
+                  <SegmentedControl<SortValue> aria-label="Sort by" value={sort} onValueChange={setSort} options={sortOptions} />
                 </div>
               </div>
+
+              {filtersActive && (
+                <div className="flex w-full justify-end">
+                  <Button variant="outline" size="sm" onClick={clearFilters}>Clear filters</Button>
+                </div>
+              )}
             </div>
           )}
         </div>
 
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-          {sessions.map((session) => {
-            const ownerStatus = mineOnly ? ownerOnlyStatus[session.status] : undefined
-            return (
-              <div key={session.id} className="space-y-2">
-                {ownerStatus && (
-                  <div className="flex items-center justify-between gap-2 px-1">
-                    <Badge variant="outline" className={cn('text-xs', ownerStatus.className)}>{ownerStatus.label}</Badge>
-                    <Link href={`/e/${event.slug}/sessions/${session.id}`} className="text-xs text-muted-foreground hover:text-foreground underline-offset-4 hover:underline">
-                      {session.status === 'pending' ? 'View or edit' : 'View'}
-                    </Link>
-                  </div>
-                )}
-                <SessionCard
-                  session={session}
-                  eventSlug={event.slug}
-                  isFavorited={favorites.has(session.id)}
-                  onToggleFavorite={handleToggleFavorite}
-                  showVoting={votingOpen && !ownerStatus}
-                  isLoggedIn={!!user}
-                />
-              </div>
-            )
-          })}
-        </div>
-
-        {mineOnly && !loadError && !isLoading && sessions.length === 0 && (
-          <div className="text-center py-12">
-            <h2 className="text-xl font-semibold mb-2">{filtersActive ? 'No sessions match just yet.' : user ? "You aren't hosting any sessions yet." : 'Sign in to see your sessions.'}</h2>
-            <p className="text-muted-foreground">{filtersActive ? 'Try another search or clear your filters.' : user && isParticipationOpen(event, 'propose') ? 'Propose a session and it will show up here, even while it is under review.' : user ? 'Sessions you host or co-host will appear here.' : ''}</p>
-            <div className="flex flex-wrap justify-center gap-3 mt-4">
-              {filtersActive && <Button variant="outline" onClick={clearFilters}>Clear filters</Button>}
-              <Button variant="outline" onClick={() => updateMineOnly(false)}>Show all sessions</Button>
-              {user && isParticipationOpen(event, 'propose') && (
-                <Button asChild>
-                  <Link href={`/e/${event.slug}/propose`}>Propose a Session</Link>
-                </Button>
-              )}
-            </div>
+        {!showEmpty && (
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            {sessions.map((session) => {
+              const ownerStatus = mineOnly && OWNER_ONLY_STATUSES.has(session.status) ? sessionStatusBadge(session.status) : undefined
+              return (
+                <div key={session.id} className="space-y-2">
+                  {ownerStatus && (
+                    <div className="flex items-center justify-between gap-2 px-1">
+                      <Badge variant={ownerStatus.badge}>{ownerStatus.label}</Badge>
+                      <Link href={`/e/${event.slug}/sessions/${session.id}`} className="text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline">
+                        {session.status === 'pending' ? 'View or edit' : 'View'}
+                      </Link>
+                    </div>
+                  )}
+                  <SessionCard
+                    session={session}
+                    eventSlug={event.slug}
+                    isFavorited={favorites.has(session.id)}
+                    onToggleFavorite={handleToggleFavorite}
+                    showVoting={votingOpen && !ownerStatus}
+                    isLoggedIn={!!user}
+                  />
+                </div>
+              )
+            })}
           </div>
         )}
 
-        {!mineOnly && !loadError && !isLoading && sessions.length === 0 && (
-          <div className="text-center py-12">
-            <h2 className="text-xl font-semibold mb-2">{filtersActive ? 'No sessions match just yet.' : 'What could we explore together?'}</h2>
-            <p className="text-muted-foreground">{filtersActive ? 'Try another search or clear your filters.' : isParticipationOpen(event, 'propose') ? 'Be the first to bring an idea to the gathering.' : 'Sessions will appear here as the community shapes the program.'}</p>
-            {filtersActive && <Button variant="outline" className="mt-4 mr-3" onClick={clearFilters}>Clear filters</Button>}
-            {user && isParticipationOpen(event, 'propose') && (
-              <Button asChild className="mt-4">
-                <Link href={`/e/${event.slug}/propose`}>Propose a Session</Link>
-              </Button>
-            )}
+        {showEmpty && (
+          <div className="py-12 text-center">
+            <h2 className="mb-2 text-xl font-semibold">
+              {filtersActive
+                ? 'No sessions match just yet.'
+                : mineOnly
+                  ? user ? 'You aren’t hosting any sessions yet.' : 'Sign in to see your sessions.'
+                  : 'What could we explore together?'}
+            </h2>
+            <p className="text-muted-foreground">
+              {filtersActive
+                ? 'Try another search or clear your filters.'
+                : mineOnly
+                  ? user && proposalsOpen
+                    ? 'Propose a session and it will show up here, even while it is under review.'
+                    : user ? 'Sessions you host or co-host will appear here.' : ''
+                  : proposalsOpen
+                    ? 'Be the first to bring an idea to the gathering.'
+                    : 'Sessions will appear here as the community shapes the program.'}
+            </p>
+            <div className="mt-4 flex flex-wrap justify-center gap-3">
+              {filtersActive && <Button variant="outline" onClick={clearFilters}>Clear filters</Button>}
+              {mineOnly && <Button variant="outline" onClick={() => updateMineOnly(false)}>Show all sessions</Button>}
+              {proposeButton}
+            </div>
           </div>
         )}
       </div>

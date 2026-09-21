@@ -19,6 +19,7 @@ import {
   Mail,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { sessionStatusBadge } from '@/lib/labels'
 import { hostLabel, type AdminSession, type SessionResult } from './types'
 
 type Session = AdminSession
@@ -38,6 +39,9 @@ interface SessionTableProps {
   sortDirection: SortDirection
   onSortChange: (field: SortField) => void
 }
+
+/** "monday_am" → "Monday AM". */
+const formatPref = (pref: string) => pref.replace('_', ' ').replace(/\b\w/g, (c) => c.toUpperCase()).replace(/ (Am|Pm)$/, (m) => m.toUpperCase())
 
 export function SessionTable({
   sessions,
@@ -90,57 +94,53 @@ export function SessionTable({
     onSelectionChange(newSelection)
   }
 
-  const SortHeader = ({ field, children }: { field: SortField; children: React.ReactNode }) => (
+  const sortHeader = (field: SortField, label: string) => (
     <button
+      type="button"
       onClick={() => onSortChange(field)}
-      className="flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
+      aria-sort={sortField === field ? (sortDirection === 'asc' ? 'ascending' : 'descending') : undefined}
+      className="flex min-h-8 items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
     >
-      {children}
+      {label}
       {sortField === field ? (
-        sortDirection === 'asc' ? (
-          <ChevronUp className="h-3 w-3" />
-        ) : (
-          <ChevronDown className="h-3 w-3" />
-        )
+        sortDirection === 'asc' ? <ChevronUp className="h-3 w-3" aria-hidden="true" /> : <ChevronDown className="h-3 w-3" aria-hidden="true" />
       ) : (
-        <ArrowUpDown className="h-3 w-3 opacity-50" />
+        <ArrowUpDown className="h-3 w-3 opacity-50" aria-hidden="true" />
       )}
     </button>
   )
 
-  const formatPref = (pref: string) =>
-    pref.replace('_', ' ').replace(/\b\w/g, (c) => c.toUpperCase())
-
   if (sessions.length === 0) {
     return (
       <div className="text-center py-8 text-muted-foreground">
-        No sessions found
+        No sessions match.
       </div>
     )
   }
 
   return (
-    <div className="border rounded-lg overflow-hidden">
-      {/* Table Header */}
-      <div className={cn('bg-muted/50 border-b px-4 py-3 hidden sm:grid gap-4 items-center', results ? 'sm:grid-cols-[auto_1fr_auto_auto_auto]' : 'sm:grid-cols-[auto_1fr_auto_auto]')}>
+    <div className="border rounded-xl overflow-hidden">
+      {/* Header */}
+      <div className={cn('bg-muted/50 border-b px-4 py-2 hidden sm:grid gap-4 items-center', results ? 'sm:grid-cols-[auto_1fr_auto_auto_auto]' : 'sm:grid-cols-[auto_1fr_auto_auto]')}>
         <Checkbox
           checked={allSelected || (someSelected ? 'indeterminate' : false)}
           onCheckedChange={handleSelectAll}
           aria-label="Select all"
         />
-        <SortHeader field="title">Session</SortHeader>
-        {results && <SortHeader field="votes">Votes</SortHeader>}
-        <SortHeader field="duration">Duration</SortHeader>
+        {sortHeader('title', 'Session')}
+        {results && sortHeader('votes', 'Votes')}
+        {sortHeader('duration', 'Length')}
         <span className="text-xs font-medium text-muted-foreground">Status</span>
       </div>
 
-      {/* Table Body */}
+      {/* Body */}
       <div className="divide-y">
         {sessions.map((session) => {
           const isSelected = selectedIds.has(session.id)
           const isExpanded = expandedId === session.id
           const isScheduled = session.status === 'scheduled'
           const isRejected = session.status === 'rejected'
+          const status = sessionStatusBadge(session.status)
 
           return (
             <div
@@ -149,14 +149,12 @@ export function SessionTable({
                 'px-4 py-3 transition-colors',
                 isSelected && 'bg-primary/5',
                 isRejected && 'opacity-60',
-                isScheduled && 'bg-green-500/5',
+                isScheduled && 'bg-success/5',
                 onRowClick && 'cursor-pointer hover:bg-muted/50'
               )}
               onClick={() => onRowClick?.(session)}
             >
-              {/* Main Row */}
               <div className={cn('grid grid-cols-[auto_1fr_auto] gap-4 items-center', results ? 'sm:grid-cols-[auto_1fr_auto_auto_auto]' : 'sm:grid-cols-[auto_1fr_auto_auto]')}>
-                {/* Checkbox */}
                 <div onClick={(e) => handleSelectOne(session.id, e)}>
                   <Checkbox
                     checked={isSelected}
@@ -164,16 +162,16 @@ export function SessionTable({
                   />
                 </div>
 
-                {/* Session Info */}
                 <div className="min-w-0 space-y-1">
                   <div className="flex items-center gap-2 flex-wrap">
-                    <Badge variant="outline" className="capitalize text-xs">
-                      {session.format}
-                    </Badge>
+                    {session.format && (
+                      <Badge variant="secondary" className="capitalize">
+                        {session.format}
+                      </Badge>
+                    )}
                     {session.track && (
                       <Badge
                         variant="outline"
-                        className="text-xs"
                         style={{
                           borderColor: session.track.color ?? undefined,
                           color: session.track.color ?? undefined,
@@ -193,12 +191,12 @@ export function SessionTable({
                   {(session.proposal_withdrawn_at || session.proposal_drift_at || session.network_published) && (
                     <div className="flex flex-wrap gap-1.5 pt-0.5">
                       {session.network_published && (
-                        <Badge variant="outline" className="text-xs gap-1"><Globe className="h-3 w-3" />Published</Badge>
+                        <Badge variant="outline" className="gap-1"><Globe className="h-3 w-3" aria-hidden="true" />Published</Badge>
                       )}
                       {session.proposal_withdrawn_at ? (
-                        <Badge variant="outline" className="text-xs gap-1 border-destructive/40 text-destructive"><AlertTriangle className="h-3 w-3" />Withdrawn by proposer</Badge>
+                        <Badge variant="destructive" className="gap-1"><AlertTriangle className="h-3 w-3" aria-hidden="true" />Withdrawn by proposer</Badge>
                       ) : session.proposal_drift_at ? (
-                        <Badge variant="outline" className="text-xs gap-1 border-amber-500/50 text-amber-700 dark:text-amber-400"><AlertTriangle className="h-3 w-3" />Edited after scheduling</Badge>
+                        <Badge variant="amber" className="gap-1"><AlertTriangle className="h-3 w-3" aria-hidden="true" />Edited after scheduling</Badge>
                       ) : null}
                     </div>
                   )}
@@ -206,87 +204,68 @@ export function SessionTable({
 
                 {results && (
                   <div className="hidden sm:flex items-center gap-1 text-sm" title="Votes in the closed round">
-                    <ThumbsUp className="h-3.5 w-3.5 text-primary" />
-                    <span className="font-medium">{results[session.id]?.votes ?? 0}</span>
+                    <ThumbsUp className="h-3.5 w-3.5 text-primary" aria-hidden="true" />
+                    <span className="font-medium tabular-nums">{results[session.id]?.votes ?? 0}</span>
                   </div>
                 )}
 
-                {/* Duration - hidden on mobile */}
-                <div className="hidden sm:block text-sm text-muted-foreground">
-                  {session.duration ? `${session.duration}m` : '—'}
+                <div className="hidden sm:block text-sm text-muted-foreground tabular-nums">
+                  {session.duration ? `${session.duration} min` : '—'}
                 </div>
 
-                {/* Status & Expand */}
                 <div className="flex items-center gap-2">
-                  <Badge
-                    variant={
-                      isScheduled ? 'default' :
-                      session.status === 'approved' ? 'secondary' :
-                      session.status === 'rejected' ? 'destructive' :
-                      'outline'
-                    }
-                    className="capitalize text-xs"
-                  >
-                    {session.status}
-                  </Badge>
+                  <Badge variant={status.badge}>{status.label}</Badge>
 
                   {results && (
                     <span className="sm:hidden text-xs text-muted-foreground flex items-center gap-1">
-                      <ThumbsUp className="h-3 w-3" />
+                      <ThumbsUp className="h-3 w-3" aria-hidden="true" />
                       {results[session.id]?.votes ?? 0}
                     </span>
                   )}
 
                   <Button
                     variant="ghost"
-                    size="sm"
+                    size="icon-sm"
                     onClick={(e) => {
                       e.stopPropagation()
                       setExpandedId(isExpanded ? null : session.id)
                     }}
-                    className="h-8 w-8 p-0"
                     aria-label={isExpanded ? `Collapse ${session.title}` : `Expand ${session.title}`}
                     aria-expanded={isExpanded}
                   >
-                    {isExpanded ? (
-                      <ChevronUp className="h-4 w-4" />
-                    ) : (
-                      <ChevronDown className="h-4 w-4" />
-                    )}
+                    {isExpanded ? <ChevronUp className="h-4 w-4" aria-hidden="true" /> : <ChevronDown className="h-4 w-4" aria-hidden="true" />}
                   </Button>
                 </div>
               </div>
 
-              {/* Scheduled Info */}
               {isScheduled && (session.venue || session.time_slot) && (
-                <div className="mt-2 flex items-center gap-4 text-sm text-green-700 dark:text-green-400">
+                <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-success">
                   {session.venue && (
                     <span className="flex items-center gap-1">
-                      <MapPin className="h-3.5 w-3.5" />
+                      <MapPin className="h-3.5 w-3.5" aria-hidden="true" />
                       {session.venue.name}
                     </span>
                   )}
                   {session.time_slot && (
                     <span className="flex items-center gap-1">
-                      <Clock className="h-3.5 w-3.5" />
+                      <Clock className="h-3.5 w-3.5" aria-hidden="true" />
                       {session.time_slot.label || new Date(session.time_slot.start_time).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })}
                     </span>
                   )}
-                  {session.host_notified_at ? (
-                    <Badge variant="outline" className="text-xs border-green-500/50 text-green-700 dark:text-green-400 bg-green-500/10">
-                      <MailCheck className="h-3 w-3 mr-1" />
-                      Notified
+                  {session.host_id && (session.host_notified_at ? (
+                    <Badge variant="success" className="gap-1">
+                      <MailCheck className="h-3 w-3" aria-hidden="true" />
+                      Host emailed
                     </Badge>
                   ) : (
-                    <Badge variant="outline" className="text-xs border-amber-500/50 text-amber-700 dark:text-amber-400 bg-amber-500/10">
-                      <Mail className="h-3 w-3 mr-1" />
-                      Pending
+                    <Badge variant="amber" className="gap-1">
+                      <Mail className="h-3 w-3" aria-hidden="true" />
+                      Host not emailed
                     </Badge>
-                  )}
+                  ))}
                 </div>
               )}
 
-              {/* Expanded Content */}
               {isExpanded && (
                 <div className="mt-3 pt-3 border-t space-y-3">
                   {session.description && (
@@ -311,7 +290,7 @@ export function SessionTable({
                     </p>
                   )}
                   {!session.proposal_withdrawn_at && session.proposal_drift_at && (
-                    <p role="status" className="text-sm text-amber-700 dark:text-amber-400">
+                    <p role="status" className="text-sm text-signal-amber">
                       The proposer edited this session after it was scheduled. Review the change and re-publish the schedule.
                     </p>
                   )}
@@ -319,7 +298,7 @@ export function SessionTable({
                   {session.topic_tags && session.topic_tags.length > 0 && (
                     <div className="flex flex-wrap gap-1">
                       {session.topic_tags.map((tag) => (
-                        <Badge key={tag} variant="outline" className="text-xs">
+                        <Badge key={tag} variant="outline">
                           {tag}
                         </Badge>
                       ))}
@@ -330,11 +309,7 @@ export function SessionTable({
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-xs text-muted-foreground">Prefers:</span>
                       {session.time_preferences.map((pref) => (
-                        <Badge
-                          key={pref}
-                          variant="outline"
-                          className="text-xs border-blue-500/50 text-blue-700 dark:text-blue-400 bg-blue-500/10"
-                        >
+                        <Badge key={pref} variant="muted">
                           {formatPref(pref)}
                         </Badge>
                       ))}
@@ -347,7 +322,7 @@ export function SessionTable({
                     onClick={(e) => e.stopPropagation()}
                   >
                     View full session
-                    <ExternalLink className="h-3 w-3" />
+                    <ExternalLink className="h-3 w-3" aria-hidden="true" />
                   </Link>
                 </div>
               )}

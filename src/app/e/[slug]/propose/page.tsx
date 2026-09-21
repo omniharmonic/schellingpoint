@@ -4,72 +4,76 @@ import { isParticipationOpen } from '@/lib/events/lifecycle'
 import * as React from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
-import { Loader2, CheckCircle, MapPin, Building2, Clock, Users, Globe } from 'lucide-react'
+import { Loader2, MapPin, Building2, Clock, Users, Globe } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import { Checkbox } from '@/components/ui/checkbox'
+import { Select } from '@/components/ui/select'
+import { FilterChip } from '@/components/ui/filter-chip'
+import { RemovableChip } from '@/components/ui/removable-chip'
+import { Label } from '@/components/ui/label'
 import { DashboardLayout } from '@/components/DashboardLayout'
+import { PageHeader } from '@/components/PageHeader'
+import { SuccessPanel } from '@/components/SuccessPanel'
 import { useAuth } from '@/hooks/useAuth'
 import { useEvent } from '@/contexts/EventContext'
-import { parseTimeInTimezone } from '@/lib/events/timezone'
+import { parseTimeInTimezone, formatInEventTimezone } from '@/lib/events/timezone'
 import { getEventDays, formatCalendarDate } from '@/lib/events/dates'
 import { apiFetch } from '@/lib/api/client'
 import { useTracks } from '@/hooks/useTracks'
 import { SkillPicker } from '@/components/SkillPicker'
 import { TimePreferences, type TimePreferenceValue } from '@/components/TimePreferences'
+import {
+  allowedDurationOptions,
+  allowedFormatOptions,
+  DEFAULT_TAGS,
+  durationLabel,
+  EXPECTED_ATTENDANCE,
+  MAX_TAGS,
+  TIME_OPTIONS,
+} from '@/lib/sessions/constants'
 import { cn } from '@/lib/utils'
 
 /** Said wherever a record is written into someone's own repository. */
 const PERMANENCE = 'Public records can be deleted from your repository later, but copies may persist on the network.'
 
-const formats = [
-  { value: 'talk', label: 'Talk', description: 'A presentation or lecture' },
-  { value: 'workshop', label: 'Workshop', description: 'Hands-on interactive session' },
-  { value: 'discussion', label: 'Discussion', description: 'Open group conversation' },
-  { value: 'panel', label: 'Panel', description: 'Multiple speakers discussing' },
-  { value: 'demo', label: 'Demo', description: 'Live demonstration' },
-]
-
-const durations = [
-  { value: 15, label: '15 min' },
-  { value: 30, label: '30 min' },
-  { value: 60, label: '60 min' },
-  { value: 90, label: '90 min' },
-]
-
-const expectedAttendanceOptions = [
-  { value: 10, label: 'Small (1-10)', description: 'Intimate discussion' },
-  { value: 25, label: 'Medium (10-25)', description: 'Standard session' },
-  { value: 50, label: 'Large (25-50)', description: 'Popular topic' },
-  { value: 100, label: 'Very Large (50-100)', description: 'High interest' },
-  { value: 150, label: 'Auditorium (100+)', description: 'Keynote level' },
-]
-
-// Default tags - will be overridden by event's suggestedTopics
-const DEFAULT_TAGS = [
-  'governance', 'defi', 'nfts', 'infrastructure', 'security',
-  'community', 'education', 'tooling', 'research', 'design'
-]
-
-// Generate time options
-const TIME_OPTIONS: { value: string; label: string }[] = []
-for (let h = 9; h <= 22; h++) {
-  for (const m of [0, 30]) {
-    if (h === 22 && m === 30) continue
-    const hh = String(h).padStart(2, '0')
-    const mm = String(m).padStart(2, '0')
-    const label = `${h > 12 ? h - 12 : h === 0 ? 12 : h}:${mm} ${h >= 12 ? 'PM' : 'AM'}`
-    TIME_OPTIONS.push({ value: `${hh}:${mm}`, label })
-  }
+function buildTimestamp(day: string, time: string, timezone: string): string {
+  return parseTimeInTimezone(time, day, timezone).toISOString()
 }
 
-function buildTimestamp(day: string, time: string, timezone: string): string {
-  // Use the timezone utility to properly convert local time to UTC
-  const date = parseTimeInTimezone(time, day, timezone)
-  return date.toISOString()
+/** A selectable option card (format, duration, attendance, track, venue type). */
+function OptionButton({
+  selected,
+  onClick,
+  className,
+  children,
+}: {
+  selected: boolean
+  onClick: () => void
+  className?: string
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={selected}
+      onClick={onClick}
+      className={cn(
+        'rounded-xl border p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
+        selected ? 'border-primary bg-primary/10' : 'border-border hover:border-muted-foreground/50',
+        className
+      )}
+    >
+      {children}
+    </button>
+  )
+}
+
+function FieldHint({ children, id }: { children: React.ReactNode; id?: string }) {
+  return <p id={id} className="text-xs text-muted-foreground">{children}</p>
 }
 
 export default function ProposePage() {
@@ -97,109 +101,89 @@ export default function ProposePage() {
   const [selfHostedStartTime, setSelfHostedStartTime] = React.useState('')
   const [selfHostedEndTime, setSelfHostedEndTime] = React.useState('')
   const [isSubmitting, setIsSubmitting] = React.useState(false)
-  const [isSuccess, setIsSuccess] = React.useState(false)
+  const [created, setCreated] = React.useState<{ id: string; title: string } | null>(null)
   const [error, setError] = React.useState<string | null>(null)
   const [publishNote, setPublishNote] = React.useState<string | null>(null)
   // Custodial accounts publish the proposal into their own repository on submit; accounts from
   // the Bluesky door do so once they have confirmed public linkage (spec §4.2, §7).
   const publishesNow = user?.kind === 'custodial' || !!profile?.publish_proposals
 
-  // Generate event days from event dates
   const eventDays = React.useMemo(() => {
     return getEventDays(event.startDate, event.endDate).map((date) => ({
       value: date,
-      label: formatCalendarDate(date, { weekday: 'long', month: 'short', day: 'numeric' }),
+      label: formatCalendarDate(date, { weekday: 'short', month: 'short', day: 'numeric' }),
     }))
   }, [event.startDate, event.endDate])
 
-  // Humanize a custom format slug ("fireside-chat" -> "Fireside chat")
-  const humanizeFormatValue = (value: string) => {
-    const label = value
-      .split('-')
-      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-      .join(' ')
-    return label
-  }
+  const allowedFormats = React.useMemo(() => allowedFormatOptions(event.allowedFormats), [event.allowedFormats])
+  const allowedDurations = React.useMemo(() => allowedDurationOptions(event.allowedDurations), [event.allowedDurations])
 
-  // Filter formats/durations based on event settings, including any custom ones
-  const allowedFormats = React.useMemo(() => {
-    if (event.allowedFormats.length === 0) return formats
-    // Start from preset formats that are enabled for the event
-    const preset = formats.filter(f => event.allowedFormats.includes(f.value))
-    // Add any event-defined formats not in the preset list
-    const custom = event.allowedFormats
-      .filter(v => !formats.some(f => f.value === v))
-      .map(v => ({
-        value: v,
-        label: humanizeFormatValue(v),
-        description: 'Custom format',
-      }))
-    return [...preset, ...custom]
-  }, [event.allowedFormats])
-
-  const allowedDurations = React.useMemo(() => {
-    if (event.allowedDurations.length === 0) return durations
-    const preset = durations.filter(d => event.allowedDurations.includes(d.value))
-    const custom = event.allowedDurations
-      .filter(v => !durations.some(d => d.value === v))
-      .map(v => ({ value: v, label: `${v} min` }))
-    return [...preset, ...custom].sort((a, b) => a.value - b.value)
-  }, [event.allowedDurations])
-
-  // Use event's suggested topics if available, with lowercase for tag matching
+  // The gathering's own topics when it has them; otherwise a neutral set.
   const suggestedTags = React.useMemo(() => {
-    const topics = event.suggestedTopics && event.suggestedTopics.length > 0
-      ? event.suggestedTopics
-      : DEFAULT_TAGS
-    return topics.map(t => t.toLowerCase())
+    const topics = event.suggestedTopics && event.suggestedTopics.length > 0 ? event.suggestedTopics : DEFAULT_TAGS
+    return topics.map((t) => t.toLowerCase())
   }, [event.suggestedTopics])
 
-  // Redirect if not logged in
   React.useEffect(() => {
     if (!authLoading && !user) {
       router.push(`/login?returnTo=${encodeURIComponent(`/e/${event.slug}/propose`)}`)
     }
   }, [user, authLoading, router, event.slug])
 
-  // Ensure format/duration defaults match what the event allows
   React.useEffect(() => {
-    if (allowedFormats.length > 0 && !allowedFormats.some(f => f.value === format)) {
-      setFormat(allowedFormats[0].value)
-    }
+    if (allowedFormats.length > 0 && !allowedFormats.some((f) => f.value === format)) setFormat(allowedFormats[0].value)
   }, [allowedFormats, format])
 
   React.useEffect(() => {
-    if (allowedDurations.length > 0 && !allowedDurations.some(d => d.value === duration)) {
-      setDuration(allowedDurations[0].value)
-    }
+    if (allowedDurations.length > 0 && !allowedDurations.includes(duration)) setDuration(allowedDurations[0])
   }, [allowedDurations, duration])
 
   const handleAddTag = (tag: string) => {
     const normalizedTag = tag.toLowerCase().trim()
-    if (normalizedTag && !tags.includes(normalizedTag) && tags.length < 5) {
-      setTags([...tags, normalizedTag])
-    }
+    if (normalizedTag && !tags.includes(normalizedTag) && tags.length < MAX_TAGS) setTags([...tags, normalizedTag])
     setCustomTag('')
   }
 
-  const handleRemoveTag = (tag: string) => {
-    setTags(tags.filter((t) => t !== tag))
+  const handleRemoveTag = (tag: string) => setTags(tags.filter((t) => t !== tag))
+
+  const resetForm = () => {
+    setCreated(null)
+    setTitle('')
+    setDescription('')
+    setFormat(allowedFormats[0]?.value ?? 'talk')
+    setDuration(allowedDurations.includes(60) ? 60 : allowedDurations[0] ?? 60)
+    setExpectedAttendance(null)
+    setTags([])
+    setSkills([])
+    setAvailability({ windows: [], blackouts: [] })
+    setPublishAvailability(false)
+    setPublishNote(null)
+    setIsSelfHosted(false)
+    setCustomLocation('')
+    setPublicPlace('')
+    setSelfHostedDay('')
+    setSelfHostedStartTime('')
+    setSelfHostedEndTime('')
+    setTrackId(null)
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-
     if (!user || !profile) return
     if (!title.trim()) {
-      setError('Title is required')
+      setError('Give your session a title.')
       return
     }
     if (isSelfHosted && !customLocation.trim()) {
-      setError('Please provide location details for self-hosted sessions')
+      setError('Tell attendees where a self-hosted session takes place.')
       return
     }
     if (isSelfHosted && selfHostedDay && (!selfHostedStartTime || !selfHostedEndTime)) {
-      setError('Please provide both start and end times for your self-hosted session')
+      setError('Pick both a start and an end time for your self-hosted session.')
+      return
+    }
+    if (isSelfHosted && selfHostedDay && selfHostedStartTime && selfHostedEndTime && selfHostedEndTime <= selfHostedStartTime) {
+      setError('The end time must be after the start time.')
       return
     }
 
@@ -236,9 +220,9 @@ export default function ProposePage() {
       if (result.atproto?.uri) setPublishNote('Your proposal is now a public record in your own repository.')
       else if (result.atproto?.error) setPublishNote('Your proposal is saved. Writing its public record failed; you can publish it from the session page.')
       else if (result.atproto?.skipped === 'not_confirmed') setPublishNote('Your proposal is saved in this gathering. Confirm public linkage from the session page to publish it to your repository.')
-      setIsSuccess(true)
+      setCreated({ id: result.id, title: title.trim() })
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to submit proposal')
+      setError(err instanceof Error ? err.message : 'Your proposal could not be submitted. Please try again.')
     } finally {
       setIsSubmitting(false)
     }
@@ -247,7 +231,7 @@ export default function ProposePage() {
   if (authLoading) {
     return (
       <DashboardLayout>
-        <div className="flex items-center justify-center py-12">
+        <div className="flex items-center justify-center py-12" role="status" aria-label="Loading">
           <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
         </div>
       </DashboardLayout>
@@ -255,200 +239,157 @@ export default function ProposePage() {
   }
 
   if (proposalsClosed) {
-    return <DashboardLayout><Card className="max-w-xl mx-auto p-8"><h1 className="text-2xl font-semibold">Proposals are not open right now.</h1><p className="mt-3 text-muted-foreground">Explore the sessions while the organizers prepare the next phase.</p><Button asChild className="mt-6"><Link href={`/e/${event.slug}/sessions`}>Explore sessions</Link></Button></Card></DashboardLayout>
-  }
-
-  if (isSuccess) {
+    const opensAt = event.proposalsOpenAt && event.proposalsOpenAt.getTime() > Date.now() ? event.proposalsOpenAt : null
     return (
       <DashboardLayout>
-        <div className="max-w-md mx-auto py-8">
-          <Card>
-            <CardHeader className="text-center">
-              <div className="flex justify-center mb-4">
-                <div className="rounded-full bg-green-500/10 p-4">
-                  <CheckCircle className="h-12 w-12 text-green-500" />
-                </div>
-              </div>
-              <CardTitle className="text-2xl">Session Proposed!</CardTitle>
-              <CardDescription>
-                {event.requireProposalApproval ? `Your session “${title}” is ready for organizer review.` : `Your session “${title}” is now open for the community to discover.`}
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="rounded-lg bg-muted p-4 text-sm text-center space-y-2">
-                <p>
-                  {event.requireProposalApproval
-                    ? 'An organizer will review your proposal and approve it for voting.'
-                    : 'Your session has been added to the voting pool.'}
-                </p>
-                {publishNote && <p className="text-muted-foreground">{publishNote}</p>}
-                <p className="text-muted-foreground">Want co-hosts? Share an invite link from the session page; they accept it themselves.</p>
-              </div>
-              <div className="flex gap-3">
-                <Button variant="outline" className="flex-1" asChild>
-                  <Link href={`/e/${event.slug}/sessions`}>View Sessions</Link>
-                </Button>
-                <Button
-                  className="flex-1"
-                  onClick={() => {
-                    setIsSuccess(false)
-                    setTitle('')
-                    setDescription('')
-                    setFormat('talk')
-                    setDuration(60)
-                    setExpectedAttendance(null)
-                    setTags([])
-                    setSkills([])
-                    setAvailability({ windows: [], blackouts: [] })
-                    setPublishAvailability(false)
-                    setPublishNote(null)
-                    setIsSelfHosted(false)
-                    setCustomLocation('')
-                    setSelfHostedDay('')
-                    setSelfHostedStartTime('')
-                    setSelfHostedEndTime('')
-                    setTrackId(null)
-                  }}
-                >
-                  Propose Another
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
+        <div className="mx-auto max-w-2xl">
+          <PageHeader
+            title="Proposals aren’t open right now"
+            subtitle={
+              opensAt
+                ? `Proposals open ${formatInEventTimezone(opensAt, event.timezone, 'datetime')}. Explore the sessions while the organizers prepare the next phase.`
+                : 'Explore the sessions while the organizers prepare the next phase.'
+            }
+          />
+          <div className="flex flex-wrap gap-2">
+            <Button asChild>
+              <Link href={`/e/${event.slug}/sessions`}>Explore sessions</Link>
+            </Button>
+            <Button asChild variant="outline">
+              <Link href={`/e/${event.slug}`}>Back to {event.name}</Link>
+            </Button>
+          </div>
         </div>
       </DashboardLayout>
     )
   }
 
+  if (created) {
+    return (
+      <DashboardLayout>
+        <div className="mx-auto max-w-2xl">
+          <SuccessPanel
+            title="Your session is proposed"
+            body={
+              <>
+                {event.requireProposalApproval
+                  ? `“${created.title}” is ready for organizer review. An organizer will approve it for voting.`
+                  : `“${created.title}” is now in the voting pool for the community to discover.`}
+                {publishNote ? ` ${publishNote}` : ''}
+                {' '}Want co-hosts? Share an invite link from the session page; they accept it themselves.
+              </>
+            }
+            primary={
+              <Button asChild>
+                <Link href={`/e/${event.slug}/sessions/${created.id}`}>View your session</Link>
+              </Button>
+            }
+            secondary={
+              <Button variant="outline" onClick={resetForm}>
+                Propose another
+              </Button>
+            }
+          />
+        </div>
+      </DashboardLayout>
+    )
+  }
+
+  const tagsFull = tags.length >= MAX_TAGS
+
   return (
     <DashboardLayout>
-      <div className="max-w-2xl mx-auto">
-        <div className="mb-6">
-          <h1 className="text-2xl font-bold">Bring an idea to the room.</h1>
-          <p className="text-muted-foreground mt-1">
-            A question, a skill, a conversation worth having. What would you like to explore with {event.name}?
-          </p>
-        </div>
+      <div className="mx-auto max-w-2xl">
+        <PageHeader
+          title="Propose a session"
+          subtitle={`A question, a skill, a conversation worth having. What would you like to explore with ${event.name}?`}
+        />
 
         <Card>
           <CardHeader>
-            <CardTitle>Propose a Session</CardTitle>
+            <CardTitle>Session details</CardTitle>
             <CardDescription>
-              Share your knowledge with the community.
               {event.requireProposalApproval
-                ? ' Sessions will be reviewed before appearing for voting.'
-                : ' Sessions will be added directly to the voting pool.'}
+                ? 'Organizers review proposals before they appear for voting.'
+                : 'Proposals go straight into the voting pool.'}
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <form onSubmit={handleSubmit} className="space-y-6">
-              {/* Title */}
+            <form onSubmit={handleSubmit} className="space-y-6" noValidate>
               <div className="space-y-2">
-                <label className="text-sm font-medium">
-                  Title <span className="text-destructive">*</span>
-                </label>
+                <Label htmlFor="propose-title">Title</Label>
                 <Input
+                  id="propose-title"
                   value={title}
                   onChange={(e) => setTitle(e.target.value)}
-                  placeholder="What's your session about?"
+                  placeholder="What’s your session about?"
                   maxLength={100}
+                  required
+                  aria-describedby="propose-title-count"
                 />
-                <p className="text-xs text-muted-foreground">{title.length}/100</p>
+                <FieldHint id="propose-title-count">{title.length}/100</FieldHint>
               </div>
 
-              {/* Description */}
               <div className="space-y-2">
-                <label className="text-sm font-medium">Description</label>
+                <Label htmlFor="propose-description">Description (optional)</Label>
                 <Textarea
+                  id="propose-description"
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
-                  placeholder="Describe what participants will learn or experience..."
+                  placeholder="Describe what participants will learn or experience…"
                   rows={4}
                   maxLength={500}
+                  aria-describedby="propose-description-count"
                 />
-                <p className="text-xs text-muted-foreground">{description.length}/500</p>
+                <FieldHint id="propose-description-count">{description.length}/500</FieldHint>
               </div>
 
-              {/* Format */}
-              <div className="space-y-2">
-                <label className="text-sm font-medium">Format</label>
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+              <fieldset className="space-y-2">
+                <legend className="text-sm font-medium leading-none">Format</legend>
+                <div className="grid grid-cols-2 gap-3 pt-2 sm:grid-cols-3">
                   {allowedFormats.map((f) => (
-                    <button
-                      key={f.value}
-                      type="button"
-                      onClick={() => setFormat(f.value)}
-                      className={cn(
-                        'p-3 rounded-lg border text-left transition-colors',
-                        format === f.value
-                          ? 'border-primary bg-primary/10'
-                          : 'hover:border-muted-foreground/50'
-                      )}
-                    >
-                      <div className="font-medium text-sm">{f.label}</div>
+                    <OptionButton key={f.value} selected={format === f.value} onClick={() => setFormat(f.value)}>
+                      <div className="text-sm font-medium">{f.label}</div>
                       <div className="text-xs text-muted-foreground">{f.description}</div>
-                    </button>
+                    </OptionButton>
                   ))}
                 </div>
-              </div>
+              </fieldset>
 
-              {/* Duration */}
-              <div className="space-y-2">
-                <label className="text-sm font-medium">Duration</label>
-                <div className="flex gap-2">
+              <fieldset className="space-y-2">
+                <legend className="text-sm font-medium leading-none">Duration</legend>
+                <div className="grid grid-cols-3 gap-3 pt-2 sm:grid-cols-4">
                   {allowedDurations.map((d) => (
-                    <button
-                      key={d.value}
-                      type="button"
-                      onClick={() => setDuration(d.value)}
-                      className={cn(
-                        'px-4 py-2 rounded-lg border transition-colors',
-                        duration === d.value
-                          ? 'border-primary bg-primary/10'
-                          : 'hover:border-muted-foreground/50'
-                      )}
-                    >
-                      {d.label}
-                    </button>
+                    <OptionButton key={d} selected={duration === d} onClick={() => setDuration(d)} className="text-center text-sm">
+                      {durationLabel(d)}
+                    </OptionButton>
                   ))}
                 </div>
-              </div>
+              </fieldset>
 
-              {/* Expected Attendance */}
-              <div className="space-y-2">
-                <label className="text-sm font-medium flex items-center gap-2">
-                  <Users className="h-4 w-4" />
-                  Expected Attendance
-                </label>
-                <p className="text-xs text-muted-foreground">
-                  Helps organizers assign an appropriate venue
-                </p>
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                  {expectedAttendanceOptions.map((opt) => (
-                    <button
+              <fieldset className="space-y-2">
+                <legend className="flex items-center gap-2 text-sm font-medium leading-none">
+                  <Users className="h-4 w-4" aria-hidden />
+                  Expected attendance (optional)
+                </legend>
+                <FieldHint>Helps organizers assign a room that fits.</FieldHint>
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                  {EXPECTED_ATTENDANCE.map((opt) => (
+                    <OptionButton
                       key={opt.value}
-                      type="button"
+                      selected={expectedAttendance === opt.value}
                       onClick={() => setExpectedAttendance(expectedAttendance === opt.value ? null : opt.value)}
-                      className={cn(
-                        'p-3 rounded-lg border text-left transition-colors',
-                        expectedAttendance === opt.value
-                          ? 'border-primary bg-primary/10'
-                          : 'hover:border-muted-foreground/50'
-                      )}
                     >
-                      <div className="font-medium text-sm">{opt.label}</div>
+                      <div className="text-sm font-medium">{opt.label}</div>
                       <div className="text-xs text-muted-foreground">{opt.description}</div>
-                    </button>
+                    </OptionButton>
                   ))}
                 </div>
-              </div>
+              </fieldset>
 
-              {/* Availability (app-side by default) */}
-              <div className="space-y-2">
-                <span className="text-sm font-medium">When can you be there?</span>
-                <p className="text-xs text-muted-foreground">
-                  Optional. Organizers use this to schedule you; it stays inside this gathering unless you choose to publish it.
-                </p>
+              <fieldset className="space-y-2">
+                <legend className="text-sm font-medium leading-none">When can you be there? (optional)</legend>
+                <FieldHint>Organizers use this to schedule you. It stays inside this gathering unless you choose to publish it.</FieldHint>
                 <TimePreferences
                   value={availability}
                   onChange={setAvailability}
@@ -457,7 +398,7 @@ export default function ProposePage() {
                   timezone={event.timezone}
                 />
                 {(availability.windows.length > 0 || availability.blackouts.length > 0) && (
-                  <label className="flex items-start gap-3 cursor-pointer rounded-lg border p-3">
+                  <label className="flex cursor-pointer items-start gap-3 rounded-xl border p-3">
                     <Checkbox
                       id="publish-availability"
                       checked={publishAvailability}
@@ -466,267 +407,197 @@ export default function ProposePage() {
                     />
                     <span className="text-sm">
                       <span className="font-medium">Also publish my availability for this proposal</span>
-                      <span className="block text-xs text-muted-foreground mt-1">
+                      <span className="mt-1 block text-xs text-muted-foreground">
                         Writes a public record to your repository saying when you can and cannot attend. {PERMANENCE}
                       </span>
                     </span>
                   </label>
                 )}
-              </div>
+              </fieldset>
 
-              {/* Track */}
               {tracks.length > 0 && (
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">Track</label>
-                  <p className="text-xs text-muted-foreground">
-                    Which theme does your session fit best?
-                  </p>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setTrackId(null)}
-                      className={cn(
-                        'px-3 py-2 rounded-lg border text-sm transition-colors text-left',
-                        trackId === null
-                          ? 'border-primary bg-primary/10'
-                          : 'hover:border-muted-foreground/50'
-                      )}
-                    >
+                <fieldset className="space-y-2">
+                  <legend className="text-sm font-medium leading-none">Track (optional)</legend>
+                  <FieldHint>Which theme does your session fit best?</FieldHint>
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                    <OptionButton selected={trackId === null} onClick={() => setTrackId(null)} className="text-sm">
                       None
-                    </button>
+                    </OptionButton>
                     {tracks.map((track) => (
-                      <button
+                      <OptionButton
                         key={track.id}
-                        type="button"
+                        selected={trackId === track.id}
                         onClick={() => setTrackId(track.id)}
-                        className={cn(
-                          'px-3 py-2 rounded-lg border text-sm transition-colors text-left flex items-center gap-2',
-                          trackId === track.id
-                            ? 'border-primary bg-primary/10'
-                            : 'hover:border-muted-foreground/50'
-                        )}
+                        className="flex items-center gap-2 text-sm"
                       >
-                        {track.color && (
-                          <span
-                            className="w-2 h-2 rounded-full flex-shrink-0"
-                            style={{ backgroundColor: track.color }}
-                          />
-                        )}
+                        {track.color && <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: track.color }} aria-hidden />}
                         <span className="truncate">{track.name}</span>
-                      </button>
+                      </OptionButton>
                     ))}
                   </div>
-                </div>
+                </fieldset>
               )}
 
-              {/* Venue Type */}
-              <div className="space-y-3">
-                <label className="text-sm font-medium">Venue</label>
-                <div className="grid grid-cols-2 gap-3">
-                  <button
-                    type="button"
-                    onClick={() => setIsSelfHosted(false)}
-                    className={cn(
-                      'p-4 rounded-lg border text-left transition-colors flex items-start gap-3',
-                      !isSelfHosted
-                        ? 'border-primary bg-primary/10'
-                        : 'hover:border-muted-foreground/50'
-                    )}
-                  >
-                    <Building2 className="h-5 w-5 mt-0.5 flex-shrink-0" />
-                    <div>
-                      <div className="font-medium text-sm">Official Venue</div>
-                      <div className="text-xs text-muted-foreground">
-                        Use one of the event's scheduled venues
-                      </div>
-                    </div>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setIsSelfHosted(true)}
-                    className={cn(
-                      'p-4 rounded-lg border text-left transition-colors flex items-start gap-3',
-                      isSelfHosted
-                        ? 'border-primary bg-primary/10'
-                        : 'hover:border-muted-foreground/50'
-                    )}
-                  >
-                    <MapPin className="h-5 w-5 mt-0.5 flex-shrink-0" />
-                    <div>
-                      <div className="font-medium text-sm">Self-Hosted</div>
-                      <div className="text-xs text-muted-foreground">
-                        Host at your own location
-                      </div>
-                    </div>
-                  </button>
+              <fieldset className="space-y-3">
+                <legend className="text-sm font-medium leading-none">Venue</legend>
+                <div className="grid grid-cols-2 gap-3 pt-2">
+                  <OptionButton selected={!isSelfHosted} onClick={() => setIsSelfHosted(false)} className="flex items-start gap-3 p-4">
+                    <Building2 className="mt-0.5 h-5 w-5 shrink-0" aria-hidden />
+                    <span>
+                      <span className="block text-sm font-medium">Official venue</span>
+                      <span className="block text-xs text-muted-foreground">One of the gathering’s scheduled rooms</span>
+                    </span>
+                  </OptionButton>
+                  <OptionButton selected={isSelfHosted} onClick={() => setIsSelfHosted(true)} className="flex items-start gap-3 p-4">
+                    <MapPin className="mt-0.5 h-5 w-5 shrink-0" aria-hidden />
+                    <span>
+                      <span className="block text-sm font-medium">Self-hosted</span>
+                      <span className="block text-xs text-muted-foreground">Host at your own location</span>
+                    </span>
+                  </OptionButton>
                 </div>
 
-                {/* Self-hosted details - shown when self-hosted */}
                 {isSelfHosted && (
-                  <>
-                  {/* Day Picker */}
-                  <div className="space-y-2 pt-2">
-                    <label className="text-sm font-medium">
-                      Which day? <span className="text-xs text-muted-foreground">(optional)</span>
-                    </label>
-                    <div className="flex flex-wrap gap-2">
-                      {eventDays.map((day) => (
-                        <button
-                          key={day.value}
-                          type="button"
-                          onClick={() => setSelfHostedDay(selfHostedDay === day.value ? '' : day.value)}
-                          className={cn(
-                            'px-3 py-2 rounded-lg border text-sm transition-colors',
-                            selfHostedDay === day.value
-                              ? 'border-primary bg-primary/10 font-medium'
-                              : 'hover:border-muted-foreground/50'
-                          )}
-                        >
-                          {day.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Time Range */}
-                  {selfHostedDay && (
-                    <div className="space-y-2">
-                      <label className="text-sm font-medium flex items-center gap-2">
-                        <Clock className="h-4 w-4" />
-                        Time Range
-                      </label>
-                      <div className="flex items-center gap-2">
-                        <select
-                          value={selfHostedStartTime}
-                          onChange={(e) => setSelfHostedStartTime(e.target.value)}
-                          className="flex-1 rounded-lg border bg-background px-3 py-2 text-sm"
-                        >
-                          <option value="">Start time</option>
-                          {TIME_OPTIONS.map((t) => (
-                            <option key={t.value} value={t.value}>{t.label}</option>
-                          ))}
-                        </select>
-                        <span className="text-muted-foreground">to</span>
-                        <select
-                          value={selfHostedEndTime}
-                          onChange={(e) => setSelfHostedEndTime(e.target.value)}
-                          className="flex-1 rounded-lg border bg-background px-3 py-2 text-sm"
-                        >
-                          <option value="">End time</option>
-                          {TIME_OPTIONS.map((t) => (
-                            <option key={t.value} value={t.value}>{t.label}</option>
-                          ))}
-                        </select>
+                  <div className="space-y-4 rounded-xl border bg-muted/40 p-4">
+                    <fieldset className="space-y-2">
+                      <legend className="text-sm font-medium leading-none">Which day? (optional)</legend>
+                      <div className="flex flex-wrap gap-2 pt-2">
+                        {eventDays.map((day) => (
+                          <FilterChip
+                            key={day.value}
+                            pressed={selfHostedDay === day.value}
+                            onClick={() => setSelfHostedDay(selfHostedDay === day.value ? '' : day.value)}
+                          >
+                            {day.label}
+                          </FilterChip>
+                        ))}
                       </div>
+                    </fieldset>
+
+                    {selfHostedDay && (
+                      <fieldset className="space-y-2">
+                        <legend className="flex items-center gap-2 text-sm font-medium leading-none">
+                          <Clock className="h-4 w-4" aria-hidden />
+                          Time
+                        </legend>
+                        <div className="flex items-center gap-2 pt-2">
+                          <Select aria-label="Start time" value={selfHostedStartTime} onChange={(e) => setSelfHostedStartTime(e.target.value)}>
+                            <option value="">Start time</option>
+                            {TIME_OPTIONS.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                          </Select>
+                          <span className="text-sm text-muted-foreground">to</span>
+                          <Select aria-label="End time" value={selfHostedEndTime} onChange={(e) => setSelfHostedEndTime(e.target.value)}>
+                            <option value="">End time</option>
+                            {TIME_OPTIONS.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                          </Select>
+                        </div>
+                      </fieldset>
+                    )}
+
+                    <div className="space-y-2">
+                      <Label htmlFor="propose-location" className="flex items-center gap-2">
+                        <MapPin className="h-4 w-4" aria-hidden />
+                        Location details
+                      </Label>
+                      <Textarea
+                        id="propose-location"
+                        value={customLocation}
+                        onChange={(e) => setCustomLocation(e.target.value)}
+                        placeholder="Where will your session be held? Include the address, room and any directions attendees need…"
+                        rows={3}
+                        maxLength={300}
+                        aria-describedby="propose-location-hint"
+                      />
+                      <FieldHint id="propose-location-hint">
+                        {customLocation.length}/300 · Shown only to confirmed attendees, hosts and organizers. Never published.
+                      </FieldHint>
                     </div>
-                  )}
 
-                  <div className="space-y-2 pt-2">
-                    <label className="text-sm font-medium flex items-center gap-2">
-                      <MapPin className="h-4 w-4" />
-                      Location Details <span className="text-destructive">*</span>
-                    </label>
-                    <Textarea
-                      value={customLocation}
-                      onChange={(e) => setCustomLocation(e.target.value)}
-                      placeholder="Where will your session be held? Include address, room info, or any directions attendees need..."
-                      rows={3}
-                      maxLength={300}
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      {customLocation.length}/300 - Shown only to confirmed attendees, hosts and organizers. Never published.
-                    </p>
+                    <div className="space-y-2">
+                      <Label htmlFor="propose-public-place">Public area (optional)</Label>
+                      <Input
+                        id="propose-public-place"
+                        value={publicPlace}
+                        onChange={(e) => setPublicPlace(e.target.value)}
+                        placeholder="e.g. Near Pearl St, Boulder"
+                        maxLength={80}
+                        aria-describedby="propose-public-place-hint"
+                      />
+                      <FieldHint id="propose-public-place-hint">
+                        A neighborhood or landmark, never a street address. This label goes on your public
+                        proposal record, so anyone on the network can see it. Leave it empty to publish no location.
+                      </FieldHint>
+                    </div>
                   </div>
-
-                  <div className="space-y-2">
-                    <label htmlFor="propose-public-place" className="text-sm font-medium">
-                      Public area <span className="text-xs font-normal text-muted-foreground">(optional)</span>
-                    </label>
-                    <input
-                      id="propose-public-place"
-                      type="text"
-                      value={publicPlace}
-                      onChange={(e) => setPublicPlace(e.target.value)}
-                      placeholder="e.g. Near Pearl St, Boulder"
-                      maxLength={80}
-                      className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      A neighbourhood or landmark, never a street address. This label goes on your public
-                      proposal record, so anyone on the network can see it. Leave it empty to publish no location.
-                    </p>
-                  </div>
-                  </>
                 )}
-              </div>
+              </fieldset>
 
-              {/* Skills (shared taxonomy) */}
               <SkillPicker
                 value={skills}
                 onChange={(next) => setSkills(next.slice(0, 5))}
                 max={5}
-                label="Skills (up to 5)"
+                label="Skills (optional, up to 5)"
                 description="From the shared skill taxonomy, so people can find this session next to classes on the same subject."
               />
 
-              {/* Tags */}
               <div className="space-y-2">
-                <label className="text-sm font-medium">Tags (up to 5)</label>
-                <div className="flex flex-wrap gap-1.5 mb-2">
-                  {tags.map((tag) => (
-                    <Badge
-                      key={tag}
-                      variant="secondary"
-                      className="cursor-pointer hover:bg-destructive/20"
-                      onClick={() => handleRemoveTag(tag)}
-                    >
-                      {tag} x
-                    </Badge>
-                  ))}
-                </div>
+                <Label htmlFor="propose-tag">Tags (optional)</Label>
+                {tags.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5">
+                    {tags.map((tag) => (
+                      <RemovableChip key={tag} label={tag} onRemove={() => handleRemoveTag(tag)} />
+                    ))}
+                  </div>
+                )}
                 <div className="flex gap-2">
                   <Input
+                    id="propose-tag"
                     value={customTag}
                     onChange={(e) => setCustomTag(e.target.value)}
-                    placeholder="Add a tag..."
+                    placeholder="Add a tag…"
+                    maxLength={40}
+                    disabled={tagsFull}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter') {
                         e.preventDefault()
                         handleAddTag(customTag)
                       }
                     }}
+                    aria-describedby="propose-tag-count"
                   />
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => handleAddTag(customTag)}
-                    disabled={!customTag.trim() || tags.length >= 5}
-                  >
+                  <Button type="button" variant="outline" onClick={() => handleAddTag(customTag)} disabled={!customTag.trim() || tagsFull}>
                     Add
                   </Button>
                 </div>
-                <div className="flex flex-wrap gap-1.5 mt-2">
-                  {suggestedTags
-                    .filter((t) => !tags.includes(t))
-                    .slice(0, 6)
-                    .map((tag) => (
-                      <button
-                        key={tag}
-                        type="button"
-                        onClick={() => handleAddTag(tag)}
-                        className="px-2 py-1 text-xs rounded border hover:bg-accent"
-                        disabled={tags.length >= 5}
-                      >
-                        + {tag}
-                      </button>
-                    ))}
-                </div>
+                <FieldHint id="propose-tag-count">
+                  {tagsFull ? `${MAX_TAGS} of ${MAX_TAGS} tags used. Remove one to add another.` : `${tags.length} of ${MAX_TAGS} tags used.`}
+                </FieldHint>
+                {!tagsFull && suggestedTags.filter((t) => !tags.includes(t)).length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-xs text-muted-foreground">Suggested:</span>
+                    {suggestedTags
+                      .filter((t) => !tags.includes(t))
+                      .slice(0, 6)
+                      .map((tag) => (
+                        <button
+                          key={tag}
+                          type="button"
+                          onClick={() => handleAddTag(tag)}
+                          className="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                          aria-label={`Add tag ${tag}`}
+                        >
+                          <Badge variant="muted" className="cursor-pointer hover:bg-accent hover:text-foreground">
+                            + {tag}
+                          </Badge>
+                        </button>
+                      ))}
+                  </div>
+                )}
               </div>
 
-              {/* What submitting publishes */}
-              <div className="rounded-lg border p-4 text-sm space-y-2">
-                <p className="font-medium flex items-center gap-2">
-                  <Globe className="h-4 w-4" />
+              <div className="space-y-2 rounded-xl border p-4 text-sm">
+                <p className="flex items-center gap-2 font-medium">
+                  <Globe className="h-4 w-4" aria-hidden />
                   Your proposal is yours
                 </p>
                 <p className="text-muted-foreground">
@@ -742,17 +613,20 @@ export default function ProposePage() {
                 </p>
               </div>
 
-              {/* Error */}
               {error && (
-                <div className="rounded-lg bg-destructive/10 border border-destructive/20 p-3 text-sm text-destructive">
+                <div role="alert" className="rounded-lg border border-destructive/20 bg-destructive/10 p-3 text-sm text-destructive">
                   {error}
                 </div>
               )}
 
-              {/* Submit */}
-              <Button type="submit" className="w-full" loading={isSubmitting}>
-                Submit Proposal
-              </Button>
+              <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+                <Button type="button" variant="outline" asChild>
+                  <Link href={`/e/${event.slug}/sessions`}>Cancel</Link>
+                </Button>
+                <Button type="submit" loading={isSubmitting}>
+                  Propose a session
+                </Button>
+              </div>
             </form>
           </CardContent>
         </Card>

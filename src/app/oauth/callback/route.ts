@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server'
+import { NextResponse, after } from 'next/server'
 import { safeReturnPath } from '@/lib/auth-redirect'
 import { isAtprotoConfigured, publicUrl } from '@/lib/atproto/config'
 import { resolveDidDoc } from '@/lib/atproto/identity'
@@ -15,12 +15,20 @@ import {
 import { fetchBskyProfile, importBskyProfile } from '@/lib/atproto/bsky-profile'
 
 /**
+ * How long sign-in waits for the profile import before redirecting anyway. Long enough that the
+ * common case (one PDS read, one small avatar) lands before onboarding renders; short enough that
+ * a slow or dead PDS never holds the redirect. The import always runs to completion in `after()`.
+ */
+const PROFILE_IMPORT_GRACE_MS = 1500
+
+/**
  * Where the authorization server sends the browser back. Finishes the OAuth exchange,
  * verifies our signed `state`, then:
  *
  *   signin     find the `accounts` row for the DID or create one (kind `oauth`, email
- *              NULL), import the Bluesky profile into empty fields, set `sp_at_session`,
- *              redirect to `next`.
+ *              NULL), set `sp_at_session`, redirect to `next`. The network profile import
+ *              (PDS record first, AppView fallback; blank or still-synced fields only) starts
+ *              at once and finishes in the background: a failed import never fails sign-in.
  *   link       refused — one account = one DID (`?atproto_error=identity_exists`).
  *   gathering  remember the DID as the event's actor; no session change.
  *
@@ -73,8 +81,11 @@ export async function GET(request: Request) {
       case 'signin': {
         const account = await findOrCreateOAuthAccount(did, handle)
         // The profile trigger seeds display_name with the handle's first label; that counts as empty.
-        await importBskyProfile(account.accountId, did, { placeholderName: handle ? handle.split('.')[0] : null }).catch(() => undefined)
+        const imported = importBskyProfile(account.accountId, did, { placeholderName: handle ? handle.split('.')[0] : null })
+          .catch((e) => console.warn('[atproto] profile import failed:', describe(e)))
+        after(() => imported)
         const at = await createAtSession({ did, accountId: account.accountId, kind: 'oauth' })
+        await Promise.race([imported, new Promise((r) => setTimeout(r, PROFILE_IMPORT_GRACE_MS))])
         return redirectTo(state.next, at.setCookie)
       }
       case 'link':

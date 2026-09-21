@@ -2,45 +2,74 @@
 
 import * as React from 'react'
 import Link from 'next/link'
-import { CheckCircle, FileText, Info, Loader2, Upload } from 'lucide-react'
+import { FileText, Info, Upload } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
-import { Badge } from '@/components/ui/badge'
+import { Label } from '@/components/ui/label'
+import { Select } from '@/components/ui/select'
+import { RemovableChip } from '@/components/ui/removable-chip'
+import { SegmentedControl } from '@/components/ui/segmented-control'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import { PageHeader } from '@/components/PageHeader'
+import { SuccessPanel } from '@/components/SuccessPanel'
 import { useEvent, useEventRole } from '@/contexts/EventContext'
 import { CSVSessionImport } from '@/components/admin/CSVSessionImport'
 import { apiFetch, ApiError } from '@/lib/api/client'
 import { formatInEventTimezone } from '@/lib/events/timezone'
+import { plural } from '@/lib/format'
+import { sessionStatusLabel } from '@/lib/labels'
+import { allowedDurationOptions, allowedFormatOptions, durationLabel, MAX_TAGS } from '@/lib/sessions/constants'
 import { cn } from '@/lib/utils'
 import type { AdminTimeSlot, AdminTrack, AdminVenue } from '@/components/admin/types'
-
-const FORMAT_DESCRIPTIONS: Record<string, string> = {
-  talk: 'A presentation or lecture',
-  workshop: 'Hands-on interactive session',
-  discussion: 'Open group conversation',
-  panel: 'Multiple speakers discussing',
-  demo: 'Live demonstration',
-  fireside: 'An interview-style conversation',
-  ceremony: 'Opening, closing or ritual',
-}
 
 const STATUSES = [
   { value: 'approved', label: 'Approved', description: 'Ready for voting and scheduling' },
   { value: 'scheduled', label: 'Scheduled', description: 'Placed in a slot now' },
-  { value: 'pending', label: 'Pending', description: 'Awaiting review' },
+  { value: 'pending', label: 'Awaiting review', description: 'Reviewed later' },
 ] as const
+
+type Mode = 'single' | 'bulk'
+
+/** A selectable option card (format, duration, status, track). */
+function OptionButton({
+  selected,
+  onClick,
+  className,
+  children,
+}: {
+  selected: boolean
+  onClick: () => void
+  className?: string
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={selected}
+      onClick={onClick}
+      className={cn(
+        'rounded-xl border p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
+        selected ? 'border-primary bg-primary/10' : 'border-border hover:border-muted-foreground/50',
+        className
+      )}
+    >
+      {children}
+    </button>
+  )
+}
 
 export default function AdminCreateSessionPage() {
   const event = useEvent()
   const { can } = useEventRole()
   const base = `/api/v1/events/${event.slug}/admin`
-  const formats = event.allowedFormats.length ? event.allowedFormats : ['talk', 'workshop', 'discussion', 'panel', 'demo']
-  const durations = event.allowedDurations.length ? [...event.allowedDurations].sort((a, b) => a - b) : [15, 30, 60, 90]
+  const formats = React.useMemo(() => allowedFormatOptions(event.allowedFormats), [event.allowedFormats])
+  const durations = React.useMemo(() => allowedDurationOptions(event.allowedDurations), [event.allowedDurations])
 
   const [title, setTitle] = React.useState('')
   const [description, setDescription] = React.useState('')
-  const [format, setFormat] = React.useState(formats[0])
+  const [format, setFormat] = React.useState(formats[0]?.value ?? 'talk')
   const [duration, setDuration] = React.useState(durations.includes(60) ? 60 : durations[0])
   const [status, setStatus] = React.useState<(typeof STATUSES)[number]['value']>('approved')
   const [trackId, setTrackId] = React.useState<string | null>(null)
@@ -55,7 +84,7 @@ export default function AdminCreateSessionPage() {
   const [timeSlots, setTimeSlots] = React.useState<AdminTimeSlot[]>([])
   const [loadError, setLoadError] = React.useState<string | null>(null)
 
-  const [mode, setMode] = React.useState<'single' | 'bulk'>('single')
+  const [mode, setMode] = React.useState<Mode>('single')
   const [isSubmitting, setIsSubmitting] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
   const [created, setCreated] = React.useState<{ id: string; title: string; status: string } | null>(null)
@@ -80,7 +109,7 @@ export default function AdminCreateSessionPage() {
 
   const addTag = (tag: string) => {
     const normalized = tag.toLowerCase().trim()
-    if (normalized && !tags.includes(normalized) && tags.length < 5) setTags([...tags, normalized])
+    if (normalized && !tags.includes(normalized) && tags.length < MAX_TAGS) setTags([...tags, normalized])
     setCustomTag('')
   }
 
@@ -93,20 +122,22 @@ export default function AdminCreateSessionPage() {
     setCreated(null)
     setTitle('')
     setDescription('')
-    setFormat(formats[0])
+    setFormat(formats[0]?.value ?? 'talk')
+    setDuration(durations.includes(60) ? 60 : durations[0])
     setStatus('approved')
     setTrackId(null)
     setTags([])
     setListedName('')
     setVenueId(null)
     setTimeSlotId(null)
+    setError(null)
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setError(null)
-    if (!title.trim()) { setError('Title is required'); return }
-    if (status === 'scheduled' && !timeSlotId) { setError('Choose a room and a free time slot for a scheduled session'); return }
+    if (!title.trim()) { setError('Give the session a title.'); return }
+    if (status === 'scheduled' && !timeSlotId) { setError('Choose a room and a free time slot for a scheduled session.'); return }
     setIsSubmitting(true)
     try {
       const res = await apiFetch<{ id: string; status: string }>(`${base}/sessions`, {
@@ -125,81 +156,85 @@ export default function AdminCreateSessionPage() {
       })
       setCreated({ id: res.id, title: title.trim(), status: res.status })
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'The session could not be created.')
+      setError(err instanceof ApiError ? err.message : 'The session could not be created. Please try again.')
     } finally {
       setIsSubmitting(false)
     }
   }
 
   if (!can('manageSchedule')) {
-    return <Card><CardContent className="py-8 text-center text-muted-foreground">Only owners and admins can add sessions.</CardContent></Card>
+    return (
+      <Card>
+        <CardContent className="p-8">
+          <PageHeader title="Organizer access required" subtitle="Only this gathering’s owner and admins can add sessions." className="mb-5" />
+          <Button asChild variant="outline"><Link href={`/e/${event.slug}`}>Return to the gathering</Link></Button>
+        </CardContent>
+      </Card>
+    )
   }
 
   if (created) {
     return (
-      <div className="max-w-md mx-auto">
-        <Card>
-          <CardHeader className="text-center">
-            <div className="flex justify-center mb-4"><div className="rounded-full bg-green-500/10 p-4"><CheckCircle className="h-12 w-12 text-green-500" aria-hidden /></div></div>
-            <CardTitle className="text-2xl">Session created</CardTitle>
-            <CardDescription>&ldquo;{created.title}&rdquo; is {created.status}.</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="flex gap-3">
-              <Button variant="outline" className="flex-1" asChild><Link href={`/e/${event.slug}/sessions/${created.id}`}>View session</Link></Button>
-              <Button className="flex-1" onClick={reset}>Create another</Button>
-            </div>
-            <Button variant="ghost" className="w-full" asChild><Link href={`/e/${event.slug}/admin`}>Back to overview</Link></Button>
-          </CardContent>
-        </Card>
+      <div className="max-w-2xl">
+        <SuccessPanel
+          title="Session created"
+          body={`“${created.title}” is ${sessionStatusLabel(created.status).toLowerCase()}.`}
+          primary={<Button asChild><Link href={`/e/${event.slug}/sessions/${created.id}`}>View session</Link></Button>}
+          secondary={<Button variant="outline" onClick={reset}>Add another</Button>}
+        />
+        <div className="mt-4 text-center">
+          <Button variant="link" asChild><Link href={`/e/${event.slug}/admin`}>Back to overview</Link></Button>
+        </div>
       </div>
     )
   }
 
+  const tagsFull = tags.length >= MAX_TAGS
+
   return (
     <div className="max-w-2xl">
+      <PageHeader title="Add a session" subtitle={`Add a curated session to ${event.name}.`} />
+
       <div className="mb-6">
-        <h1 className="text-2xl font-display font-bold">Add a session</h1>
-        <p className="text-muted-foreground mt-1">Add a curated session for {event.name}</p>
+        <SegmentedControl<Mode>
+          aria-label="How to add sessions"
+          value={mode}
+          onValueChange={setMode}
+          options={[
+            { value: 'single', label: 'Single session', icon: <FileText className="h-4 w-4" aria-hidden /> },
+            { value: 'bulk', label: 'Import CSV', icon: <Upload className="h-4 w-4" aria-hidden /> },
+          ]}
+        />
       </div>
 
-      <div className="flex gap-2 mb-6" role="tablist" aria-label="How to add sessions">
-        {([['single', 'Single session', FileText], ['bulk', 'Import CSV', Upload]] as const).map(([value, label, Icon]) => (
-          <button
-            key={value}
-            type="button"
-            role="tab"
-            aria-selected={mode === value}
-            onClick={() => setMode(value)}
-            className={cn('flex items-center gap-2 px-4 py-2 rounded-lg border transition-colors', mode === value ? 'border-primary bg-primary/10 text-primary' : 'border-muted hover:border-muted-foreground/50')}
-          >
-            <Icon className="h-4 w-4" aria-hidden />
-            {label}
-          </button>
-        ))}
-      </div>
+      {loadError && (
+        <p role="alert" className="mb-4 rounded-lg border border-destructive/20 bg-destructive/10 p-3 text-sm text-destructive">{loadError}</p>
+      )}
 
-      {loadError && <p role="alert" className="mb-4 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">{loadError}</p>}
-
-      <div className="mb-6 flex gap-3 rounded-lg border bg-muted/40 p-4 text-sm">
-        <Info className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" aria-hidden />
+      <div className="mb-6 flex gap-3 rounded-xl border bg-muted/40 p-4 text-sm">
+        <Info className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
         <p className="text-muted-foreground">
-          Sessions you add have no host account: nobody&rsquo;s name goes on a public record they did not write. You can note the speaker as &ldquo;listed as&rdquo; — organizers see it, attendees and the network never do. When the speaker signs in and proposes the session themselves, it becomes theirs.
+          Sessions you add have no host account: nobody’s name goes on a public record they did not write. You can note the speaker as “listed as” — organizers see it, attendees and the network never do. When the speaker signs in and proposes the session themselves, it becomes theirs.
         </p>
       </div>
 
-      {bulkImportCount > 0 && mode === 'bulk' && (
-        <div role="status" className="mb-6 p-4 bg-green-500/10 border border-green-500/20 rounded-lg flex items-center gap-3">
-          <CheckCircle className="h-5 w-5 text-green-500" aria-hidden />
-          <div>
-            <p className="font-medium text-green-700 dark:text-green-300">Imported {bulkImportCount} session{bulkImportCount === 1 ? '' : 's'}</p>
-            <Link href={`/e/${event.slug}/admin`} className="text-sm text-green-600 dark:text-green-400 hover:underline">View all sessions</Link>
-          </div>
-        </div>
-      )}
-
       {mode === 'bulk' ? (
-        <CSVSessionImport eventSlug={event.slug} tracks={tracks} allowedFormats={formats} onImportComplete={(count) => setBulkImportCount((n) => n + count)} />
+        <div>
+          {bulkImportCount > 0 && (
+            <Alert variant="success" className="mb-6">
+              <AlertTitle>Imported {plural(bulkImportCount, 'session')}</AlertTitle>
+              <AlertDescription>
+                <Link href={`/e/${event.slug}/admin`} className="underline underline-offset-4 hover:text-foreground">View all sessions</Link>
+              </AlertDescription>
+            </Alert>
+          )}
+          <CSVSessionImport
+            eventSlug={event.slug}
+            tracks={tracks}
+            allowedFormats={formats.map((f) => f.value)}
+            onImportComplete={(count) => setBulkImportCount((n) => n + count)}
+          />
+        </div>
       ) : (
         <Card>
           <CardHeader>
@@ -207,129 +242,133 @@ export default function AdminCreateSessionPage() {
             <CardDescription>Create a session with its status, track and (optionally) a time slot.</CardDescription>
           </CardHeader>
           <CardContent>
-            <form onSubmit={handleSubmit} className="space-y-6">
+            <form onSubmit={handleSubmit} className="space-y-6" noValidate>
               <div className="space-y-2">
-                <label htmlFor="session-title" className="text-sm font-medium">Title <span className="text-destructive">*</span></label>
-                <Input id="session-title" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Session title" maxLength={200} />
+                <Label htmlFor="session-title">Title</Label>
+                <Input id="session-title" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Session title" maxLength={200} required />
               </div>
 
               <div className="space-y-2">
-                <label htmlFor="session-description" className="text-sm font-medium">Description</label>
+                <Label htmlFor="session-description">Description (optional)</Label>
                 <Textarea id="session-description" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Describe the session…" rows={4} maxLength={5000} />
               </div>
 
               <div className="space-y-2">
-                <label htmlFor="session-listed" className="text-sm font-medium">Speaker (listed as)</label>
-                <Input id="session-listed" value={listedName} onChange={(e) => setListedName(e.target.value)} placeholder="Optional — e.g., Alice Smith" maxLength={200} />
-                <p className="text-xs text-muted-foreground">Visible to organizers only. Never shown to attendees or published.</p>
+                <Label htmlFor="session-listed">Speaker, listed as (optional)</Label>
+                <Input id="session-listed" value={listedName} onChange={(e) => setListedName(e.target.value)} placeholder="e.g. Alice Smith" maxLength={200} />
               </div>
 
               <fieldset className="space-y-2">
-                <legend className="text-sm font-medium">Format</legend>
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                <legend className="text-sm font-medium leading-none">Format</legend>
+                <div className="grid grid-cols-2 gap-3 pt-2 sm:grid-cols-3">
                   {formats.map((f) => (
-                    <button key={f} type="button" aria-pressed={format === f} onClick={() => setFormat(f)} className={cn('p-3 rounded-lg border text-left transition-colors', format === f ? 'border-primary bg-primary/10' : 'hover:border-muted-foreground/50')}>
-                      <div className="font-medium text-sm capitalize">{f}</div>
-                      {FORMAT_DESCRIPTIONS[f] && <div className="text-xs text-muted-foreground">{FORMAT_DESCRIPTIONS[f]}</div>}
-                    </button>
+                    <OptionButton key={f.value} selected={format === f.value} onClick={() => setFormat(f.value)}>
+                      <div className="text-sm font-medium">{f.label}</div>
+                      <div className="text-xs text-muted-foreground">{f.description}</div>
+                    </OptionButton>
                   ))}
                 </div>
               </fieldset>
 
               <fieldset className="space-y-2">
-                <legend className="text-sm font-medium">Duration</legend>
-                <div className="flex flex-wrap gap-2">
+                <legend className="text-sm font-medium leading-none">Duration</legend>
+                <div className="grid grid-cols-3 gap-3 pt-2 sm:grid-cols-4">
                   {durations.map((d) => (
-                    <button key={d} type="button" aria-pressed={duration === d} onClick={() => setDuration(d)} className={cn('px-4 py-2 rounded-lg border transition-colors', duration === d ? 'border-primary bg-primary/10' : 'hover:border-muted-foreground/50')}>
-                      {d} min
-                    </button>
+                    <OptionButton key={d} selected={duration === d} onClick={() => setDuration(d)} className="text-center text-sm">
+                      {durationLabel(d)}
+                    </OptionButton>
                   ))}
                 </div>
               </fieldset>
 
               <fieldset className="space-y-2">
-                <legend className="text-sm font-medium">Status</legend>
-                <div className="grid grid-cols-3 gap-2">
+                <legend className="text-sm font-medium leading-none">Status</legend>
+                <div className="grid grid-cols-1 gap-3 pt-2 sm:grid-cols-3">
                   {STATUSES.map((s) => (
-                    <button
+                    <OptionButton
                       key={s.value}
-                      type="button"
-                      aria-pressed={status === s.value}
+                      selected={status === s.value}
                       onClick={() => { setStatus(s.value); if (s.value !== 'scheduled') { setVenueId(null); setTimeSlotId(null) } }}
-                      className={cn('p-3 rounded-lg border text-left transition-colors', status === s.value ? 'border-primary bg-primary/10' : 'hover:border-muted-foreground/50')}
                     >
-                      <div className="font-medium text-sm">{s.label}</div>
+                      <div className="text-sm font-medium">{s.label}</div>
                       <div className="text-xs text-muted-foreground">{s.description}</div>
-                    </button>
+                    </OptionButton>
                   ))}
                 </div>
-              </fieldset>
-
-              {status === 'scheduled' && (
-                <div className="space-y-4 p-4 border rounded-lg bg-muted/50">
-                  <div className="space-y-2">
-                    <label htmlFor="session-venue" className="text-sm font-medium">Room</label>
-                    <select id="session-venue" value={venueId || ''} onChange={(e) => { setVenueId(e.target.value || null); setTimeSlotId(null) }} className="w-full rounded-lg border bg-background px-3 py-2 text-sm">
-                      <option value="">Select a room…</option>
-                      {venues.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
-                    </select>
-                  </div>
-                  {venueId && (
+                {status === 'scheduled' && (
+                  <div className="mt-3 space-y-4 rounded-xl border bg-muted/40 p-4">
                     <div className="space-y-2">
-                      <label htmlFor="session-slot" className="text-sm font-medium">Free time slot</label>
-                      <select id="session-slot" value={timeSlotId || ''} onChange={(e) => setTimeSlotId(e.target.value || null)} className="w-full rounded-lg border bg-background px-3 py-2 text-sm">
-                        <option value="">Select a time…</option>
-                        {freeSlots.map((slot) => (
-                          <option key={slot.id} value={slot.id}>
-                            {formatInEventTimezone(new Date(slot.start_time), event.timezone, 'datetime')}–{formatInEventTimezone(new Date(slot.end_time), event.timezone, 'time')}{slot.label ? ` (${slot.label})` : ''}
-                          </option>
-                        ))}
-                      </select>
-                      {freeSlots.length === 0 && <p className="text-xs text-muted-foreground">No free slots in this room</p>}
+                      <Label htmlFor="session-venue">Room</Label>
+                      <Select id="session-venue" value={venueId || ''} onChange={(e) => { setVenueId(e.target.value || null); setTimeSlotId(null) }}>
+                        <option value="">Select a room…</option>
+                        {venues.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
+                      </Select>
                     </div>
-                  )}
-                </div>
-              )}
+                    {venueId && (
+                      <div className="space-y-2">
+                        <Label htmlFor="session-slot">Free time slot</Label>
+                        <Select id="session-slot" value={timeSlotId || ''} onChange={(e) => setTimeSlotId(e.target.value || null)} disabled={freeSlots.length === 0}>
+                          <option value="">Select a time…</option>
+                          {freeSlots.map((slot) => (
+                            <option key={slot.id} value={slot.id}>
+                              {formatInEventTimezone(new Date(slot.start_time), event.timezone, 'datetime')}–{formatInEventTimezone(new Date(slot.end_time), event.timezone, 'time')}{slot.label ? ` (${slot.label})` : ''}
+                            </option>
+                          ))}
+                        </Select>
+                        {freeSlots.length === 0 && <p className="text-xs text-muted-foreground">No free slots in this room.</p>}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </fieldset>
 
               {tracks.length > 0 && (
                 <fieldset className="space-y-2">
-                  <legend className="text-sm font-medium">Track</legend>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                    <button type="button" aria-pressed={trackId === null} onClick={() => setTrackId(null)} className={cn('px-3 py-2 rounded-lg border text-sm transition-colors text-left', trackId === null ? 'border-primary bg-primary/10' : 'hover:border-muted-foreground/50')}>None</button>
+                  <legend className="text-sm font-medium leading-none">Track (optional)</legend>
+                  <div className="grid grid-cols-2 gap-3 pt-2 sm:grid-cols-3">
+                    <OptionButton selected={trackId === null} onClick={() => setTrackId(null)} className="text-sm">None</OptionButton>
                     {tracks.map((track) => (
-                      <button key={track.id} type="button" aria-pressed={trackId === track.id} onClick={() => setTrackId(track.id)} className={cn('px-3 py-2 rounded-lg border text-sm transition-colors text-left flex items-center gap-2', trackId === track.id ? 'border-primary bg-primary/10' : 'hover:border-muted-foreground/50')}>
-                        {track.color && <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: track.color }} aria-hidden />}
+                      <OptionButton key={track.id} selected={trackId === track.id} onClick={() => setTrackId(track.id)} className="flex items-center gap-2 text-sm">
+                        {track.color && <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: track.color }} aria-hidden />}
                         <span className="truncate">{track.name}</span>
-                      </button>
+                      </OptionButton>
                     ))}
                   </div>
                 </fieldset>
               )}
 
               <div className="space-y-2">
-                <label htmlFor="session-tag" className="text-sm font-medium">Tags (up to 5)</label>
-                <div className="flex flex-wrap gap-1.5 mb-2">
-                  {tags.map((tag) => (
-                    <Badge key={tag} variant="secondary" className="gap-1">
-                      {tag}
-                      <button type="button" onClick={() => setTags(tags.filter((t) => t !== tag))} aria-label={`Remove tag ${tag}`}>×</button>
-                    </Badge>
-                  ))}
-                </div>
+                <Label htmlFor="session-tag">Tags (optional)</Label>
+                {tags.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5">
+                    {tags.map((tag) => (
+                      <RemovableChip key={tag} label={tag} onRemove={() => setTags(tags.filter((t) => t !== tag))} />
+                    ))}
+                  </div>
+                )}
                 <div className="flex gap-2">
-                  <Input id="session-tag" value={customTag} onChange={(e) => setCustomTag(e.target.value)} placeholder="Add a tag…" maxLength={40} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addTag(customTag) } }} />
-                  <Button type="button" variant="outline" onClick={() => addTag(customTag)} disabled={!customTag.trim() || tags.length >= 5}>Add</Button>
+                  <Input
+                    id="session-tag"
+                    value={customTag}
+                    onChange={(e) => setCustomTag(e.target.value)}
+                    placeholder="Add a tag…"
+                    maxLength={40}
+                    disabled={tagsFull}
+                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addTag(customTag) } }}
+                    aria-describedby="session-tag-count"
+                  />
+                  <Button type="button" variant="outline" onClick={() => addTag(customTag)} disabled={!customTag.trim() || tagsFull}>Add</Button>
                 </div>
+                <p id="session-tag-count" className="text-xs text-muted-foreground">
+                  {tagsFull ? `${MAX_TAGS} of ${MAX_TAGS} tags used. Remove one to add another.` : `${tags.length} of ${MAX_TAGS} tags used.`}
+                </p>
               </div>
 
-              {error && <div role="alert" className="rounded-lg bg-destructive/10 border border-destructive/20 p-3 text-sm text-destructive">{error}</div>}
+              {error && <div role="alert" className="rounded-lg border border-destructive/20 bg-destructive/10 p-3 text-sm text-destructive">{error}</div>}
 
-              <div className="flex gap-3">
-                <Button type="button" variant="outline" className="flex-1" asChild><Link href={`/e/${event.slug}/admin`}>Cancel</Link></Button>
-                <Button type="submit" className="flex-1" disabled={isSubmitting}>
-                  {isSubmitting && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-                  Create session
-                </Button>
+              <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+                <Button type="button" variant="outline" asChild><Link href={`/e/${event.slug}/admin`}>Cancel</Link></Button>
+                <Button type="submit" loading={isSubmitting}>Create session</Button>
               </div>
             </form>
           </CardContent>

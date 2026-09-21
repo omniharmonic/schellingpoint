@@ -2,10 +2,12 @@
 
 import * as React from 'react'
 import Link from 'next/link'
-import { ArrowLeft, Mail, Bell, Smartphone, Loader2 } from 'lucide-react'
-import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Mail, Bell, Smartphone, Loader2, ChevronRight } from 'lucide-react'
+import { Card, CardContent } from '@/components/ui/card'
+import { Switch } from '@/components/ui/switch'
+import { useToast } from '@/components/ui/toast'
 import { DashboardLayout } from '@/components/DashboardLayout'
+import { PageHeader } from '@/components/PageHeader'
 import { useEvent, useEventRole } from '@/contexts/EventContext'
 import {
   NOTIFICATION_CATEGORIES,
@@ -15,160 +17,90 @@ import {
   type NotificationChannel,
   type NotificationPreference,
 } from '@/hooks/useNotificationPreferences'
-import { cn } from '@/lib/utils'
 
-function Toggle({
-  enabled,
-  onChange,
-  disabled,
-  saving,
-  label,
-}: {
-  enabled: boolean
-  onChange: () => void
-  disabled?: boolean
-  saving?: boolean
-  label: string
-}) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={enabled}
-      aria-label={label}
-      onClick={onChange}
-      disabled={disabled || saving}
-      className={cn(
-        'relative inline-flex h-6 w-11 items-center rounded-full transition-colors',
-        enabled ? 'bg-primary' : 'bg-muted',
-        (disabled || saving) && 'opacity-50 cursor-not-allowed',
-      )}
-    >
-      <span
-        className={cn(
-          'inline-block h-4 w-4 transform rounded-full bg-white transition-transform',
-          enabled ? 'translate-x-6' : 'translate-x-1',
-        )}
-      />
-      {saving && <Loader2 className="absolute right-1 h-3 w-3 animate-spin text-white" />}
-    </button>
-  )
-}
+/** One responsive grid for the header and every row: stacked on phones, four columns from `sm`. */
+const ROW_GRID = 'grid gap-3 sm:grid-cols-[minmax(0,1fr)_5rem_5rem_6rem] sm:items-center'
 
-function PreferenceRow({
-  category,
-  pref,
-  saving,
-  onToggle,
-}: {
+const CHANNELS: { key: NotificationChannel; label: string; icon: React.ComponentType<{ className?: string }>; comingSoon?: boolean }[] = [
+  { key: 'email_enabled', label: 'Email', icon: Mail },
+  { key: 'in_app_enabled', label: 'In-app', icon: Bell },
+  { key: 'push_enabled', label: 'Push', icon: Smartphone, comingSoon: true },
+]
+
+function PreferenceRow({ category, pref, saving, onToggle }: {
   category: NotificationCategory
   pref: NotificationPreference
   saving: boolean
   onToggle: (category: NotificationCategory, channel: NotificationChannel) => void
 }) {
   const info = categoryInfo[category]
-  return (
-    <div className="flex items-center justify-between py-4 border-b border-border last:border-b-0">
-      <div className="flex-1 mr-4">
-        <h4 className="font-medium text-sm">{info.label}</h4>
-        <p className="text-xs text-muted-foreground mt-0.5">{info.description}</p>
-      </div>
-      <div className="flex items-center gap-6">
-        <Toggle
-          label={`${info.label}: email`}
-          enabled={pref.email_enabled}
-          onChange={() => onToggle(category, 'email_enabled')}
-          saving={saving}
-        />
-        <Toggle
-          label={`${info.label}: in-app`}
-          enabled={pref.in_app_enabled}
-          onChange={() => onToggle(category, 'in_app_enabled')}
-          saving={saving}
-        />
-        <Toggle label={`${info.label}: push (coming soon)`} enabled={pref.push_enabled} onChange={() => {}} disabled />
-      </div>
+  return <div className={`${ROW_GRID} border-b border-border py-4 last:border-b-0`}>
+    <div className="min-w-0">
+      <h3 className="text-sm font-medium">{info.label}</h3>
+      <p className="mt-0.5 text-xs text-muted-foreground">{info.description}</p>
     </div>
-  )
+    {CHANNELS.map(channel => {
+      const id = `${category}-${channel.key}`
+      return <div key={channel.key} className="flex items-center gap-2 sm:justify-center">
+        <Switch id={id} checked={pref[channel.key]} onCheckedChange={() => onToggle(category, channel.key)} disabled={saving || channel.comingSoon} aria-labelledby={`${id}-label`} />
+        <label id={`${id}-label`} htmlFor={id} className="text-xs text-muted-foreground sm:sr-only">
+          {channel.label}{channel.comingSoon ? ' (coming soon)' : ''}
+        </label>
+      </div>
+    })}
+  </div>
 }
 
 export default function NotificationSettingsPage() {
   const event = useEvent()
   const { isAdmin, can } = useEventRole()
+  const { toast } = useToast()
   // One hook instance for the whole page, so every row sees the same state.
-  const { isLoading, error, getPreference, toggleChannel, savingCategory } = useNotificationPreferences({
-    eventSlug: event.slug,
-  })
+  const { isLoading, error, getPreference, toggleChannel, savingCategory } = useNotificationPreferences({ eventSlug: event.slug })
+
+  // The hook swallows the outcome of a save; a save has finished when `savingCategory`
+  // returns to null, and `error` is set in the same render when it failed.
+  const previousSaving = React.useRef<NotificationCategory | null>(null)
+  React.useEffect(() => {
+    if (previousSaving.current && !savingCategory) {
+      if (error) toast({ title: 'Could not save that preference', description: 'Your previous choice is still in place. Try again.', variant: 'destructive' })
+      else toast({ title: 'Preferences saved', variant: 'success' })
+    }
+    previousSaving.current = savingCategory
+  }, [savingCategory, error, toast])
 
   const showAdminAlerts = isAdmin || can('approveProposals')
-  const categories = NOTIFICATION_CATEGORIES.filter((c) => c !== 'admin_alerts' || showAdminAlerts)
+  const categories = NOTIFICATION_CATEGORIES.filter(c => c !== 'admin_alerts' || showAdminAlerts)
 
-  return (
-    <DashboardLayout>
-      <div className="space-y-6 max-w-2xl">
-        <div className="flex items-center gap-4">
-          <Button variant="ghost" size="sm" asChild>
-            <Link href={`/e/${event.slug}/dashboard`}>
-              <ArrowLeft className="h-4 w-4 mr-1" />
-              Back
-            </Link>
-          </Button>
-          <div>
-            <h1 className="text-2xl font-bold">Notification Settings</h1>
-            <p className="text-sm text-muted-foreground">Control how you receive notifications for {event.name}</p>
-          </div>
-        </div>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Notification Preferences</CardTitle>
-            <CardDescription>Choose which notifications you want to receive and how</CardDescription>
-          </CardHeader>
-          <CardContent>
-            {isLoading ? (
-              <div className="flex items-center justify-center py-8">
-                <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-              </div>
-            ) : (
-              <>
-                {error && <p className="text-sm text-destructive mb-4">{error}</p>}
-                <div className="flex items-center justify-between pb-4 mb-2 border-b border-border">
-                  <div className="flex-1" />
-                  <div className="flex items-center gap-6">
-                    <div className="flex flex-col items-center w-11">
-                      <Mail className="h-4 w-4 text-muted-foreground mb-1" />
-                      <span className="text-xs text-muted-foreground">Email</span>
-                    </div>
-                    <div className="flex flex-col items-center w-11">
-                      <Bell className="h-4 w-4 text-muted-foreground mb-1" />
-                      <span className="text-xs text-muted-foreground">In-app</span>
-                    </div>
-                    <div className="flex flex-col items-center w-11">
-                      <Smartphone className="h-4 w-4 text-muted-foreground mb-1" />
-                      <span className="text-xs text-muted-foreground">Push</span>
-                    </div>
-                  </div>
-                </div>
-
-                {categories.map((category) => (
-                  <PreferenceRow
-                    key={category}
-                    category={category}
-                    pref={getPreference(category)}
-                    saving={savingCategory === category}
-                    onToggle={toggleChannel}
-                  />
-                ))}
-
-                <p className="text-xs text-muted-foreground mt-4 pt-4 border-t border-border">
-                  Ticket confirmations are always emailed, since they are your receipt. Push notifications are not
-                  available yet.
-                </p>
-              </>
-            )}
-          </CardContent>
-        </Card>
-      </div>
-    </DashboardLayout>
-  )
+  return <DashboardLayout>
+    <div className="max-w-2xl">
+      <nav aria-label="Breadcrumb" className="mb-3 flex items-center gap-1 text-sm text-muted-foreground">
+        <Link href={`/e/${event.slug}/settings`} className="rounded hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Settings</Link>
+        <ChevronRight className="h-3.5 w-3.5" aria-hidden="true" />
+        <span aria-current="page" className="text-foreground">Notification preferences</span>
+      </nav>
+      <PageHeader title="Notification preferences" subtitle={`How you hear about ${event.name}. Each switch saves on its own.`} />
+      <Card>
+        <CardContent className="p-4 sm:p-6">
+          {isLoading ? <div className="flex items-center justify-center py-8" role="status" aria-label="Loading preferences">
+            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+          </div> : <>
+            {error && !savingCategory ? <p className="mb-4 rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive" role="alert">{error}</p> : null}
+            <div className={`${ROW_GRID} hidden border-b border-border pb-3 sm:grid`} aria-hidden="true">
+              <div />
+              {CHANNELS.map(channel => <div key={channel.key} className="flex flex-col items-center text-center">
+                <channel.icon className="mb-1 h-4 w-4 text-muted-foreground" />
+                <span className="text-xs text-muted-foreground">{channel.label}</span>
+                {channel.comingSoon ? <span className="text-[11px] leading-tight text-muted-foreground">Coming soon</span> : null}
+              </div>)}
+            </div>
+            {categories.map(category => <PreferenceRow key={category} category={category} pref={getPreference(category)} saving={savingCategory === category} onToggle={toggleChannel} />)}
+            <p className="mt-4 border-t border-border pt-4 text-xs text-muted-foreground">
+              Ticket confirmations are always emailed, since they are your receipt. Push notifications are not available yet.
+            </p>
+          </>}
+        </CardContent>
+      </Card>
+    </div>
+  </DashboardLayout>
 }

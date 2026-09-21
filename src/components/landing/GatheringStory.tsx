@@ -19,7 +19,7 @@ export function GatheringHero() {
     <div className="hero-intro">
       <h1>Bring people together. Let them shape it.</h1>
       <p>The event platform for shared agendas. Host a gathering, invite your people, and turn their ideas into a program.</p>
-      <div className="flex flex-wrap gap-3 mt-8"><Link href="/create" className="bold-cta">Create an event <Plus className="h-5 w-5"/></Link><a href="#how-it-works" className="bold-cta bold-cta-outline">See how it works <ArrowDown className="h-5 w-5"/></a></div>
+      <div className="flex flex-wrap gap-3 mt-8"><Link href="/create" className="bold-cta">Create a gathering <Plus className="h-5 w-5" aria-hidden="true"/></Link><a href="#how-it-works" className="bold-cta bold-cta-outline">See how it works <ArrowDown className="h-5 w-5" aria-hidden="true"/></a></div>
       <a href="#upcoming" className="inline-flex items-center gap-2 mt-7 text-sm font-semibold underline underline-offset-4">Find a gathering <ArrowUpRight className="h-4 w-4"/></a>
     </div>
     <div className="possibility-field">
@@ -87,6 +87,6 @@ export function GatheringStory() {
   return <section id="how-it-works" className="gathering-story">
     <div className="story-heading"><h2>A program shaped<br/>by the people in it.</h2><p>From “what if” to “see you there.”<br/>Here’s how it comes together.</p></div>
     <div className="story-layout"><div className="story-stage"><nav aria-label="How it works chapters" className="story-chapters">{chapters.map((chapter, i) => <a key={chapter.name} href={`#chapter-${i}`} onClick={() => { interacting.current = false; setActive(i) }} aria-current={active === i ? 'step' : undefined}><span>{i + 1}</span>{chapter.name}</a>)}</nav>{demo(active)}</div><div className="story-copy">{chapters.map((chapter, i) => <article key={chapter.name} id={`chapter-${i}`} ref={el => { steps.current[i] = el }} className={cn('story-chapter', active === i && 'is-active')}><div className="chapter-number" aria-hidden="true">0{i + 1}</div><h3>{chapter.title}</h3><p>{chapter.text}</p><p className="chapter-detail">{chapter.detail}</p><div className="chapter-prompt"><ArrowDown className="h-4 w-4"/>{chapter.prompt}</div><div className="story-mobile-demo">{demo(i, true)}</div></article>)}</div></div>
-    <div className="story-closing"><p>The structure holds the space.<br/>The people make the gathering.</p><Link href="/create" className="bold-cta">Make space for your people <ArrowUpRight className="h-5 w-5"/></Link></div>
+    <div className="story-closing"><p>The structure holds the space.<br/>The people make the gathering.</p><Link href="/create" className="bold-cta">Create a gathering <ArrowUpRight className="h-5 w-5" aria-hidden="true"/></Link></div>
   </section>
 }

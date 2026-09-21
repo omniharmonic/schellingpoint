@@ -8,6 +8,7 @@ import { parseTimeInTimezone } from '@/lib/events/timezone'
 import {
   HEX_COLOR,
   InputError,
+  SESSION_FORMATS,
   SKILL_URI,
   SLOT_TYPES,
   integer,
@@ -31,6 +32,8 @@ export interface VenueInput {
   is_private_residence: boolean
   notes: string | null
   is_primary: boolean
+  /** Formats this room may host; empty = all (migration 0018). */
+  allowed_formats: string[]
 }
 
 const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
@@ -70,7 +73,15 @@ export function parseVenue(body: Record<string, unknown>, current?: VenueInput):
     is_private_residence: has('is_private_residence') ? bool(body, 'is_private_residence', false) : current!.is_private_residence,
     notes: has('notes') ? text(body, 'notes', { max: 1000, label: 'Notes' }) : current!.notes,
     is_primary: has('is_primary') ? bool(body, 'is_primary', false) : current!.is_primary,
+    allowed_formats: has('allowed_formats') ? parseAllowedFormats(body) : current!.allowed_formats,
   }
+}
+
+function parseAllowedFormats(body: Record<string, unknown>): string[] {
+  const list = stringList(body, 'allowed_formats', { maxItems: SESSION_FORMATS.length, maxLength: 20, label: 'Allowed formats' }) ?? []
+  const unknown = list.filter((f) => !(SESSION_FORMATS as readonly string[]).includes(f))
+  if (unknown.length > 0) throw new InputError(`Allowed formats must be among ${SESSION_FORMATS.join(', ')}`, 'allowed_formats')
+  return list
 }
 
 export interface EventWindow {

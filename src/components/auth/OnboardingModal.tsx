@@ -11,7 +11,6 @@ import {
   Send,
   Mail,
   Plus,
-  X,
   Upload,
   ChevronRight,
   ChevronLeft,
@@ -20,12 +19,12 @@ import {
   Heart,
   Mic,
   Calendar,
-  Coins,
-  Brain,
+  Check,
 } from 'lucide-react'
 import type { Profile } from '@/hooks/useAuth'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { FilterChip } from '@/components/ui/filter-chip'
 import { cn } from '@/lib/utils'
 import { apiFetch } from '@/lib/api/client'
 import { PROFILE_INPUT_LIMITS, uploadAvatar, useInterestSuggestions } from '@/components/SettingsModal'
@@ -48,40 +47,39 @@ interface OnboardingModalProps {
 const ONBOARDING_MAX_INTERESTS = 5
 const SUGGESTION_CHIPS = 12
 
-// Intro slides explaining the app
+// Intro slides explaining the app. Colours are tokens (primary, favorite, signal-cyan).
 const introSlides = [
   {
     icon: Users,
-    iconBg: 'bg-primary/20',
+    iconBg: 'bg-primary/15',
     iconColor: 'text-primary',
     title: 'You belong in the conversation.',
-    description: 'A gathering where everyone helps shape the program. Let\'s show you how it works.',
+    description: 'A gathering where everyone helps shape the program. Let’s show you how it works.',
   },
   {
     icon: Vote,
-    iconBg: 'bg-blue-500/20',
-    iconColor: 'text-blue-500',
-    title: 'Vote on Sessions',
-    description: 'Use your event credits to support the sessions you want to attend.',
-    tip: 'Votes save automatically - no submit button needed!',
+    iconBg: 'bg-primary/15',
+    iconColor: 'text-primary',
+    title: 'Vote on sessions',
+    description: 'Use your credits to support the sessions you want to attend.',
+    tip: 'Votes save automatically — there is no submit button.',
   },
   {
     icon: Heart,
-    iconBg: 'bg-red-500/20',
-    iconColor: 'text-red-500',
-    title: 'Save Your Favorites',
-    description: 'Tap the heart to save sessions to "My Schedule". This is separate from voting - it\'s your personal bookmark for sessions you plan to attend.',
-    tip: 'Favorites don\'t cost credits and don\'t affect voting.',
+    iconBg: 'bg-favorite/15',
+    iconColor: 'text-favorite',
+    title: 'Save your favorites',
+    description: 'Tap the heart to save sessions to “My schedule”. This is separate from voting — it’s your personal bookmark for sessions you plan to attend.',
+    tip: 'Favorites don’t cost credits and don’t affect voting.',
   },
   {
     icon: Mic,
-    iconBg: 'bg-purple-500/20',
-    iconColor: 'text-purple-500',
-    title: 'Propose a Session',
-    description: 'Have something to share? Propose your own session! Choose a format (talk, workshop, discussion, panel, or demo) and submit for review.',
-    tip: 'Sessions are reviewed by admins before appearing for voting.',
+    iconBg: 'bg-signal-cyan/15',
+    iconColor: 'text-signal-cyan',
+    title: 'Propose a session',
+    description: 'Have something to share? Propose your own session: choose a format (talk, workshop, discussion, panel or demo) and submit it.',
+    tip: 'Organizers review proposals before opening them for voting.',
   },
-
 ]
 
 export function OnboardingModal({ email, initialProfile, onComplete, suggestedTopics, voteCredits = 100, votingMechanism = 'quadratic', requireProposalApproval = true }: OnboardingModalProps) {
@@ -113,6 +111,7 @@ export function OnboardingModal({ email, initialProfile, onComplete, suggestedTo
   const [isUploading, setIsUploading] = React.useState(false)
   const [isSubmitting, setIsSubmitting] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
+  const fileInputRef = React.useRef<HTMLInputElement>(null)
 
   // Form state
   const [displayName, setDisplayName] = React.useState(initialProfile?.display_name ?? '')
@@ -204,6 +203,8 @@ export function OnboardingModal({ email, initialProfile, onComplete, suggestedTo
     }
   }
 
+  const Optional = () => <span className="text-muted-foreground font-normal">(optional)</span>
+
   // Render intro slide
   const renderIntroSlide = () => {
     const slide = slides[step - 1]
@@ -212,7 +213,7 @@ export function OnboardingModal({ email, initialProfile, onComplete, suggestedTo
     return (
       <div className="text-center py-2 sm:py-4">
         <div className={cn('inline-flex p-3 sm:p-4 rounded-full mb-3 sm:mb-4', slide.iconBg)}>
-          <IconComponent className={cn('h-8 w-8 sm:h-10 sm:w-10', slide.iconColor)} />
+          <IconComponent className={cn('h-8 w-8 sm:h-10 sm:w-10', slide.iconColor)} aria-hidden="true" />
         </div>
         <h3 className="text-lg sm:text-xl font-bold mb-2 sm:mb-3">{slide.title}</h3>
         <p className="text-muted-foreground text-sm sm:text-base mb-3 sm:mb-4">{slide.description}</p>
@@ -232,43 +233,41 @@ export function OnboardingModal({ email, initialProfile, onComplete, suggestedTo
         return (
           <div className="space-y-4">
             <div className="space-y-2">
-              <label className="text-sm font-medium flex items-center gap-2">
-                <User className="h-4 w-4" />
-                Profile Photo <span className="text-muted-foreground font-normal">(optional)</span>
-              </label>
+              <p className="text-sm font-medium flex items-center gap-2" id="onboarding-photo-label">
+                <User className="h-4 w-4" aria-hidden="true" />
+                Photo <Optional />
+              </p>
               <div className="flex items-center gap-4">
                 <div className="h-20 w-20 rounded-full bg-muted flex items-center justify-center overflow-hidden border-2 border-dashed border-border">
                   {avatarUrl ? (
-                    <img src={avatarUrl} alt="Profile" className="h-full w-full object-cover" referrerPolicy="no-referrer" />
+                    <img src={avatarUrl} alt="" className="h-full w-full object-cover" referrerPolicy="no-referrer" />
                   ) : (
-                    <User className="h-10 w-10 text-muted-foreground" />
+                    <User className="h-10 w-10 text-muted-foreground" aria-hidden="true" />
                   )}
                 </div>
                 <div>
-                  <label htmlFor="photo-upload">
-                    <Button type="button" variant="outline" size="sm" asChild>
-                      <span className="cursor-pointer">
-                        <Upload className="h-4 w-4 mr-2" />
-                        {isUploading ? 'Uploading...' : 'Upload Photo'}
-                      </span>
-                    </Button>
-                    <input
-                      id="photo-upload"
-                      type="file"
-                      accept="image/*"
-                      onChange={handlePhotoUpload}
-                      disabled={isUploading}
-                      className="hidden"
-                    />
-                  </label>
+                  <Button type="button" variant="outline" size="sm" onClick={() => fileInputRef.current?.click()} loading={isUploading} aria-describedby="onboarding-photo-label">
+                    {!isUploading && <Upload className="h-4 w-4 mr-2" aria-hidden="true" />}
+                    {avatarUrl ? 'Change photo' : 'Upload a photo'}
+                  </Button>
+                  <input
+                    ref={fileInputRef}
+                    id="photo-upload"
+                    type="file"
+                    accept="image/*"
+                    onChange={handlePhotoUpload}
+                    disabled={isUploading}
+                    className="hidden"
+                    aria-label="Profile photo"
+                  />
                 </div>
               </div>
             </div>
 
             <div className="space-y-2">
               <label htmlFor="onboarding-display-name" className="text-sm font-medium flex items-center gap-2">
-                <User className="h-4 w-4" />
-                Display Name <span className="text-destructive">*</span>
+                <User className="h-4 w-4" aria-hidden="true" />
+                Display name
               </label>
               <Input
                 id="onboarding-display-name"
@@ -282,12 +281,12 @@ export function OnboardingModal({ email, initialProfile, onComplete, suggestedTo
 
             <div className="space-y-2">
               <label htmlFor="onboarding-affiliation" className="text-sm font-medium flex items-center gap-2">
-                <Building2 className="h-4 w-4" />
-                Affiliation <span className="text-muted-foreground font-normal">(optional)</span>
+                <Building2 className="h-4 w-4" aria-hidden="true" />
+                Affiliation <Optional />
               </label>
               <Input
                 id="onboarding-affiliation"
-                placeholder="Company, DAO, or project"
+                placeholder="Company, collective or project"
                 value={affiliation}
                 maxLength={PROFILE_INPUT_LIMITS.affiliation}
                 onChange={(e) => setAffiliation(e.target.value)}
@@ -296,7 +295,7 @@ export function OnboardingModal({ email, initialProfile, onComplete, suggestedTo
 
             <div className="space-y-2">
               <label htmlFor="onboarding-bio" className="text-sm font-medium">
-                Short Bio <span className="text-muted-foreground font-normal">(optional)</span>
+                Bio <Optional />
               </label>
               <Input
                 id="onboarding-bio"
@@ -313,8 +312,8 @@ export function OnboardingModal({ email, initialProfile, onComplete, suggestedTo
           <div className="space-y-4">
             <div className="space-y-2">
               <label htmlFor="onboarding-building" className="text-sm font-medium flex items-center gap-2">
-                <Rocket className="h-4 w-4" />
-                What are you building? <span className="text-muted-foreground font-normal">(optional)</span>
+                <Rocket className="h-4 w-4" aria-hidden="true" />
+                What are you building? <Optional />
               </label>
               <Input
                 id="onboarding-building"
@@ -324,31 +323,31 @@ export function OnboardingModal({ email, initialProfile, onComplete, suggestedTo
                 onChange={(e) => setBuilding(e.target.value)}
               />
               <p className="text-xs text-muted-foreground">
-                Help others understand what you're working on
+                Help others understand what you’re working on.
               </p>
             </div>
 
             <div className="space-y-2">
               <label htmlFor="onboarding-telegram" className="text-sm font-medium flex items-center gap-2">
-                <Send className="h-4 w-4" />
-                Telegram <span className="text-muted-foreground font-normal">(optional)</span>
+                <Send className="h-4 w-4" aria-hidden="true" />
+                Messaging handle <Optional />
               </label>
               <Input
                 id="onboarding-telegram"
-                placeholder="@username"
+                placeholder="@name or a link"
                 value={telegram}
                 maxLength={PROFILE_INPUT_LIMITS.telegram}
                 onChange={(e) => setTelegram(e.target.value)}
               />
               <p className="text-xs text-muted-foreground">
-                Only fellow members of gatherings you join can see this. You can verify an ENS name later from your profile.
+                Telegram, Signal, Matrix — whatever you use. Members only. You can verify an ENS name later from your account.
               </p>
             </div>
 
             {email && (
               <div className="p-4 rounded-lg bg-muted/30 border">
                 <div className="flex items-center gap-2 text-sm">
-                  <Mail className="h-4 w-4 text-muted-foreground" />
+                  <Mail className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
                   <span className="text-muted-foreground">Email:</span>
                   <span className="font-medium">{email}</span>
                 </div>
@@ -359,53 +358,47 @@ export function OnboardingModal({ email, initialProfile, onComplete, suggestedTo
         )
       case 3:
         return (
-          <div className="space-y-4">
-            <div className="space-y-2">
-              <label className="text-sm font-medium flex items-center gap-2">
-                <Hash className="h-4 w-4" />
-                Topics you're interested in
-              </label>
-              <p className="text-xs text-muted-foreground">
-                Select up to {ONBOARDING_MAX_INTERESTS} topics to help fellow members find you
-              </p>
-            </div>
+          <fieldset className="space-y-4">
+            <legend className="space-y-1">
+              <span className="text-sm font-medium flex items-center gap-2">
+                <Hash className="h-4 w-4" aria-hidden="true" />
+                Topics you’re interested in <Optional />
+              </span>
+              <span className="block text-xs text-muted-foreground">
+                Choose up to {ONBOARDING_MAX_INTERESTS} to help fellow members find you.
+              </span>
+            </legend>
 
             {interests.length > 0 && (
-              <div className="flex flex-wrap gap-2">
+              <div className="flex flex-wrap gap-2" aria-label="Your topics">
                 {interests.map((interest) => (
-                  <button
-                    key={interest}
-                    type="button"
-                    onClick={() => toggleInterest(interest)}
-                    className="inline-flex items-center rounded-full border border-primary bg-primary/10 px-4 py-2.5 text-sm min-h-[44px] hover:bg-primary/20 transition-colors"
-                  >
+                  <FilterChip key={interest} pressed onClick={() => toggleInterest(interest)} icon={<Check className="h-3.5 w-3.5" aria-hidden="true" />}>
                     {interest}
-                    <X className="h-4 w-4 ml-1.5" />
-                  </button>
+                  </FilterChip>
                 ))}
               </div>
             )}
 
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-wrap gap-2" aria-label="Suggested topics">
               {suggestedInterests
                 .filter((i) => !hasInterest(i))
                 .map((interest) => (
-                  <button
+                  <FilterChip
                     key={interest}
-                    type="button"
+                    pressed={false}
                     onClick={() => toggleInterest(interest)}
-                    className="inline-flex items-center rounded-full border px-4 py-2.5 text-sm min-h-[44px] hover:bg-accent transition-colors"
                     disabled={interests.length >= ONBOARDING_MAX_INTERESTS}
+                    icon={<Plus className="h-3.5 w-3.5" aria-hidden="true" />}
                   >
-                    <Plus className="h-4 w-4 mr-1.5" />
                     {interest}
-                  </button>
+                  </FilterChip>
                 ))}
             </div>
 
             <div className="flex gap-2">
               <Input
-                placeholder="Add custom topic"
+                aria-label="Add your own topic"
+                placeholder="Add your own topic"
                 value={customInterest}
                 maxLength={PROFILE_INPUT_LIMITS.interestLength}
                 onChange={(e) => setCustomInterest(e.target.value)}
@@ -422,13 +415,17 @@ export function OnboardingModal({ email, initialProfile, onComplete, suggestedTo
                 type="button"
                 variant="outline"
                 size="icon"
+                aria-label="Add topic"
                 onClick={addCustomInterest}
                 disabled={!customInterest.trim() || interests.length >= ONBOARDING_MAX_INTERESTS}
               >
-                <Plus className="h-4 w-4" />
+                <Plus className="h-4 w-4" aria-hidden="true" />
               </Button>
             </div>
-          </div>
+            {interests.length >= ONBOARDING_MAX_INTERESTS && (
+              <p className="text-xs text-muted-foreground">That’s {ONBOARDING_MAX_INTERESTS} topics — you can add more later from your account.</p>
+            )}
+          </fieldset>
         )
       default:
         return null
@@ -437,9 +434,9 @@ export function OnboardingModal({ email, initialProfile, onComplete, suggestedTo
 
   const getStepTitle = () => {
     if (isIntroStep) {
-      return `How It Works (${step}/${introStepCount})`
+      return `How it works (${step}/${introStepCount})`
     }
-    const titles = ['Your Profile', 'Contact & Projects', 'Your Interests']
+    const titles = ['Your profile', 'Contact & projects', 'Your interests']
     return titles[profileStep - 1]
   }
 
@@ -451,21 +448,21 @@ export function OnboardingModal({ email, initialProfile, onComplete, suggestedTo
           <div className="flex items-center gap-3 mb-2">
             <div className="p-2 rounded-lg bg-primary/20">
               {isIntroStep ? (
-                <Calendar className="h-5 w-5 text-primary" />
+                <Calendar className="h-5 w-5 text-primary" aria-hidden="true" />
               ) : (
-                <Users className="h-5 w-5 text-primary" />
+                <Users className="h-5 w-5 text-primary" aria-hidden="true" />
               )}
             </div>
             <Dialog.Title className="text-lg sm:text-xl font-semibold">{getStepTitle()}</Dialog.Title>
           </div>
           <Dialog.Description id="onboarding-description" className="text-muted-foreground text-sm">
             {isIntroStep
-              ? 'Quick overview of how unconference works'
+              ? 'A quick overview of how unconference works'
               : 'Set up your profile so others can find and connect with you'
             }
           </Dialog.Description>
           {/* Progress */}
-          <div className="flex gap-1 mt-4">
+          <div className="flex gap-1 mt-4" aria-hidden="true">
             {Array.from({ length: totalSteps }).map((_, i) => (
               <div
                 key={i}
@@ -486,7 +483,7 @@ export function OnboardingModal({ email, initialProfile, onComplete, suggestedTo
         {/* Footer */}
         <div className="p-4 sm:p-6 border-t bg-muted/20 space-y-3 flex-shrink-0">
           {error && (
-            <div className="rounded-lg bg-destructive/10 border border-destructive/20 p-3 text-sm text-destructive">
+            <div role="alert" className="rounded-lg bg-destructive/10 border border-destructive/20 p-3 text-sm text-destructive">
               {error}
             </div>
           )}
@@ -495,25 +492,19 @@ export function OnboardingModal({ email, initialProfile, onComplete, suggestedTo
               variant="ghost"
               onClick={() => step > 1 && setStep(step - 1)}
               disabled={step === 1}
-              className="min-h-[44px]"
             >
-              <ChevronLeft className="h-4 w-4 mr-1" />
+              <ChevronLeft className="h-4 w-4 mr-1" aria-hidden="true" />
               Back
             </Button>
 
             {step < totalSteps ? (
-              <Button onClick={() => setStep(step + 1)} disabled={!canProceed()} className="min-h-[44px]">
+              <Button onClick={() => setStep(step + 1)} disabled={!canProceed()}>
                 {isIntroStep ? 'Next' : 'Continue'}
-                <ChevronRight className="h-4 w-4 ml-1" />
+                <ChevronRight className="h-4 w-4 ml-1" aria-hidden="true" />
               </Button>
             ) : (
-              <Button
-                onClick={handleSubmit}
-                disabled={isSubmitting || isUploading}
-                className="btn-primary-glow min-h-[44px]"
-              >
-                {isSubmitting ? 'Saving...' : 'Save profile'}
-                <Users className="h-4 w-4 ml-2" />
+              <Button onClick={handleSubmit} loading={isSubmitting} disabled={isUploading}>
+                Save profile
               </Button>
             )}
           </div>
@@ -521,12 +512,9 @@ export function OnboardingModal({ email, initialProfile, onComplete, suggestedTo
           {/* Skip intro option */}
           {isIntroStep && step < introStepCount && (
             <div className="text-center">
-              <button
-                onClick={() => setStep(introStepCount + 1)}
-                className="text-xs text-muted-foreground hover:text-foreground transition-colors"
-              >
+              <Button variant="link" size="sm" className="text-muted-foreground" onClick={() => setStep(introStepCount + 1)}>
                 Skip to your profile
-              </button>
+              </Button>
             </div>
           )}
         </div>

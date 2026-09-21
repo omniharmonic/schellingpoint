@@ -67,7 +67,10 @@
     --substrate: 150 12% 93%;
     --substrate-dot: 155 15% 73%;
     --signal: 163 48% 27%;
+    --favorite: 32 85% 33%;
+    --favorite-foreground: 0 0% 100%;
     --radius: 0.75rem;
+    --workspace-header-h: 76px;
   }
   .dark {
     color-scheme: dark;
@@ -95,6 +98,8 @@
     --input: 162 9% 34%;
     --ring: 151 39% 67%;
     --signal: 151 39% 67%;
+    --favorite: 36 75% 65%;
+    --favorite-foreground: 162 30% 13%;
   }
   * { @apply border-border; }
   body { @apply bg-background text-foreground font-sans antialiased; font-feature-settings: "ss01" 1, "calt" 1; }
@@ -130,14 +135,15 @@
   .section-rule::after { content: ''; @apply flex-1 h-px bg-border; }
   .protocol-box { @apply border rounded-xl p-4 text-sm leading-relaxed; }
   .workspace-content { @apply mx-auto w-full max-w-[1440px] p-5 md:p-8 lg:p-10; }
-  .workspace-content h1 { @apply text-3xl md:text-4xl font-semibold; }
+  .page-title { @apply text-2xl md:text-3xl font-display font-semibold tracking-tight; }
+  .stat-value { @apply text-4xl font-semibold tracking-tight; }
   .workspace-content > div > div > p:first-of-type { @apply leading-relaxed; }
   .workspace-nav-link { @apply flex min-h-11 items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground; }
   .workspace-nav-link[aria-current="page"] { @apply bg-secondary text-secondary-foreground font-semibold; }
   .skip-link { @apply sr-only; }
   .skip-link:focus { @apply not-sr-only fixed top-3 left-3 z-[100] rounded-lg bg-primary text-primary-foreground px-4 py-3; }
-  .gathering-art { color: #246653; }
-  .gathering-art button[aria-pressed="true"] { background: #246653; color: white; }
+  .gathering-art { color: hsl(var(--primary)); }
+  .gathering-art button[aria-pressed="true"] { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); }
   .page-heading { @apply flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between; }
 }
 
@@ -151,6 +157,11 @@
   .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
   .scrollbar-hide::-webkit-scrollbar { display: none; }
   .page-transition { @apply transition-colors duration-200; }
+  .sticky-under-header { position: sticky; top: var(--workspace-header-h); }
+  .text-favorite { color: hsl(var(--favorite)); }
+  .bg-favorite { background-color: hsl(var(--favorite)); }
+  .border-favorite { border-color: hsl(var(--favorite)); }
+  .fill-favorite { fill: hsl(var(--favorite)); }
 }
 ::-webkit-scrollbar { width: 7px; height: 7px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -261,9 +272,7 @@
   .event-poster-image .event-poster-date { @apply bg-white text-[#203b30] rounded-xl px-3 py-2; }
   .event-poster-image .event-poster-date strong { font-size: 3rem; }
   .event-poster-image .event-poster-date span { @apply text-xs; }
-  .workspace-content h1 { font-size: clamp(2.15rem, 3.6vw, 3.6rem); line-height: 1.04; font-weight: 700; }
   .workspace-content .stats-card { @apply border-foreground/15; }
-  .workspace-content .stats-card [class*="text-3xl"] { @apply text-4xl tracking-tight; }
   .calendar-day { @apply min-h-16 rounded-xl px-5 border-2 font-semibold; }
   .calendar-day[aria-pressed="true"] { @apply shadow-[0_4px_0_hsl(var(--primary)/.2)]; }
   .schedule-session { @apply border-foreground/15 border-l-4 border-l-primary bg-card; }

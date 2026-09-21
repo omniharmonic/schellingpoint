@@ -8,7 +8,7 @@ import { useWizardState, type WizardState } from './useWizardState';
 // ============================================================================
 
 export const WIZARD_STORAGE_KEY = 'schellingpoint-event-wizard-draft';
-const SCHEMA_VERSION = 2; // Bumped to clear old drafts with incompatible data structures
+const SCHEMA_VERSION = 3; // v3: step order changed (identity first), social links list, acknowledgement persisted
 
 // ============================================================================
 // Types
@@ -65,6 +65,9 @@ export function saveWizardDraft(state: WizardState): void {
         suggestedTopics: state.suggestedTopics,
         voting: state.voting,
         branding: state.branding,
+        // The public-records acknowledgement is the first step, so it is part of the draft.
+        // The terms acceptance is given right before creating and is not persisted.
+        identity: { acknowledged: state.identity.acknowledged, termsAccepted: false },
         // Don't persist validation errors
       },
     };
@@ -191,6 +194,9 @@ export function useWizardStateWithPersistence() {
   const hasLoadedRef = useRef(false);
   // Track if state has been modified (triggers re-render for UI feedback)
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  // When the draft was last written to this device (null until the first save this session
+  // or, after a resume, the saved draft's own timestamp).
+  const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null);
   // Store previous state for comparison
   const prevStateRef = useRef<WizardState | null>(null);
 
@@ -206,6 +212,7 @@ export function useWizardStateWithPersistence() {
       loadState(savedDraft);
       // Mark as having unsaved changes since we loaded existing data
       setHasUnsavedChanges(true);
+      setLastSavedAt(getWizardDraftTimestamp());
     }
 
     // Store initial state for comparison
@@ -234,11 +241,13 @@ export function useWizardStateWithPersistence() {
         JSON.stringify(state.tracks) !== JSON.stringify(prevState.tracks) ||
         JSON.stringify(state.suggestedTopics) !== JSON.stringify(prevState.suggestedTopics) ||
         JSON.stringify(state.voting) !== JSON.stringify(prevState.voting) ||
-        JSON.stringify(state.branding) !== JSON.stringify(prevState.branding);
+        JSON.stringify(state.branding) !== JSON.stringify(prevState.branding) ||
+        state.identity.acknowledged !== prevState.identity.acknowledged;
 
       if (hasChanged) {
         setHasUnsavedChanges(true);
         saveWizardDraft(state);
+        setLastSavedAt(new Date());
       }
     }
   }, [state]);
@@ -247,6 +256,7 @@ export function useWizardStateWithPersistence() {
   const clearDraft = useCallback((resetState = false) => {
     clearWizardDraft();
     setHasUnsavedChanges(false);
+    setLastSavedAt(null);
     if (resetState) {
       reset();
     }
@@ -270,5 +280,6 @@ export function useWizardStateWithPersistence() {
     getDraftTimestamp,
     // Expose whether state has been modified
     hasUnsavedChanges,
+    lastSavedAt,
   };
 }

@@ -15,10 +15,15 @@ import {
   ArrowDown,
   Paperclip,
 } from 'lucide-react'
-import { Card } from '@/components/ui/card'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { FilterChip } from '@/components/ui/filter-chip'
+import { ConfirmInline } from '@/components/ui/confirm-inline'
+import { useToast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api/client'
+import { ELLIPSIS } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
 export type ResourceKind = 'slides' | 'recording' | 'notes' | 'link' | 'repo'
@@ -69,6 +74,7 @@ function hostnameOf(url: string): string {
 }
 
 export function SessionResources({ sessionId, eventSlug, canManage }: SessionResourcesProps) {
+  const { toast } = useToast()
   const [resources, setResources] = React.useState<Resource[]>([])
   const [isLoading, setIsLoading] = React.useState(true)
   const [error, setError] = React.useState<string | null>(null)
@@ -79,8 +85,11 @@ export function SessionResources({ sessionId, eventSlug, canManage }: SessionRes
   const [kind, setKind] = React.useState<ResourceKind>('link')
   const [isSaving, setIsSaving] = React.useState(false)
   const [busyId, setBusyId] = React.useState<string | null>(null)
+  const [removing, setRemoving] = React.useState<Resource | null>(null)
 
   const endpoint = `/api/v1/events/${eventSlug}/sessions/${sessionId}/resources`
+  const titleId = `resource-title-${sessionId}`
+  const urlId = `resource-url-${sessionId}`
 
   const load = React.useCallback(async () => {
     try {
@@ -88,7 +97,7 @@ export function SessionResources({ sessionId, eventSlug, canManage }: SessionRes
       setResources(json.resources ?? [])
       setError(null)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load resources')
+      setError(err instanceof Error ? err.message : 'Resources could not be loaded.')
     } finally {
       setIsLoading(false)
     }
@@ -102,6 +111,14 @@ export function SessionResources({ sessionId, eventSlug, canManage }: SessionRes
   const urlLooksValid = urlTrimmed.length === 0 || isValidHttpUrl(urlTrimmed)
   const canSubmit = title.trim().length > 0 && urlTrimmed.length > 0 && urlLooksValid && !isSaving
 
+  const closeForm = () => {
+    setShowForm(false)
+    setTitle('')
+    setUrl('')
+    setKind('link')
+    setError(null)
+  }
+
   const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!canSubmit) return
@@ -113,26 +130,25 @@ export function SessionResources({ sessionId, eventSlug, canManage }: SessionRes
         json: { title: title.trim(), url: urlTrimmed, kind },
       })
       setResources((prev) => [...prev, json.resource])
-      setTitle('')
-      setUrl('')
-      setKind('link')
-      setShowForm(false)
+      closeForm()
+      toast({ title: 'Resource added', variant: 'success' })
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to add resource')
+      setError(err instanceof Error ? err.message : 'The resource could not be added. Please try again.')
     } finally {
       setIsSaving(false)
     }
   }
 
   const handleRemove = async (resource: Resource) => {
-    if (!confirm(`Remove "${resource.title}"?`)) return
     setBusyId(resource.id)
     setError(null)
     try {
       await apiFetch(`${endpoint}?id=${encodeURIComponent(resource.id)}`, { method: 'DELETE' })
       setResources((prev) => prev.filter((r) => r.id !== resource.id))
+      setRemoving(null)
+      toast({ title: 'Resource removed', variant: 'success' })
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to remove resource')
+      setError(err instanceof Error ? err.message : 'The resource could not be removed. Please try again.')
     } finally {
       setBusyId(null)
     }
@@ -155,7 +171,7 @@ export function SessionResources({ sessionId, eventSlug, canManage }: SessionRes
       setResources(json.resources ?? next)
     } catch (err) {
       setResources(previous)
-      setError(err instanceof Error ? err.message : 'Failed to reorder resources')
+      setError(err instanceof Error ? err.message : 'The order could not be saved, so it was put back. Please try again.')
     } finally {
       setBusyId(null)
     }
@@ -167,169 +183,174 @@ export function SessionResources({ sessionId, eventSlug, canManage }: SessionRes
   }
 
   return (
-    <Card className="p-6">
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="font-semibold flex items-center gap-2">
-          <Paperclip className="h-4 w-4" />
-          Resources
-        </h3>
-        {canManage && !showForm && (
-          <Button variant="ghost" size="sm" onClick={() => setShowForm(true)}>
-            <Plus className="h-4 w-4 mr-1" />
-            Add
-          </Button>
-        )}
-      </div>
-
-      {error && <p className="text-sm text-destructive mb-3">{error}</p>}
-
-      {isLoading ? (
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" />
-          Loading...
-        </div>
-      ) : resources.length === 0 ? (
-        !showForm && (
-          <p className="text-sm text-muted-foreground">
-            No resources yet. Add slides, a recording, notes, or links for attendees.
-          </p>
-        )
-      ) : (
-        <ul className="space-y-2">
-          {resources.map((resource, index) => {
-            const meta = KIND_META[resource.kind] ?? KIND_META.link
-            const Icon = meta.icon
-            const isBusy = busyId === resource.id
-            return (
-              <li
-                key={resource.id}
-                className={cn(
-                  'flex items-center gap-3 rounded-lg border p-2 pl-3 transition-opacity',
-                  isBusy && 'opacity-60'
-                )}
-              >
-                <div className="p-1.5 rounded-md bg-primary/10 text-primary shrink-0">
-                  <Icon className="h-4 w-4" />
-                </div>
-                <a
-                  href={resource.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex-1 min-w-0 group"
-                  title={resource.url}
-                >
-                  <p className="text-sm font-medium truncate group-hover:underline">
-                    {resource.title}
-                  </p>
-                  <p className="text-xs text-muted-foreground truncate">
-                    {meta.label} · {hostnameOf(resource.url)}
-                  </p>
-                </a>
-                <ExternalLink className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                {canManage && (
-                  <div className="flex items-center shrink-0">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7"
-                      aria-label="Move up"
-                      disabled={index === 0 || busyId !== null}
-                      onClick={() => handleMove(index, -1)}
-                    >
-                      <ArrowUp className="h-3.5 w-3.5" />
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7"
-                      aria-label="Move down"
-                      disabled={index === resources.length - 1 || busyId !== null}
-                      onClick={() => handleMove(index, 1)}
-                    >
-                      <ArrowDown className="h-3.5 w-3.5" />
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                      aria-label="Remove resource"
-                      disabled={busyId !== null}
-                      onClick={() => handleRemove(resource)}
-                    >
-                      {isBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />}
-                    </Button>
-                  </div>
-                )}
-              </li>
-            )
-          })}
-        </ul>
-      )}
-
-      {canManage && showForm && (
-        <form onSubmit={handleAdd} className="mt-4 space-y-3 border-t pt-4">
-          <div className="flex flex-wrap gap-1.5">
-            {KIND_ORDER.map((k) => {
-              const Icon = KIND_META[k].icon
-              return (
-                <Button
-                  key={k}
-                  type="button"
-                  size="sm"
-                  variant={kind === k ? 'default' : 'outline'}
-                  onClick={() => setKind(k)}
-                  aria-pressed={kind === k}
-                >
-                  <Icon className="h-3.5 w-3.5 mr-1" />
-                  {KIND_META[k].label}
-                </Button>
-              )
-            })}
-          </div>
-          <Input
-            value={title}
-            onChange={(e) => setTitle(e.target.value.slice(0, 200))}
-            placeholder="Title (e.g. Slide deck)"
-            maxLength={200}
-            required
-          />
-          <div className="space-y-1">
-            <Input
-              type="url"
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              placeholder="https://..."
-              inputMode="url"
-              required
-              aria-invalid={!urlLooksValid}
-              className={cn(!urlLooksValid && 'border-destructive focus-visible:ring-destructive')}
-            />
-            {!urlLooksValid && (
-              <p className="text-xs text-destructive">Enter a full URL starting with http:// or https://</p>
-            )}
-          </div>
-          <div className="flex gap-2">
-            <Button type="submit" size="sm" disabled={!canSubmit}>
-              {isSaving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between gap-2">
+          <CardTitle className="flex items-center gap-2">
+            <Paperclip className="h-4 w-4" aria-hidden />
+            Resources
+          </CardTitle>
+          {canManage && !showForm && (
+            <Button variant="outline" size="sm" onClick={() => setShowForm(true)}>
+              <Plus className="mr-1 h-4 w-4" aria-hidden />
               Add resource
             </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant="ghost"
-              onClick={() => {
-                setShowForm(false)
-                setTitle('')
-                setUrl('')
-                setKind('link')
-                setError(null)
-              }}
-            >
-              Cancel
-            </Button>
+          )}
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {error && (
+          <p role="alert" className="rounded-lg border border-destructive/20 bg-destructive/10 p-3 text-sm text-destructive">{error}</p>
+        )}
+
+        {isLoading ? (
+          <div className="flex items-center gap-2 text-sm text-muted-foreground" role="status">
+            <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+            Loading{ELLIPSIS}
           </div>
-        </form>
-      )}
+        ) : resources.length === 0 ? (
+          !showForm && (
+            <p className="text-sm text-muted-foreground">
+              No resources yet. Add slides, a recording, notes or links for attendees.
+            </p>
+          )
+        ) : (
+          <ul className="space-y-2">
+            {resources.map((resource, index) => {
+              const meta = KIND_META[resource.kind] ?? KIND_META.link
+              const Icon = meta.icon
+              const isBusy = busyId === resource.id
+              const isRemoving = removing?.id === resource.id
+              return (
+                <li key={resource.id} className="space-y-2">
+                  <div
+                    className={cn(
+                      'flex items-center gap-3 rounded-lg border p-2 pl-3 transition-opacity',
+                      isBusy && 'opacity-60'
+                    )}
+                  >
+                    <div className="shrink-0 rounded-md bg-primary/10 p-1.5 text-primary">
+                      <Icon className="h-4 w-4" aria-hidden />
+                    </div>
+                    <a
+                      href={resource.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="group min-w-0 flex-1"
+                      title={resource.url}
+                    >
+                      <p className="truncate text-sm font-medium group-hover:underline">
+                        {resource.title}
+                      </p>
+                      <p className="truncate text-xs text-muted-foreground">
+                        {meta.label} · {hostnameOf(resource.url)}
+                      </p>
+                    </a>
+                    <ExternalLink className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                    {canManage && !isRemoving && (
+                      <div className="flex shrink-0 items-center">
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          aria-label={`Move ${resource.title} up`}
+                          disabled={index === 0 || busyId !== null}
+                          onClick={() => handleMove(index, -1)}
+                        >
+                          <ArrowUp className="h-4 w-4" aria-hidden />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          aria-label={`Move ${resource.title} down`}
+                          disabled={index === resources.length - 1 || busyId !== null}
+                          onClick={() => handleMove(index, 1)}
+                        >
+                          <ArrowDown className="h-4 w-4" aria-hidden />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          className="text-muted-foreground hover:text-destructive"
+                          aria-label={`Remove ${resource.title}`}
+                          disabled={busyId !== null}
+                          onClick={() => setRemoving(resource)}
+                        >
+                          <X className="h-4 w-4" aria-hidden />
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                  {isRemoving && (
+                    <ConfirmInline
+                      destructive
+                      message={`Remove “${resource.title}”?`}
+                      confirmLabel="Remove"
+                      loading={isBusy}
+                      onConfirm={() => handleRemove(resource)}
+                      onCancel={() => setRemoving(null)}
+                    />
+                  )}
+                </li>
+              )
+            })}
+          </ul>
+        )}
+
+        {canManage && showForm && (
+          <form onSubmit={handleAdd} className="space-y-3 border-t pt-4" noValidate>
+            <fieldset className="space-y-2">
+              <legend className="text-sm font-medium leading-none">Kind</legend>
+              <div className="flex flex-wrap gap-1.5 pt-2">
+                {KIND_ORDER.map((k) => {
+                  const Icon = KIND_META[k].icon
+                  return (
+                    <FilterChip key={k} pressed={kind === k} onClick={() => setKind(k)} icon={<Icon className="h-3.5 w-3.5" aria-hidden />}>
+                      {KIND_META[k].label}
+                    </FilterChip>
+                  )
+                })}
+              </div>
+            </fieldset>
+            <div className="space-y-2">
+              <Label htmlFor={titleId}>Title</Label>
+              <Input
+                id={titleId}
+                value={title}
+                onChange={(e) => setTitle(e.target.value.slice(0, 200))}
+                placeholder="e.g. Slide deck"
+                maxLength={200}
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor={urlId}>URL</Label>
+              <Input
+                id={urlId}
+                type="url"
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                placeholder={`https://${ELLIPSIS}`}
+                inputMode="url"
+                required
+                aria-invalid={!urlLooksValid}
+                error={!urlLooksValid}
+                aria-describedby={!urlLooksValid ? `${urlId}-error` : undefined}
+              />
+              {!urlLooksValid && (
+                <p id={`${urlId}-error`} className="text-xs text-destructive">Enter a full URL starting with http:// or https://</p>
+              )}
+            </div>
+            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+              <Button type="button" size="sm" variant="outline" onClick={closeForm} disabled={isSaving}>
+                Cancel
+              </Button>
+              <Button type="submit" size="sm" loading={isSaving} disabled={!canSubmit}>
+                Add resource
+              </Button>
+            </div>
+          </form>
+        )}
+      </CardContent>
     </Card>
   )
 }

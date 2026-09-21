@@ -31,7 +31,8 @@ export async function PATCH(request: Request, { params }: Params) {
     const venue = await asAccount(ctx.viewer.accountId, async (tx) => {
       const [current] = await tx<VenueInput[]>`
         select name, slug, capacity, coalesce(features, '{}') as features, style, address, locality, region,
-               postal_code, country, is_private_residence, notes, coalesce(is_primary, false) as is_primary
+               postal_code, country, is_private_residence, notes, coalesce(is_primary, false) as is_primary,
+               coalesce(allowed_formats, '{}') as allowed_formats
         from venues where id = ${id} and event_id = ${ctx.event.id}
         for update
       `

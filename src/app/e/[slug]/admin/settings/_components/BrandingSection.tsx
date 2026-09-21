@@ -1,111 +1,101 @@
 'use client'
 
 import * as React from 'react'
-import { Loader2, Upload, X } from 'lucide-react'
+import { Check, Plus, Trash2 } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
+import { Label } from '@/components/ui/label'
 import { ColorPicker } from '@/components/ui/color-picker'
-import { uploadEventLogo, uploadEventBanner } from '@/lib/storage/upload'
+import { cn } from '@/lib/utils'
 import type { Event } from '@/types/event'
-import { SectionCard, SaveBar, Field, ChoiceCard } from './SectionCard'
-import { useSectionSave } from './shared'
-import { THEME_MODES, DEFAULT_COLORS } from './constants'
+import { SectionCard, SaveBar, ChoiceCard } from './SectionCard'
+import { useSectionSave, sameValue, socialToLinks, linksToSocial, type SocialLink } from './shared'
+import { THEME_MODES, DEFAULT_COLORS, THEME_PRESETS, matchingThemePreset, contrastingTextColor, type ThemePreset } from './constants'
+import { MAX_SOCIAL_LINKS, SOCIAL_LABEL_MAX, SOCIAL_URL_MAX } from './labels'
 
-interface ImageFieldProps {
-  id: string
-  label: string
-  hint: string
-  url: string | null
-  upload: (file: File) => Promise<{ success: boolean; url?: string; error?: string }>
-  onPersist: (url: string | null) => Promise<boolean>
-  previewClassName?: string
-}
-
-/** Upload to `/api/uploads`, then persist the URL on the event. */
-function ImageField({ id, label, hint, url, upload, onPersist, previewClassName }: ImageFieldProps) {
-  const inputRef = React.useRef<HTMLInputElement>(null)
-  const [busy, setBusy] = React.useState(false)
-  const [error, setError] = React.useState<string | null>(null)
-  const handleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file) return
-    setBusy(true); setError(null)
-    const result = await upload(file)
-    if (!result.success || !result.url) setError(result.error || 'Upload failed. Try again.')
-    else if (!(await onPersist(result.url))) setError('Uploaded, but the event could not be updated. Try again.')
-    setBusy(false)
-    if (inputRef.current) inputRef.current.value = ''
-  }
-  const handleRemove = async () => {
-    setBusy(true); setError(null)
-    if (!(await onPersist(null))) setError('Could not remove the image. Try again.')
-    setBusy(false)
-  }
-  return <Field label={label} htmlFor={id} hint={hint} error={error}>
-    <div className="flex flex-wrap items-center gap-4">
-      {url ? <img src={url} alt="" className={previewClassName || 'h-16 w-16 rounded-lg border object-cover'} /> : <div className={`${previewClassName || 'h-16 w-16 rounded-lg'} flex items-center justify-center border border-dashed text-muted-foreground`}><Upload className="h-5 w-5" aria-hidden="true" /></div>}
-      <div className="flex flex-wrap gap-2">
-        <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => inputRef.current?.click()}>{busy ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Upload className="h-4 w-4 mr-2" />}{url ? 'Replace' : 'Upload'}</Button>
-        {url ? <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={handleRemove}><X className="h-4 w-4 mr-1" />Remove</Button> : null}
-      </div>
-      <input ref={inputRef} id={id} type="file" accept="image/png,image/jpeg,image/webp,image/gif" className="sr-only" onChange={handleFile} />
-    </div>
-  </Field>
-}
-
+/** Colors, appearance and links. Images have their own card (`ImagesSection`) because they save on upload. */
 export function BrandingSection({ event }: { event: Event }) {
   const theme = event.theme || {}
   const { state, save } = useSectionSave(event.id)
-  const assets = useSectionSave(event.id)
   const [primary, setPrimary] = React.useState(theme.colors?.primary || DEFAULT_COLORS.primary)
   const [secondary, setSecondary] = React.useState(theme.colors?.secondary || DEFAULT_COLORS.secondary)
   const [accent, setAccent] = React.useState(theme.colors?.accent || DEFAULT_COLORS.accent)
   const [mode, setMode] = React.useState<'light' | 'dark' | 'system'>(theme.mode || 'light')
-  const [social, setSocial] = React.useState({ twitter: theme.social?.twitter || '', telegram: theme.social?.telegram || '', discord: theme.social?.discord || '', website: theme.social?.website || '' })
-  const [logoUrl, setLogoUrl] = React.useState(event.logoUrl)
-  const [bannerUrl, setBannerUrl] = React.useState(event.bannerUrl)
+  const [links, setLinks] = React.useState<SocialLink[]>(() => socialToLinks(theme.social))
   const fieldError = (field: string) => (state.status === 'error' && state.field === field ? state.message : null)
-  const setSocialField = (key: keyof typeof social) => (e: React.ChangeEvent<HTMLInputElement>) => setSocial(prev => ({ ...prev, [key]: e.target.value }))
 
-  const persistAsset = (column: 'logo_url' | 'banner_url', setter: (url: string | null) => void) => async (url: string | null) => {
-    const result = await assets.save({ [column]: url }, url ? 'Image saved.' : 'Image removed.')
-    if (result) setter(url)
-    return !!result
+  const patch = { theme: { colors: { primary, secondary, accent }, mode, social: linksToSocial(links) } }
+  const dirty = !sameValue(patch, { theme: {
+    colors: { primary: theme.colors?.primary || DEFAULT_COLORS.primary, secondary: theme.colors?.secondary || DEFAULT_COLORS.secondary, accent: theme.colors?.accent || DEFAULT_COLORS.accent },
+    mode: theme.mode || 'light', social: linksToSocial(socialToLinks(theme.social)),
+  } })
+
+  const applyPreset = (preset: ThemePreset) => {
+    setPrimary(preset.primary); setSecondary(preset.secondary); setAccent(preset.accent)
+    setMode(preset.mode)
   }
+  const selectedPreset = matchingThemePreset({ primary, secondary, accent })
+  const updateLink = (index: number, field: keyof SocialLink, value: string) => setLinks(prev => prev.map((link, i) => i === index ? { ...link, [field]: value } : link))
+  const removeLink = (index: number) => setLinks(prev => prev.filter((_, i) => i !== index))
+  const addLink = () => setLinks(prev => prev.length < MAX_SOCIAL_LINKS ? [...prev, { label: '', url: '' }] : prev)
 
-  return <SectionCard id="branding" title="Branding" description="Colors, appearance, links, and imagery for the gathering’s pages."
-    onSubmit={() => save({ theme: { colors: { primary, secondary, accent }, mode, social } }, 'Branding saved.')}
-    footer={<SaveBar state={state} />}>
+  const swatches = [{ label: 'Primary', color: primary }, { label: 'Secondary', color: secondary }, { label: 'Accent', color: accent }]
+
+  return <SectionCard id="branding" title="Branding" description="Colors, appearance and links for the gathering’s pages."
+    onSubmit={() => save(patch, 'Branding saved.')}
+    footer={<SaveBar state={state} dirty={dirty} />}>
+    <fieldset className="space-y-3">
+      <legend className="text-sm font-medium">Palette</legend>
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+        {THEME_PRESETS.map(preset => {
+          const selected = selectedPreset?.name === preset.name
+          return <button key={preset.name} type="button" aria-pressed={selected} onClick={() => applyPreset(preset)} title={preset.description}
+            className={cn('flex flex-col gap-2 rounded-lg border-2 p-3 text-left transition-all hover:border-primary/50 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2', selected ? 'border-primary bg-primary/5' : 'border-border')}>
+            <span className="flex gap-1" aria-hidden="true">
+              <span className="h-5 w-5 rounded-full border border-black/10" style={{ backgroundColor: preset.primary }} />
+              <span className="h-5 w-5 rounded-full border border-black/10" style={{ backgroundColor: preset.secondary }} />
+              <span className="h-5 w-5 rounded-full border border-black/10" style={{ backgroundColor: preset.accent }} />
+            </span>
+            <span className="flex items-center gap-1 text-sm font-medium">{preset.name}{selected ? <Check className="h-3.5 w-3.5 text-primary" aria-hidden="true" /> : null}</span>
+            <span className="text-xs text-muted-foreground">{preset.mode === 'dark' ? 'Dark' : 'Light'}</span>
+          </button>
+        })}
+      </div>
+      <p className="text-xs text-muted-foreground">Pick a palette, then adjust any color below.</p>
+    </fieldset>
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
       <ColorPicker label="Primary" value={primary} onChange={setPrimary} />
       <ColorPicker label="Secondary" value={secondary} onChange={setSecondary} />
       <ColorPicker label="Accent" value={accent} onChange={setAccent} />
     </div>
     {fieldError('theme') ? <p className="text-xs text-destructive" role="alert">{fieldError('theme')}</p> : null}
-    <div className="rounded-lg border bg-card p-4">
+    <div className="rounded-lg border bg-card p-4" aria-label="Preview">
       <div className="mb-3 flex flex-wrap gap-2">
-        <span className="rounded-lg px-4 py-2 text-sm font-medium text-white" style={{ backgroundColor: primary }}>Primary</span>
-        <span className="rounded-lg px-4 py-2 text-sm font-medium" style={{ backgroundColor: secondary }}>Secondary</span>
-        <span className="rounded-lg px-4 py-2 text-sm font-medium" style={{ backgroundColor: accent }}>Accent</span>
+        {swatches.map(({ label, color }) => <span key={label} className="rounded-lg px-4 py-2 text-sm font-medium" style={{ backgroundColor: color, color: contrastingTextColor(color) }}>{label}</span>)}
       </div>
       <div className="h-2 rounded-full" style={{ background: `linear-gradient(to right, ${primary}, ${secondary}, ${accent})` }} />
     </div>
-    <div role="radiogroup" aria-label="Appearance" className="space-y-3">
-      <p className="text-sm font-medium">Appearance</p>
+    <div role="radiogroup" aria-labelledby="appearance-label" className="space-y-3">
+      <p id="appearance-label" className="text-sm font-medium">Appearance</p>
       {THEME_MODES.map(option => <ChoiceCard key={option.value} selected={mode === option.value} onSelect={() => setMode(option.value)} label={option.label} description={option.description} />)}
     </div>
-    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-      <Field label="Website" htmlFor="social-website"><Input id="social-website" type="url" value={social.website} onChange={setSocialField('website')} placeholder="https://" /></Field>
-      <Field label="X / Twitter" htmlFor="social-twitter"><Input id="social-twitter" value={social.twitter} onChange={setSocialField('twitter')} placeholder="@handle or URL" /></Field>
-      <Field label="Telegram" htmlFor="social-telegram"><Input id="social-telegram" value={social.telegram} onChange={setSocialField('telegram')} placeholder="https://t.me/…" /></Field>
-      <Field label="Discord" htmlFor="social-discord"><Input id="social-discord" value={social.discord} onChange={setSocialField('discord')} placeholder="https://discord.gg/…" /></Field>
-    </div>
-    <div className="space-y-5 border-t pt-5">
-      <ImageField id="event-logo" label="Logo" hint="Square, PNG or JPG, up to 5MB. Saved as soon as it uploads." url={logoUrl} upload={file => uploadEventLogo(file, event.slug)} onPersist={persistAsset('logo_url', setLogoUrl)} />
-      <ImageField id="event-banner" label="Banner" hint="Wide (about 3:1), up to 5MB. Used on the event page and link previews." url={bannerUrl} upload={file => uploadEventBanner(file, event.slug)} onPersist={persistAsset('banner_url', setBannerUrl)} previewClassName="h-20 w-full max-w-xs rounded-lg border object-cover" />
-      <div className="text-sm" aria-live="polite">
-        {assets.state.status === 'error' ? <p role="alert" className="text-destructive">{assets.state.message}</p> : assets.state.status === 'saved' ? <p className="text-primary">{assets.state.message}</p> : null}
-      </div>
-    </div>
+    <fieldset className="space-y-3">
+      <legend className="text-sm font-medium">Links (optional)</legend>
+      <p className="text-xs text-muted-foreground">Shown in the gathering’s footer. Any platform: Bluesky, Telegram, Discord, Signal, a website. Up to {MAX_SOCIAL_LINKS}.</p>
+      {links.length ? <ul className="space-y-3">
+        {links.map((link, index) => <li key={index} className="grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,10rem)_minmax(0,1fr)_auto] sm:items-end">
+          <div className="space-y-1">
+            <Label htmlFor={`link-label-${index}`} className="text-xs text-muted-foreground">Label</Label>
+            <Input id={`link-label-${index}`} value={link.label} onChange={e => updateLink(index, 'label', e.target.value)} placeholder="Bluesky" maxLength={SOCIAL_LABEL_MAX} />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor={`link-url-${index}`} className="text-xs text-muted-foreground">URL</Label>
+            <Input id={`link-url-${index}`} type="url" value={link.url} onChange={e => updateLink(index, 'url', e.target.value)} placeholder="https://" maxLength={SOCIAL_URL_MAX} />
+          </div>
+          <Button type="button" variant="ghost" size="icon-sm" onClick={() => removeLink(index)} aria-label={`Remove ${link.label.trim() || 'this'} link`}><Trash2 className="h-4 w-4" aria-hidden="true" /></Button>
+        </li>)}
+      </ul> : null}
+      <Button type="button" variant="outline" onClick={addLink} disabled={links.length >= MAX_SOCIAL_LINKS}><Plus className="mr-1 h-4 w-4" aria-hidden="true" />Add a link</Button>
+    </fieldset>
   </SectionCard>
 }

@@ -7,8 +7,14 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Select } from '@/components/ui/select';
+import { Switch } from '@/components/ui/switch';
+import { SegmentedControl } from '@/components/ui/segmented-control';
+import { ConfirmInline } from '@/components/ui/confirm-inline';
+import { Field } from '@/app/e/[slug]/admin/settings/_components/SectionCard';
+import { plural, EN_DASH } from '@/lib/format';
 import { cn } from '@/lib/utils';
-import type { WizardState, WizardAction, WizardTimeSlot, WizardVenue } from '../useWizardState';
+import { getNumberFromStep, type WizardState, type WizardAction, type WizardTimeSlot, type WizardVenue } from '../useWizardState';
 import { ScheduleCalendar } from '../components/ScheduleCalendar';
 
 // ============================================================================
@@ -96,26 +102,24 @@ function formatTime(time: string): string {
   return `${displayHours}:${minutes.toString().padStart(2, '0')} ${period}`;
 }
 
+function formatRange(start: string, end: string): string {
+  return `${formatTime(start)} ${EN_DASH} ${formatTime(end)}`;
+}
+
 function formatDate(dateString: string): string {
   const date = new Date(dateString + 'T00:00:00');
-  return date.toLocaleDateString('en-US', {
-    weekday: 'long',
-    month: 'short',
-    day: 'numeric',
-  });
+  return date.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
 }
 
 function getEventDates(startDate: string, endDate: string): string[] {
   const dates: string[] = [];
   const start = new Date(startDate + 'T00:00:00');
   const end = new Date(endDate + 'T00:00:00');
-
   const current = new Date(start);
   while (current <= end) {
     dates.push(current.toISOString().split('T')[0]);
     current.setDate(current.getDate() + 1);
   }
-
   return dates;
 }
 
@@ -131,15 +135,11 @@ function minutesToTime(minutes: number): string {
 }
 
 function slotsOverlap(slot1: WizardTimeSlot, slot2: WizardTimeSlot): boolean {
-  if (slot1.dayDate !== slot2.dayDate || slot1.venueId !== slot2.venueId) {
-    return false;
-  }
-
+  if (slot1.dayDate !== slot2.dayDate || slot1.venueId !== slot2.venueId) return false;
   const start1 = timeToMinutes(slot1.startTime);
   const end1 = timeToMinutes(slot1.endTime);
   const start2 = timeToMinutes(slot2.startTime);
   const end2 = timeToMinutes(slot2.endTime);
-
   return start1 < end2 && start2 < end1;
 }
 
@@ -153,44 +153,22 @@ function validateTimeSlot(
   const errors: string[] = [];
 
   if (!formData.dayDate) {
-    errors.push('Date is required');
-  } else {
-    if (formData.dayDate < eventStartDate || formData.dayDate > eventEndDate) {
-      errors.push('Date must be within the event date range');
-    }
+    errors.push('Choose a day');
+  } else if (formData.dayDate < eventStartDate || formData.dayDate > eventEndDate) {
+    errors.push('The day must fall within the gathering’s dates');
   }
-
-  if (!formData.startTime) {
-    errors.push('Start time is required');
+  if (!formData.startTime) errors.push('Choose a start time');
+  if (!formData.endTime) errors.push('Choose an end time');
+  if (formData.startTime && formData.endTime && timeToMinutes(formData.endTime) <= timeToMinutes(formData.startTime)) {
+    errors.push('The end time must be after the start time');
   }
+  if (!formData.venueId) errors.push('Choose a room');
 
-  if (!formData.endTime) {
-    errors.push('End time is required');
-  }
-
-  if (formData.startTime && formData.endTime) {
-    if (timeToMinutes(formData.endTime) <= timeToMinutes(formData.startTime)) {
-      errors.push('End time must be after start time');
-    }
-  }
-
-  if (!formData.venueId) {
-    errors.push('Venue is required');
-  }
-
-  // Check for overlapping slots
   if (formData.dayDate && formData.startTime && formData.endTime && formData.venueId) {
-    const newSlot: WizardTimeSlot = {
-      id: editingId || 'temp',
-      ...formData,
-    };
-
-    const overlapping = existingSlots.find(
-      (slot) => slot.id !== editingId && slotsOverlap(slot, newSlot)
-    );
-
+    const newSlot: WizardTimeSlot = { id: editingId || 'temp', ...formData };
+    const overlapping = existingSlots.find((slot) => slot.id !== editingId && slotsOverlap(slot, newSlot));
     if (overlapping) {
-      errors.push(`This time slot overlaps with an existing slot (${formatTime(overlapping.startTime)} - ${formatTime(overlapping.endTime)})`);
+      errors.push(`This overlaps an existing slot (${formatRange(overlapping.startTime, overlapping.endTime)})`);
     }
   }
 
@@ -209,78 +187,54 @@ interface TimeSlotCardProps {
 }
 
 function TimeSlotCard({ slot, venue, onEdit, onDelete }: TimeSlotCardProps) {
-  const [showDeleteConfirm, setShowDeleteConfirm] = React.useState(false);
-
-  const handleDelete = () => {
-    onDelete(slot.id);
-    setShowDeleteConfirm(false);
-  };
+  const [confirming, setConfirming] = React.useState(false);
 
   return (
-    <div
-      className={cn(
-        'rounded-lg border p-3 space-y-2',
-        slot.isBreak ? 'bg-muted/50 border-dashed' : 'bg-card'
-      )}
-    >
+    <div className={cn('rounded-lg border p-3 space-y-2', slot.isBreak ? 'bg-muted/50 border-dashed' : 'bg-card')}>
       <div className="flex items-start justify-between gap-2">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
-            <span className="font-medium text-sm">
-              {formatTime(slot.startTime)} - {formatTime(slot.endTime)}
-            </span>
+            <span className="font-medium text-sm">{formatRange(slot.startTime, slot.endTime)}</span>
             {slot.isBreak && (
-              <Badge variant="secondary" className="text-xs">
-                <Coffee className="h-3 w-3 mr-1" />
+              <Badge variant="secondary">
+                <Coffee className="h-3 w-3 mr-1" aria-hidden="true" />
                 Break
               </Badge>
             )}
           </div>
-          {slot.label && (
-            <p className="text-sm text-muted-foreground mt-0.5">{slot.label}</p>
-          )}
+          {slot.label && <p className="text-sm text-muted-foreground mt-0.5">{slot.label}</p>}
           {venue && (
             <p className="text-xs text-muted-foreground flex items-center gap-1 mt-1">
-              <MapPin className="h-3 w-3" />
+              <MapPin className="h-3 w-3" aria-hidden="true" />
               {venue.name}
             </p>
           )}
         </div>
         <div className="flex items-center gap-1 flex-shrink-0">
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7"
-            onClick={() => onEdit(slot)}
-            aria-label="Edit time slot"
-          >
-            <Pencil className="h-3.5 w-3.5" />
+          <Button variant="ghost" size="icon-sm" onClick={() => onEdit(slot)} aria-label={`Edit the ${formatRange(slot.startTime, slot.endTime)} slot`}>
+            <Pencil className="h-4 w-4" aria-hidden="true" />
           </Button>
           <Button
             variant="ghost"
-            size="icon"
-            className="h-7 w-7 text-destructive hover:text-destructive"
-            onClick={() => setShowDeleteConfirm(true)}
-            aria-label="Delete time slot"
+            size="icon-sm"
+            className="text-destructive hover:text-destructive"
+            onClick={() => setConfirming(true)}
+            aria-label={`Delete the ${formatRange(slot.startTime, slot.endTime)} slot`}
           >
-            <Trash2 className="h-3.5 w-3.5" />
+            <Trash2 className="h-4 w-4" aria-hidden="true" />
           </Button>
         </div>
       </div>
 
-      {/* Delete Confirmation */}
-      {showDeleteConfirm && (
-        <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-2 space-y-2">
-          <p className="text-xs text-destructive">Delete this time slot?</p>
-          <div className="flex gap-2">
-            <Button variant="destructive" size="sm" className="h-7 text-xs" onClick={handleDelete}>
-              Delete
-            </Button>
-            <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => setShowDeleteConfirm(false)}>
-              Cancel
-            </Button>
-          </div>
-        </div>
+      {confirming && (
+        <ConfirmInline
+          message="Delete this time slot?"
+          confirmLabel="Delete"
+          destructive
+          layout="inline"
+          onConfirm={() => { onDelete(slot.id); setConfirming(false); }}
+          onCancel={() => setConfirming(false)}
+        />
       )}
     </div>
   );
@@ -324,160 +278,79 @@ function TimeSlotForm({
         isBreak: initialData.isBreak,
       };
     }
-    return {
-      ...INITIAL_FORM_DATA,
-      dayDate: eventDates[0] || '',
-      venueId: venues[0]?.id || '',
-    };
+    return { ...INITIAL_FORM_DATA, dayDate: eventDates[0] || '', venueId: venues[0]?.id || '' };
   });
 
   const [errors, setErrors] = React.useState<string[]>([]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-
-    const validationErrors = validateTimeSlot(
-      formData,
-      existingSlots,
-      initialData?.id || null,
-      eventStartDate,
-      eventEndDate
-    );
-
+    const validationErrors = validateTimeSlot(formData, existingSlots, initialData?.id || null, eventStartDate, eventEndDate);
     if (validationErrors.length > 0) {
       setErrors(validationErrors);
       return;
     }
-
     setErrors([]);
     onSubmit(formData);
   };
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-4">
+    <form onSubmit={handleSubmit} className="space-y-4" noValidate>
       {errors.length > 0 && (
-        <div className="rounded-lg bg-destructive/10 border border-destructive/20 p-3 text-sm text-destructive space-y-1">
+        <div role="alert" className="rounded-xl bg-destructive/10 border border-destructive/20 p-3 text-sm text-destructive space-y-1">
           {errors.map((error, index) => (
             <p key={index}>{error}</p>
           ))}
         </div>
       )}
 
-      {/* Date */}
-      <div className="space-y-2">
-        <Label htmlFor="slot-date">
-          Date <span className="text-destructive">*</span>
-        </Label>
-        <select
-          id="slot-date"
-          value={formData.dayDate}
-          onChange={(e) => setFormData({ ...formData, dayDate: e.target.value })}
-          className={cn(
-            'flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm',
-            'ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2'
-          )}
-        >
-          <option value="">Select date...</option>
+      <Field label="Day" htmlFor="slot-date">
+        <Select id="slot-date" value={formData.dayDate} onChange={(e) => setFormData({ ...formData, dayDate: e.target.value })}>
+          <option value="">Choose a day…</option>
           {eventDates.map((date) => (
-            <option key={date} value={date}>
-              {formatDate(date)}
-            </option>
+            <option key={date} value={date}>{formatDate(date)}</option>
           ))}
-        </select>
-      </div>
+        </Select>
+      </Field>
 
-      {/* Time Range */}
       <div className="grid grid-cols-2 gap-4">
-        <div className="space-y-2">
-          <Label htmlFor="slot-start-time">
-            Start Time <span className="text-destructive">*</span>
-          </Label>
-          <Input
-            id="slot-start-time"
-            type="time"
-            value={formData.startTime}
-            onChange={(e) => setFormData({ ...formData, startTime: e.target.value })}
-          />
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="slot-end-time">
-            End Time <span className="text-destructive">*</span>
-          </Label>
-          <Input
-            id="slot-end-time"
-            type="time"
-            value={formData.endTime}
-            onChange={(e) => setFormData({ ...formData, endTime: e.target.value })}
-          />
-        </div>
+        <Field label="Start time" htmlFor="slot-start-time">
+          <Input id="slot-start-time" type="time" value={formData.startTime} onChange={(e) => setFormData({ ...formData, startTime: e.target.value })} />
+        </Field>
+        <Field label="End time" htmlFor="slot-end-time">
+          <Input id="slot-end-time" type="time" value={formData.endTime} onChange={(e) => setFormData({ ...formData, endTime: e.target.value })} />
+        </Field>
       </div>
 
-      {/* Venue */}
-      <div className="space-y-2">
-        <Label htmlFor="slot-venue">
-          Venue <span className="text-destructive">*</span>
-        </Label>
-        <select
-          id="slot-venue"
-          value={formData.venueId}
-          onChange={(e) => setFormData({ ...formData, venueId: e.target.value })}
-          className={cn(
-            'flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm',
-            'ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2'
-          )}
-        >
-          <option value="">Select venue...</option>
+      <Field label="Room" htmlFor="slot-venue">
+        <Select id="slot-venue" value={formData.venueId} onChange={(e) => setFormData({ ...formData, venueId: e.target.value })}>
+          <option value="">Choose a room…</option>
           {venues.map((venue) => (
             <option key={venue.id} value={venue.id}>
-              {venue.name} {venue.capacity ? `(${venue.capacity} capacity)` : ''}
+              {venue.name}{venue.capacity ? ` (${venue.capacity} seats)` : ''}
             </option>
           ))}
-        </select>
-      </div>
+        </Select>
+      </Field>
 
-      {/* Label */}
-      <div className="space-y-2">
-        <Label htmlFor="slot-label">Label (optional)</Label>
+      <Field label="Label (optional)" htmlFor="slot-label">
         <Input
           id="slot-label"
-          placeholder="e.g., Morning Sessions, Keynote Slot"
+          placeholder="e.g. Morning sessions, Keynote slot"
           value={formData.label}
           onChange={(e) => setFormData({ ...formData, label: e.target.value })}
           maxLength={100}
         />
-      </div>
+      </Field>
 
-      {/* Is Break */}
       <div className="flex items-center gap-3">
-        <button
-          type="button"
-          role="switch"
-          aria-checked={formData.isBreak}
-          onClick={() => setFormData({ ...formData, isBreak: !formData.isBreak })}
-          className={cn(
-            'relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors',
-            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
-            formData.isBreak ? 'bg-primary' : 'bg-input'
-          )}
-        >
-          <span
-            className={cn(
-              'pointer-events-none inline-block h-5 w-5 rounded-full bg-background shadow-lg ring-0 transition-transform',
-              formData.isBreak ? 'translate-x-5' : 'translate-x-0'
-            )}
-          />
-        </button>
-        <Label className="cursor-pointer" onClick={() => setFormData({ ...formData, isBreak: !formData.isBreak })}>
-          Mark as break/meal time
-        </Label>
+        <Switch id="slot-is-break" checked={formData.isBreak} onCheckedChange={(isBreak) => setFormData({ ...formData, isBreak })} />
+        <Label htmlFor="slot-is-break" className="cursor-pointer">Mark as a break or meal</Label>
       </div>
 
-      {/* Form Actions */}
-      <div className="flex gap-3 pt-2">
-        <Button type="submit">{isEditing ? 'Update Time Slot' : 'Add Time Slot'}</Button>
-        <Button type="button" variant="outline" onClick={onCancel}>
-          Cancel
-        </Button>
+      <div className="flex items-center justify-end gap-3 pt-2">
+        <Button type="button" variant="outline" onClick={onCancel}>Cancel</Button>
+        <Button type="submit">{isEditing ? 'Save changes' : 'Add time slot'}</Button>
       </div>
     </form>
   );
@@ -502,287 +375,166 @@ function BulkGenerator({ venues, eventDates, existingSlots, onGenerate, onCancel
     venueId: venues[0]?.id || '',
   });
 
-  const [preview, setPreview] = React.useState<Omit<WizardTimeSlot, 'id'>[]>([]);
+  const preview = React.useMemo<Omit<WizardTimeSlot, 'id'>[]>(() => {
+    if (!formData.dayDate || !formData.venueId) return [];
 
-  // Generate preview when form changes
-  React.useEffect(() => {
-    if (!formData.dayDate || !formData.venueId) {
-      setPreview([]);
-      return;
-    }
+    const overlaps = (from: number, to: number) =>
+      existingSlots.some((existing) => {
+        if (existing.dayDate !== formData.dayDate || existing.venueId !== formData.venueId) return false;
+        return from < timeToMinutes(existing.endTime) && to > timeToMinutes(existing.startTime);
+      });
 
     const slots: Omit<WizardTimeSlot, 'id'>[] = [];
     let currentMinutes = formData.startHour * 60;
     const endMinutes = formData.endHour * 60;
 
     while (currentMinutes + formData.durationMinutes <= endMinutes) {
-      const startTime = minutesToTime(currentMinutes);
       const slotEndMinutes = currentMinutes + formData.durationMinutes;
-      const endTime = minutesToTime(slotEndMinutes);
-
-      // Check if this would overlap with existing slots
-      const wouldOverlap = existingSlots.some((existing) => {
-        if (existing.dayDate !== formData.dayDate || existing.venueId !== formData.venueId) {
-          return false;
-        }
-        const existStart = timeToMinutes(existing.startTime);
-        const existEnd = timeToMinutes(existing.endTime);
-        return currentMinutes < existEnd && slotEndMinutes > existStart;
-      });
-
-      if (!wouldOverlap) {
+      if (!overlaps(currentMinutes, slotEndMinutes)) {
         slots.push({
           dayDate: formData.dayDate,
-          startTime,
-          endTime,
+          startTime: minutesToTime(currentMinutes),
+          endTime: minutesToTime(slotEndMinutes),
           venueId: formData.venueId,
           label: '',
           isBreak: false,
         });
       }
-
       currentMinutes = slotEndMinutes;
 
-      // Add break if enabled
       if (formData.includeBreaks && currentMinutes + formData.durationMinutes <= endMinutes) {
-        const breakStart = minutesToTime(currentMinutes);
         const breakEndMinutes = currentMinutes + formData.breakDuration;
-        const breakEnd = minutesToTime(breakEndMinutes);
-
-        // Check if break would overlap
-        const breakWouldOverlap = existingSlots.some((existing) => {
-          if (existing.dayDate !== formData.dayDate || existing.venueId !== formData.venueId) {
-            return false;
-          }
-          const existStart = timeToMinutes(existing.startTime);
-          const existEnd = timeToMinutes(existing.endTime);
-          return currentMinutes < existEnd && breakEndMinutes > existStart;
-        });
-
-        if (!breakWouldOverlap) {
+        if (!overlaps(currentMinutes, breakEndMinutes)) {
           slots.push({
             dayDate: formData.dayDate,
-            startTime: breakStart,
-            endTime: breakEnd,
+            startTime: minutesToTime(currentMinutes),
+            endTime: minutesToTime(breakEndMinutes),
             venueId: formData.venueId,
             label: 'Break',
             isBreak: true,
           });
         }
-
         currentMinutes = breakEndMinutes;
       }
     }
-
-    setPreview(slots);
+    return slots;
   }, [formData, existingSlots]);
 
-  const handleGenerate = () => {
-    onGenerate(preview);
-  };
-
   const selectedVenue = venues.find((v) => v.id === formData.venueId);
+  const hourOptions = Array.from({ length: 24 }, (_, i) => (
+    <option key={i} value={i}>{formatTime(`${i.toString().padStart(2, '0')}:00`)}</option>
+  ));
 
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        {/* Date */}
-        <div className="space-y-2">
-          <Label htmlFor="bulk-date">Date</Label>
-          <select
-            id="bulk-date"
-            value={formData.dayDate}
-            onChange={(e) => setFormData({ ...formData, dayDate: e.target.value })}
-            className={cn(
-              'flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm',
-              'ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2'
-            )}
-          >
+        <Field label="Day" htmlFor="bulk-date">
+          <Select id="bulk-date" value={formData.dayDate} onChange={(e) => setFormData({ ...formData, dayDate: e.target.value })}>
             {eventDates.map((date) => (
-              <option key={date} value={date}>
-                {formatDate(date)}
-              </option>
+              <option key={date} value={date}>{formatDate(date)}</option>
             ))}
-          </select>
-        </div>
+          </Select>
+        </Field>
 
-        {/* Venue */}
-        <div className="space-y-2">
-          <Label htmlFor="bulk-venue">Venue</Label>
-          <select
-            id="bulk-venue"
-            value={formData.venueId}
-            onChange={(e) => setFormData({ ...formData, venueId: e.target.value })}
-            className={cn(
-              'flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm',
-              'ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2'
-            )}
-          >
+        <Field label="Room" htmlFor="bulk-venue">
+          <Select id="bulk-venue" value={formData.venueId} onChange={(e) => setFormData({ ...formData, venueId: e.target.value })}>
             {venues.map((venue) => (
-              <option key={venue.id} value={venue.id}>
-                {venue.name}
-              </option>
+              <option key={venue.id} value={venue.id}>{venue.name}</option>
             ))}
-          </select>
-        </div>
+          </Select>
+        </Field>
 
-        {/* Start Hour */}
-        <div className="space-y-2">
-          <Label htmlFor="bulk-start">Start Hour</Label>
-          <select
-            id="bulk-start"
-            value={formData.startHour}
-            onChange={(e) => setFormData({ ...formData, startHour: Number(e.target.value) })}
-            className={cn(
-              'flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm',
-              'ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2'
-            )}
-          >
-            {Array.from({ length: 24 }, (_, i) => (
-              <option key={i} value={i}>
-                {formatTime(`${i.toString().padStart(2, '0')}:00`)}
-              </option>
-            ))}
-          </select>
-        </div>
+        <Field label="First slot starts" htmlFor="bulk-start">
+          <Select id="bulk-start" value={formData.startHour} onChange={(e) => setFormData({ ...formData, startHour: Number(e.target.value) })}>
+            {hourOptions}
+          </Select>
+        </Field>
 
-        {/* End Hour */}
-        <div className="space-y-2">
-          <Label htmlFor="bulk-end">End Hour</Label>
-          <select
-            id="bulk-end"
-            value={formData.endHour}
-            onChange={(e) => setFormData({ ...formData, endHour: Number(e.target.value) })}
-            className={cn(
-              'flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm',
-              'ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2'
-            )}
-          >
-            {Array.from({ length: 24 }, (_, i) => (
-              <option key={i} value={i}>
-                {formatTime(`${i.toString().padStart(2, '0')}:00`)}
-              </option>
-            ))}
-          </select>
-        </div>
+        <Field label="Last slot ends by" htmlFor="bulk-end">
+          <Select id="bulk-end" value={formData.endHour} onChange={(e) => setFormData({ ...formData, endHour: Number(e.target.value) })}>
+            {hourOptions}
+          </Select>
+        </Field>
 
-        {/* Duration */}
-        <div className="space-y-2">
-          <Label htmlFor="bulk-duration">Slot Duration</Label>
-          <select
-            id="bulk-duration"
-            value={formData.durationMinutes}
-            onChange={(e) => setFormData({ ...formData, durationMinutes: Number(e.target.value) })}
-            className={cn(
-              'flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm',
-              'ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2'
-            )}
-          >
+        <Field label="Slot length" htmlFor="bulk-duration">
+          <Select id="bulk-duration" value={formData.durationMinutes} onChange={(e) => setFormData({ ...formData, durationMinutes: Number(e.target.value) })}>
             {DURATION_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
+              <option key={option.value} value={option.value}>{option.label}</option>
             ))}
-          </select>
-        </div>
+          </Select>
+        </Field>
 
-        {/* Include Breaks */}
         <div className="space-y-2">
-          <Label>Breaks Between Sessions</Label>
-          <div className="flex items-center gap-3 h-10">
-            <button
-              type="button"
-              role="switch"
-              aria-checked={formData.includeBreaks}
-              onClick={() => setFormData({ ...formData, includeBreaks: !formData.includeBreaks })}
-              className={cn(
-                'relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors',
-                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
-                formData.includeBreaks ? 'bg-primary' : 'bg-input'
-              )}
-            >
-              <span
-                className={cn(
-                  'pointer-events-none inline-block h-5 w-5 rounded-full bg-background shadow-lg ring-0 transition-transform',
-                  formData.includeBreaks ? 'translate-x-5' : 'translate-x-0'
-                )}
-              />
-            </button>
-            <span className="text-sm text-muted-foreground">
-              Add breaks between sessions
-            </span>
+          <Label htmlFor="bulk-breaks">Breaks between sessions</Label>
+          <div className="flex items-center gap-3 h-11">
+            <Switch id="bulk-breaks" checked={formData.includeBreaks} onCheckedChange={(includeBreaks) => setFormData({ ...formData, includeBreaks })} />
+            <span className="text-sm text-muted-foreground">Add a break after each session</span>
           </div>
         </div>
 
-        {/* Break Duration (shown when breaks are enabled) */}
         {formData.includeBreaks && (
-          <div className="space-y-2">
-            <Label htmlFor="bulk-break-duration">Break Duration</Label>
-            <select
-              id="bulk-break-duration"
-              value={formData.breakDuration}
-              onChange={(e) => setFormData({ ...formData, breakDuration: Number(e.target.value) })}
-              className={cn(
-                'flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm',
-                'ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2'
-              )}
-            >
+          <Field label="Break length" htmlFor="bulk-break-duration">
+            <Select id="bulk-break-duration" value={formData.breakDuration} onChange={(e) => setFormData({ ...formData, breakDuration: Number(e.target.value) })}>
               {BREAK_DURATION_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
+                <option key={option.value} value={option.value}>{option.label}</option>
               ))}
-            </select>
-          </div>
+            </Select>
+          </Field>
         )}
       </div>
 
-      {/* Preview */}
       {preview.length > 0 && (
         <div className="space-y-2">
-          <Label>Preview ({preview.length} slots)</Label>
+          <p className="text-sm font-medium">Preview ({plural(preview.length, 'slot')})</p>
           <div className="rounded-lg border bg-muted/30 p-3 max-h-48 overflow-y-auto">
             <div className="space-y-1.5">
               {preview.map((slot, index) => (
                 <div
                   key={index}
-                  className={cn(
-                    'flex items-center justify-between text-sm px-2 py-1 rounded',
-                    slot.isBreak ? 'bg-muted text-muted-foreground' : 'bg-background'
-                  )}
+                  className={cn('flex items-center justify-between text-sm px-2 py-1 rounded', slot.isBreak ? 'bg-muted text-muted-foreground' : 'bg-background')}
                 >
-                  <span>
-                    {formatTime(slot.startTime)} - {formatTime(slot.endTime)}
-                  </span>
-                  {slot.isBreak && (
-                    <Badge variant="secondary" className="text-xs">
-                      Break
-                    </Badge>
-                  )}
+                  <span>{formatRange(slot.startTime, slot.endTime)}</span>
+                  {slot.isBreak && <Badge variant="secondary">Break</Badge>}
                 </div>
               ))}
             </div>
           </div>
           <p className="text-xs text-muted-foreground">
-            Slots will be created for {selectedVenue?.name || 'selected venue'} on {formData.dayDate ? formatDate(formData.dayDate) : 'selected date'}
+            Slots are created in {selectedVenue?.name || 'the chosen room'} on {formData.dayDate ? formatDate(formData.dayDate) : 'the chosen day'}.
           </p>
         </div>
       )}
 
       {preview.length === 0 && formData.startHour >= formData.endHour && (
-        <p className="text-sm text-destructive">End hour must be after start hour</p>
+        <p className="text-sm text-destructive" role="alert">The end must be after the start.</p>
       )}
 
-      {/* Actions */}
-      <div className="flex gap-3 pt-2">
-        <Button onClick={handleGenerate} disabled={preview.length === 0}>
-          <Zap className="h-4 w-4 mr-2" />
-          Generate {preview.length} Slots
-        </Button>
-        <Button type="button" variant="outline" onClick={onCancel}>
-          Cancel
+      <div className="flex items-center justify-end gap-3 pt-2">
+        <Button type="button" variant="outline" onClick={onCancel}>Cancel</Button>
+        <Button type="button" onClick={() => onGenerate(preview)} disabled={preview.length === 0}>
+          <Zap className="h-4 w-4 mr-2" aria-hidden="true" />
+          Generate {plural(preview.length, 'slot')}
         </Button>
       </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// Slot actions (the one "Add a slot / Generate slots" pair)
+// ============================================================================
+
+function SlotActions({ onAdd, onBulk, className }: { onAdd: () => void; onBulk: () => void; className?: string }) {
+  return (
+    <div className={cn('flex flex-wrap gap-2', className)}>
+      <Button variant="outline" size="sm" onClick={onAdd}>
+        <Plus className="h-4 w-4 mr-1.5" aria-hidden="true" />
+        Add a slot
+      </Button>
+      <Button variant="outline" size="sm" onClick={onBulk}>
+        <Zap className="h-4 w-4 mr-1.5" aria-hidden="true" />
+        Generate slots
+      </Button>
     </div>
   );
 }
@@ -791,40 +543,32 @@ function BulkGenerator({ venues, eventDates, existingSlots, onGenerate, onCancel
 // Main Component
 // ============================================================================
 
+type ViewMode = 'calendar' | 'list';
+
 export function ScheduleStep({ state, dispatch }: ScheduleStepProps) {
   const { schedule, venues, dates } = state;
   const [showForm, setShowForm] = React.useState(false);
   const [showBulkGenerator, setShowBulkGenerator] = React.useState(false);
   const [editingSlot, setEditingSlot] = React.useState<WizardTimeSlot | null>(null);
-  const [viewMode, setViewMode] = React.useState<'list' | 'calendar'>('calendar');
+  const [viewMode, setViewMode] = React.useState<ViewMode>('calendar');
   const [calendarVenue, setCalendarVenue] = React.useState<string | 'all'>('all');
 
-  // Get event dates array
   const eventDates = React.useMemo(() => {
     if (!dates.startDate || !dates.endDate) return [];
     return getEventDates(dates.startDate, dates.endDate);
   }, [dates.startDate, dates.endDate]);
 
-  // Group time slots by date
   const slotsByDate = React.useMemo(() => {
     const grouped: Record<string, WizardTimeSlot[]> = {};
-
     for (const slot of schedule.timeSlots) {
-      if (!grouped[slot.dayDate]) {
-        grouped[slot.dayDate] = [];
-      }
-      grouped[slot.dayDate].push(slot);
+      (grouped[slot.dayDate] ??= []).push(slot);
     }
-
-    // Sort slots within each day by start time
     for (const date of Object.keys(grouped)) {
       grouped[date].sort((a, b) => timeToMinutes(a.startTime) - timeToMinutes(b.startTime));
     }
-
     return grouped;
   }, [schedule.timeSlots]);
 
-  // Check if dates and venues are configured
   const hasDates = eventDates.length > 0;
   const hasVenues = venues.length > 0;
   const canAddSlots = hasDates && hasVenues;
@@ -846,20 +590,12 @@ export function ScheduleStep({ state, dispatch }: ScheduleStepProps) {
   };
 
   const handleFormSubmit = (data: TimeSlotFormData) => {
-    const slotData: WizardTimeSlot = {
-      id: editingSlot?.id || generateId(),
-      ...data,
-    };
-
+    const slotData: WizardTimeSlot = { id: editingSlot?.id || generateId(), ...data };
     if (editingSlot) {
-      dispatch({
-        type: 'UPDATE_TIME_SLOT',
-        payload: { id: editingSlot.id, updates: slotData },
-      });
+      dispatch({ type: 'UPDATE_TIME_SLOT', payload: { id: editingSlot.id, updates: slotData } });
     } else {
       dispatch({ type: 'ADD_TIME_SLOT', payload: slotData });
     }
-
     setShowForm(false);
     setEditingSlot(null);
   };
@@ -877,39 +613,19 @@ export function ScheduleStep({ state, dispatch }: ScheduleStepProps) {
 
   const handleBulkGenerate = (slots: Omit<WizardTimeSlot, 'id'>[]) => {
     for (const slot of slots) {
-      dispatch({
-        type: 'ADD_TIME_SLOT',
-        payload: { ...slot, id: generateId() },
-      });
+      dispatch({ type: 'ADD_TIME_SLOT', payload: { ...slot, id: generateId() } });
     }
-    setShowBulkGenerator(false);
-  };
-
-  const handleBulkCancel = () => {
     setShowBulkGenerator(false);
   };
 
   const getVenueById = (id: string) => venues.find((v) => v.id === id);
 
   // Calendar create handler — emits one slot per venueId
-  const handleCalendarCreate = (
-    venueIds: string[],
-    dayDate: string,
-    startTime: string,
-    endTime: string,
-  ) => {
+  const handleCalendarCreate = (venueIds: string[], dayDate: string, startTime: string, endTime: string) => {
     for (const vid of venueIds) {
       dispatch({
         type: 'ADD_TIME_SLOT',
-        payload: {
-          id: generateId(),
-          venueId: vid,
-          dayDate,
-          startTime,
-          endTime,
-          label: '',
-          isBreak: false,
-        },
+        payload: { id: generateId(), venueId: vid, dayDate, startTime, endTime, label: '', isBreak: false },
       });
     }
   };
@@ -918,108 +634,76 @@ export function ScheduleStep({ state, dispatch }: ScheduleStepProps) {
     <div className="space-y-6">
       <Card>
         <CardHeader>
-          <div className="flex items-start justify-between gap-4">
+          <div className="flex items-start justify-between gap-4 flex-wrap">
             <div>
               <CardTitle>Schedule</CardTitle>
               <CardDescription>
-                Define time slots for sessions. Each slot represents a window where a session can be scheduled.
+                Time slots are the windows a session can be scheduled into; sessions are assigned later. Parallel slots in different rooms are fine, overlapping slots in one room are not. Mark meals and coffee as breaks so they read differently.
               </CardDescription>
             </div>
             {canAddSlots && (
-              <div className="inline-flex rounded-lg border p-0.5 bg-muted/30 flex-shrink-0">
-                <button
-                  type="button"
-                  onClick={() => setViewMode('calendar')}
-                  className={cn(
-                    'inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors',
-                    viewMode === 'calendar'
-                      ? 'bg-background shadow-sm'
-                      : 'text-muted-foreground hover:text-foreground',
-                  )}
-                >
-                  <LayoutGrid className="h-3.5 w-3.5" />
-                  Calendar
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setViewMode('list')}
-                  className={cn(
-                    'inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors',
-                    viewMode === 'list'
-                      ? 'bg-background shadow-sm'
-                      : 'text-muted-foreground hover:text-foreground',
-                  )}
-                >
-                  <List className="h-3.5 w-3.5" />
-                  List
-                </button>
-              </div>
+              <SegmentedControl<ViewMode>
+                aria-label="Schedule view"
+                size="sm"
+                value={viewMode}
+                onValueChange={setViewMode}
+                options={[
+                  { value: 'calendar', label: 'Calendar', icon: <LayoutGrid className="h-3.5 w-3.5" aria-hidden="true" /> },
+                  { value: 'list', label: 'List', icon: <List className="h-3.5 w-3.5" aria-hidden="true" /> },
+                ]}
+              />
             )}
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
-          {/* Prerequisites Check */}
           {!canAddSlots && (
             <div className="rounded-lg bg-muted/50 border p-4 text-sm text-muted-foreground space-y-2">
               {!hasDates && (
-                <p className="flex items-center gap-2">
-                  <Calendar className="h-4 w-4" />
-                  Please set your event dates in the previous step first.
+                <p className="flex items-center gap-2 flex-wrap">
+                  <Calendar className="h-4 w-4" aria-hidden="true" />
+                  Choose the gathering’s dates first.
+                  <Button variant="link" size="sm" className="h-auto p-0" onClick={() => dispatch({ type: 'SET_STEP', payload: getNumberFromStep('dates') })}>
+                    Go to Dates
+                  </Button>
                 </p>
               )}
               {!hasVenues && (
-                <p className="flex items-center gap-2">
-                  <MapPin className="h-4 w-4" />
-                  Please add at least one venue before creating time slots.
+                <p className="flex items-center gap-2 flex-wrap">
+                  <MapPin className="h-4 w-4" aria-hidden="true" />
+                  Add at least one room before creating time slots.
+                  <Button variant="link" size="sm" className="h-auto p-0" onClick={() => dispatch({ type: 'SET_STEP', payload: getNumberFromStep('venues') })}>
+                    Go to Venues
+                  </Button>
                 </p>
               )}
+              <p>You can also build the schedule later from the organizer workspace.</p>
             </div>
           )}
 
-          {/* Calendar View */}
           {canAddSlots && viewMode === 'calendar' && (
             <div className="space-y-3">
-              {/* Calendar toolbar */}
               <div className="flex items-center justify-between gap-3 flex-wrap">
-                <div className="flex items-center gap-2">
-                  <Label htmlFor="calendar-venue" className="text-sm">
-                    Venue
-                  </Label>
-                  <select
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Label htmlFor="calendar-venue" className="text-sm">Room</Label>
+                  <Select
                     id="calendar-venue"
                     value={calendarVenue}
                     onChange={(e) => setCalendarVenue(e.target.value as string | 'all')}
-                    className={cn(
-                      'h-9 rounded-md border border-input bg-background px-3 text-sm',
-                      'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-                    )}
+                    wrapperClassName="w-auto"
+                    className="w-auto min-w-[200px]"
                   >
-                    <option value="all">All venues (bulk create)</option>
+                    <option value="all">All rooms (one slot per room)</option>
                     {venues.map((v) => (
-                      <option key={v.id} value={v.id}>
-                        {v.name}
-                      </option>
+                      <option key={v.id} value={v.id}>{v.name}</option>
                     ))}
-                  </select>
+                  </Select>
                   {calendarVenue === 'all' && (
-                    <span className="text-xs text-muted-foreground">
-                      Creates one slot per venue ({venues.length})
-                    </span>
+                    <span className="text-xs text-muted-foreground">Creates one slot in each of the {plural(venues.length, 'room')}</span>
                   )}
                 </div>
-                <div className="flex gap-2">
-                  <Button variant="outline" size="sm" onClick={handleAddSlot}>
-                    <Plus className="h-4 w-4 mr-1.5" />
-                    Add slot
-                  </Button>
-                  <Button variant="outline" size="sm" onClick={handleShowBulkGenerator}>
-                    <Zap className="h-4 w-4 mr-1.5" />
-                    Bulk generate
-                  </Button>
-                </div>
+                {!showForm && !showBulkGenerator && <SlotActions onAdd={handleAddSlot} onBulk={handleShowBulkGenerator} />}
               </div>
 
-              {/* The calendar */}
               <ScheduleCalendar
                 eventDates={eventDates}
                 venues={venues}
@@ -1032,7 +716,6 @@ export function ScheduleStep({ state, dispatch }: ScheduleStepProps) {
             </div>
           )}
 
-          {/* Time Slots by Date */}
           {canAddSlots && viewMode === 'list' && Object.keys(slotsByDate).length > 0 && (
             <div className="space-y-4">
               {eventDates
@@ -1040,21 +723,13 @@ export function ScheduleStep({ state, dispatch }: ScheduleStepProps) {
                 .map((date) => (
                   <div key={date} className="space-y-2">
                     <h4 className="font-medium text-sm flex items-center gap-2">
-                      <Calendar className="h-4 w-4 text-muted-foreground" />
+                      <Calendar className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
                       {formatDate(date)}
-                      <Badge variant="secondary" className="text-xs">
-                        {slotsByDate[date].length} slot{slotsByDate[date].length !== 1 ? 's' : ''}
-                      </Badge>
+                      <Badge variant="secondary">{plural(slotsByDate[date].length, 'slot')}</Badge>
                     </h4>
                     <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
                       {slotsByDate[date].map((slot) => (
-                        <TimeSlotCard
-                          key={slot.id}
-                          slot={slot}
-                          venue={getVenueById(slot.venueId)}
-                          onEdit={handleEditSlot}
-                          onDelete={handleDeleteSlot}
-                        />
+                        <TimeSlotCard key={slot.id} slot={slot} venue={getVenueById(slot.venueId)} onEdit={handleEditSlot} onDelete={handleDeleteSlot} />
                       ))}
                     </div>
                   </div>
@@ -1062,55 +737,31 @@ export function ScheduleStep({ state, dispatch }: ScheduleStepProps) {
             </div>
           )}
 
-          {/* Empty State (list only) */}
           {canAddSlots && viewMode === 'list' && schedule.timeSlots.length === 0 && !showForm && !showBulkGenerator && (
             <div className="text-center py-8 border-2 border-dashed rounded-lg">
-              <Clock className="h-12 w-12 mx-auto text-muted-foreground/50 mb-3" />
-              <p className="text-muted-foreground mb-4">
-                No time slots defined yet. Add slots individually or generate them in bulk.
-              </p>
-              <div className="flex justify-center gap-3">
-                <Button onClick={handleAddSlot}>
-                  <Plus className="h-4 w-4 mr-2" />
-                  Add Time Slot
-                </Button>
-                <Button variant="outline" onClick={handleShowBulkGenerator}>
-                  <Zap className="h-4 w-4 mr-2" />
-                  Bulk Generate
-                </Button>
-              </div>
+              <Clock className="h-12 w-12 mx-auto text-muted-foreground/50 mb-3" aria-hidden="true" />
+              <p className="text-muted-foreground mb-4">No time slots yet. Add them one at a time or generate a day at once.</p>
+              <SlotActions onAdd={handleAddSlot} onBulk={handleShowBulkGenerator} className="justify-center" />
             </div>
           )}
 
-          {/* Action Buttons (list view only) */}
           {canAddSlots && viewMode === 'list' && schedule.timeSlots.length > 0 && !showForm && !showBulkGenerator && (
-            <div className="flex gap-3">
-              <Button onClick={handleAddSlot} variant="outline">
-                <Plus className="h-4 w-4 mr-2" />
-                Add Time Slot
-              </Button>
-              <Button variant="outline" onClick={handleShowBulkGenerator}>
-                <Zap className="h-4 w-4 mr-2" />
-                Bulk Generate
-              </Button>
-            </div>
+            <SlotActions onAdd={handleAddSlot} onBulk={handleShowBulkGenerator} />
           )}
 
-          {/* Time Slot Form */}
           {showForm && canAddSlots && (
             <Card className="border-primary/50">
               <CardHeader className="pb-3">
                 <div className="flex items-center justify-between">
-                  <CardTitle className="text-lg">
-                    {editingSlot ? 'Edit Time Slot' : 'New Time Slot'}
-                  </CardTitle>
-                  <Button variant="ghost" size="icon" className="h-8 w-8" onClick={handleFormCancel}>
-                    <X className="h-4 w-4" />
+                  <CardTitle className="text-lg">{editingSlot ? 'Edit time slot' : 'New time slot'}</CardTitle>
+                  <Button variant="ghost" size="icon-sm" onClick={handleFormCancel} aria-label="Close the time slot form">
+                    <X className="h-4 w-4" aria-hidden="true" />
                   </Button>
                 </div>
               </CardHeader>
               <CardContent>
                 <TimeSlotForm
+                  key={editingSlot?.id ?? 'new'}
                   initialData={editingSlot}
                   venues={venues}
                   eventDates={eventDates}
@@ -1125,19 +776,16 @@ export function ScheduleStep({ state, dispatch }: ScheduleStepProps) {
             </Card>
           )}
 
-          {/* Bulk Generator */}
           {showBulkGenerator && canAddSlots && (
             <Card className="border-primary/50">
               <CardHeader className="pb-3">
                 <div className="flex items-center justify-between">
                   <div>
-                    <CardTitle className="text-lg">Bulk Generate Time Slots</CardTitle>
-                    <CardDescription className="mt-1">
-                      Quickly create multiple time slots for a day
-                    </CardDescription>
+                    <CardTitle className="text-lg">Generate time slots</CardTitle>
+                    <CardDescription className="mt-1">Fill a day in one room with evenly spaced slots.</CardDescription>
                   </div>
-                  <Button variant="ghost" size="icon" className="h-8 w-8" onClick={handleBulkCancel}>
-                    <X className="h-4 w-4" />
+                  <Button variant="ghost" size="icon-sm" onClick={() => setShowBulkGenerator(false)} aria-label="Close the generator">
+                    <X className="h-4 w-4" aria-hidden="true" />
                   </Button>
                 </div>
               </CardHeader>
@@ -1147,29 +795,11 @@ export function ScheduleStep({ state, dispatch }: ScheduleStepProps) {
                   eventDates={eventDates}
                   existingSlots={schedule.timeSlots}
                   onGenerate={handleBulkGenerate}
-                  onCancel={handleBulkCancel}
+                  onCancel={() => setShowBulkGenerator(false)}
                 />
               </CardContent>
             </Card>
           )}
-        </CardContent>
-      </Card>
-
-      {/* Tips */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Tips for Scheduling</CardTitle>
-        </CardHeader>
-        <CardContent className="text-sm text-muted-foreground space-y-2">
-          <p>
-            <strong>Time Slots vs Sessions:</strong> Time slots define when sessions can happen. Actual sessions will be assigned to these slots later.
-          </p>
-          <p>
-            <strong>Breaks:</strong> Mark lunch and coffee breaks so they appear differently in the schedule.
-          </p>
-          <p>
-            <strong>Overlap:</strong> You can have parallel sessions in different venues at the same time, but not multiple slots in the same venue at the same time.
-          </p>
         </CardContent>
       </Card>
     </div>

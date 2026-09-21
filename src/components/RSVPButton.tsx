@@ -2,11 +2,14 @@
 
 import * as React from 'react'
 import { useRouter } from 'next/navigation'
-import { Loader2, UserCheck, UserPlus, Clock, Users } from 'lucide-react'
-import { Button } from '@/components/ui/button'
+import { UserCheck, UserPlus, Clock, Users } from 'lucide-react'
+import { Button, type ButtonProps } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
+import { useToast } from '@/components/ui/toast'
 import { useAuth } from '@/hooks/useAuth'
 import { useEvent } from '@/contexts/EventContext'
 import { apiFetch } from '@/lib/api/client'
+import { plural } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
 type RsvpStatus = 'confirmed' | 'waitlist'
@@ -17,7 +20,7 @@ interface RsvpResponse {
   waitlist_count: number
 }
 
-interface RSVPButtonProps {
+interface RSVPButtonProps extends Pick<ButtonProps, 'variant' | 'size' | 'className'> {
   sessionId: string
   /** Current confirmed RSVP count */
   rsvpCount: number
@@ -29,10 +32,6 @@ interface RSVPButtonProps {
   initialStatus?: RsvpStatus | null
   /** Initial waitlist position (if on waitlist) */
   initialWaitlistPosition?: number | null
-  /** Button variant */
-  variant?: 'default' | 'outline' | 'ghost'
-  /** Button size */
-  size?: 'default' | 'sm' | 'lg'
   /** Show capacity info */
   showCapacity?: boolean
   /** Callback when RSVP changes */
@@ -53,12 +52,14 @@ export function RSVPButton({
   initialWaitlistPosition = null,
   variant = 'default',
   size = 'default',
+  className,
   showCapacity = true,
   onRSVPChange,
 }: RSVPButtonProps) {
   const router = useRouter()
   const { user } = useAuth()
   const event = useEvent()
+  const { toast } = useToast()
 
   const [status, setStatus] = React.useState<RsvpStatus | null>(initialStatus)
   const [waitlistPosition, setWaitlistPosition] = React.useState<number | null>(initialWaitlistPosition)
@@ -92,11 +93,15 @@ export function RSVPButton({
         `/api/v1/events/${encodeURIComponent(event.slug)}/rsvps/${sessionId}`,
         { method: status ? 'DELETE' : 'PUT', ...(status ? {} : { json: {} }) },
       )
-      setStatus(result.my_rsvp?.status ?? null)
+      const next = result.my_rsvp?.status ?? null
+      setStatus(next)
       setWaitlistPosition(result.my_rsvp?.waitlist_position ?? null)
       setLocalRsvpCount(result.rsvp_count)
       setLocalWaitlistCount(result.waitlist_count)
-      onRSVPChange?.(result.my_rsvp?.status ?? null)
+      onRSVPChange?.(next)
+      if (next === 'confirmed') toast({ title: 'You’re going', description: 'This session is on your RSVP list.', variant: 'success' })
+      else if (next === 'waitlist') toast({ title: 'You’re on the waitlist', description: 'We’ll move you in if a spot opens.', variant: 'success' })
+      else toast({ title: 'RSVP cancelled', variant: 'success' })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Your RSVP could not be saved. Please try again.')
     } finally {
@@ -104,53 +109,23 @@ export function RSVPButton({
     }
   }
 
-  // Render different states
-  const renderButtonContent = () => {
-    if (isLoading) {
-      return (
-        <>
-          <Loader2 className="h-4 w-4 animate-spin mr-2" />
-          <span>Loading...</span>
-        </>
-      )
-    }
-
-    if (status === 'confirmed') {
-      return (
-        <>
-          <UserCheck className="h-4 w-4 mr-2" />
-          <span>You&apos;re going</span>
-        </>
-      )
-    }
-
-    if (status === 'waitlist') {
-      return (
-        <>
-          <Clock className="h-4 w-4 mr-2" />
-          <span>On waitlist{waitlistPosition ? ` (#${waitlistPosition})` : ''}</span>
-        </>
-      )
-    }
-
-    if (!hasRoom) {
-      return (
-        <>
-          <Clock className="h-4 w-4 mr-2" />
-          <span>Join waitlist</span>
-        </>
-      )
-    }
-
-    return (
-      <>
-        <UserPlus className="h-4 w-4 mr-2" />
-        <span>RSVP</span>
-      </>
-    )
+  let icon: React.ReactNode
+  let label: string
+  if (status === 'confirmed') {
+    icon = <UserCheck className="mr-2 h-4 w-4" aria-hidden />
+    label = 'You’re going'
+  } else if (status === 'waitlist') {
+    icon = <Clock className="mr-2 h-4 w-4" aria-hidden />
+    label = `On the waitlist${waitlistPosition ? ` (#${waitlistPosition})` : ''}`
+  } else if (!hasRoom) {
+    icon = <Clock className="mr-2 h-4 w-4" aria-hidden />
+    label = 'Join the waitlist'
+  } else {
+    icon = <UserPlus className="mr-2 h-4 w-4" aria-hidden />
+    label = 'RSVP'
   }
 
-  const buttonVariant = status ? 'default' : (hasRoom ? variant : 'outline')
+  const buttonVariant: ButtonProps['variant'] = status ? 'default' : hasRoom ? variant : 'outline'
 
   return (
     <div className="flex flex-col gap-1.5">
@@ -158,38 +133,38 @@ export function RSVPButton({
         variant={buttonVariant}
         size={size}
         onClick={handleRSVP}
-        disabled={isLoading}
+        loading={isLoading}
+        aria-pressed={status !== null}
+        title={status ? 'Cancel your RSVP' : undefined}
         className={cn(
-          status === 'confirmed' && 'bg-green-600 hover:bg-green-700 text-white',
-          status === 'waitlist' && 'bg-amber-500 hover:bg-amber-600 text-white'
+          status === 'confirmed' && 'bg-success text-success-foreground hover:bg-success/90',
+          status === 'waitlist' && 'bg-signal-amber text-foreground hover:bg-signal-amber/90',
+          className
         )}
       >
-        {renderButtonContent()}
+        {!isLoading && icon}
+        {label}
       </Button>
 
-      {error && <p role="alert" className="text-xs text-destructive text-center">{error}</p>}
+      {error && (
+        <p role="alert" className="rounded-lg border border-destructive/20 bg-destructive/10 p-2 text-xs text-destructive">{error}</p>
+      )}
 
       {showCapacity && (
-        <div className="flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
-          <Users className="h-3 w-3" />
+        <div className="flex flex-wrap items-center justify-center gap-1.5 text-xs text-muted-foreground">
+          <Users className="h-3 w-3" aria-hidden />
           {capacity !== null ? (
             <span>
               {localRsvpCount}/{capacity} spots
               {spotsLeft !== null && spotsLeft <= 5 && spotsLeft > 0 && (
-                <span className="text-amber-500 ml-1">({spotsLeft} left)</span>
+                <span className="ml-1 text-signal-amber">({plural(spotsLeft, 'spot')} left)</span>
               )}
-              {spotsLeft === 0 && (
-                <span className="text-red-500 ml-1">(Full)</span>
-              )}
+              {spotsLeft === 0 && <span className="ml-1 text-destructive">(full)</span>}
             </span>
           ) : (
             <span>{localRsvpCount} attending</span>
           )}
-          {localWaitlistCount > 0 && (
-            <span className="text-muted-foreground">
-              + {localWaitlistCount} waitlisted
-            </span>
-          )}
+          {localWaitlistCount > 0 && <span>· {localWaitlistCount} waitlisted</span>}
         </div>
       )}
     </div>
@@ -210,22 +185,16 @@ export function RSVPIndicator({
 }) {
   const spotsLeft = capacity !== null ? capacity - rsvpCount : null
   const isFull = spotsLeft !== null && spotsLeft <= 0
+  const nearlyFull = spotsLeft !== null && spotsLeft <= 3 && spotsLeft > 0
 
   return (
     <div className="flex items-center gap-1.5 text-sm">
-      <Users className="h-4 w-4 text-muted-foreground" />
-      <span className={cn(
-        isFull && 'text-red-500',
-        spotsLeft !== null && spotsLeft <= 3 && spotsLeft > 0 && 'text-amber-500'
-      )}>
+      <Users className="h-4 w-4 text-muted-foreground" aria-hidden />
+      <span className={cn('tabular-nums', isFull && 'text-destructive', nearlyFull && 'text-signal-amber')}>
         {capacity !== null ? `${rsvpCount}/${capacity}` : rsvpCount}
       </span>
-      {userStatus === 'confirmed' && (
-        <span className="text-green-600 text-xs font-medium">(Going)</span>
-      )}
-      {userStatus === 'waitlist' && (
-        <span className="text-amber-500 text-xs font-medium">(Waitlist)</span>
-      )}
+      {userStatus === 'confirmed' && <Badge variant="success">Going</Badge>}
+      {userStatus === 'waitlist' && <Badge variant="amber">Waitlist</Badge>}
     </div>
   )
 }
