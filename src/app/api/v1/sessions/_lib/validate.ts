@@ -1,4 +1,5 @@
 import 'server-only'
+import { roundCoarse } from '@/lib/geo/coarse'
 /**
  * Body validation for proposal create/edit. Returns only the columns a request may carry;
  * the database remains the authority on who may change what (participation triggers,
@@ -19,8 +20,12 @@ export const CONTENT_COLUMNS = new Set<string>([
 /** App-side curation: organizers (and the author, for the suggested track). Never rewrites a record. */
 export const CURATION_COLUMNS = new Set<string>(['track_id'])
 
-/** Attendee logistics kept app-side: the session's hosts, co-hosts and organizers. */
-export const LOGISTICS_COLUMNS = new Set<string>(['telegram_group_url'])
+/**
+ * Attendee logistics kept app-side: the session's hosts, co-hosts and organizers. `location_lat`
+ * and `location_lng` (the exact point of a self-hosted session, migration 0023) are the tier of
+ * `custom_location`: never published; only the derived coarse `public_geo` is.
+ */
+export const LOGISTICS_COLUMNS = new Set<string>(['telegram_group_url', 'location_lat', 'location_lng'])
 
 /**
  * Fields that shape the proposer's `schellingpoint.draft.proposal` record. `custom_location` (the
@@ -101,6 +106,15 @@ function httpsUrl(field: string, value: unknown): string | null {
   return url.toString()
 }
 
+function coordinate(field: string, value: unknown, limit: number): number | null {
+  if (value === null || value === undefined || value === '') return null
+  const n = typeof value === 'string' ? Number(value) : value
+  if (typeof n !== 'number' || !Number.isFinite(n) || n < -limit || n > limit) {
+    throw new FieldError(field, `${field.replace(/_/g, ' ')} must be a number between -${limit} and ${limit}`)
+  }
+  return Math.round(n * 1e6) / 1e6
+}
+
 function oneOf(field: string, value: unknown, allowed: string[]): string {
   if (typeof value !== 'string' || !allowed.includes(value)) throw new FieldError(field, `${field.replace(/_/g, ' ')} must be one of: ${allowed.join(', ')}`)
   return value
@@ -141,6 +155,16 @@ export function parseSessionFields(body: Record<string, unknown>, creating: bool
   if (has('self_hosted_end_time')) out.self_hosted_end_time = instant('self_hosted_end_time', body.self_hosted_end_time)
   if (has('telegram_group_url')) out.telegram_group_url = httpsUrl('telegram_group_url', body.telegram_group_url)
   if (has('time_preferences')) out.time_preferences = stringList('time_preferences', body.time_preferences, 20, 40)
+  if (has('location_lat') || has('location_lng')) {
+    // The exact point is attendee-only; `public_geo` (≈1 km) is derived here and is the only geo a
+    // non-member or a record ever sees. Sending either coordinate re-places the pin (both or neither).
+    const lat = coordinate('location_lat', body.location_lat, 90)
+    const lng = coordinate('location_lng', body.location_lng, 180)
+    if ((lat === null) !== (lng === null)) throw new FieldError('location_lat', 'Give both a latitude and a longitude, or neither')
+    out.location_lat = lat
+    out.location_lng = lng
+    out.public_geo = lat === null || lng === null ? null : roundCoarse(lat, lng)
+  }
 
   if (out.self_hosted_start_time && out.self_hosted_end_time
     && Date.parse(out.self_hosted_end_time as string) <= Date.parse(out.self_hosted_start_time as string)) {
@@ -152,6 +176,9 @@ export function parseSessionFields(body: Record<string, unknown>, creating: bool
     out.public_place = null
     out.self_hosted_start_time = null
     out.self_hosted_end_time = null
+    out.location_lat = null
+    out.location_lng = null
+    out.public_geo = null
   }
 
   // Organizer-only columns: validated for shape, authorized by the database.

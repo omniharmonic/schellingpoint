@@ -34,6 +34,23 @@ export interface VenueInput {
   is_primary: boolean
   /** Formats this room may host; empty = all (migration 0018). */
   allowed_formats: string[]
+  /** Migration 0023: WGS84 point; published only for a public venue. Both or neither. */
+  latitude: number | null
+  longitude: number | null
+  /** The address text the point was geocoded from (null when placed by hand). */
+  geocoded_from: string | null
+  geocoded_at: string | null
+}
+
+function coordinate(body: Record<string, unknown>, field: 'latitude' | 'longitude'): number | null {
+  const raw = body[field]
+  if (raw === undefined || raw === null || raw === '') return null
+  const n = typeof raw === 'string' ? Number(raw) : raw
+  const limit = field === 'latitude' ? 90 : 180
+  if (typeof n !== 'number' || !Number.isFinite(n) || n < -limit || n > limit) {
+    throw new InputError(`${field === 'latitude' ? 'Latitude' : 'Longitude'} must be a number between -${limit} and ${limit}`, field)
+  }
+  return Math.round(n * 1e6) / 1e6
 }
 
 const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
@@ -74,6 +91,26 @@ export function parseVenue(body: Record<string, unknown>, current?: VenueInput):
     notes: has('notes') ? text(body, 'notes', { max: 1000, label: 'Notes' }) : current!.notes,
     is_primary: has('is_primary') ? bool(body, 'is_primary', false) : current!.is_primary,
     allowed_formats: has('allowed_formats') ? parseAllowedFormats(body) : current!.allowed_formats,
+    ...parseVenuePoint(body, current),
+  }
+}
+
+/** latitude/longitude/geocoded_from as a unit: a partial update merges over the current pin; the result must be a whole point or none. */
+function parseVenuePoint(body: Record<string, unknown>, current?: VenueInput): Pick<VenueInput, 'latitude' | 'longitude' | 'geocoded_from' | 'geocoded_at'> {
+  const has = (field: string) => current === undefined || Object.prototype.hasOwnProperty.call(body, field)
+  if (!has('latitude') && !has('longitude') && !has('geocoded_from')) {
+    return { latitude: current!.latitude, longitude: current!.longitude, geocoded_from: current!.geocoded_from, geocoded_at: current!.geocoded_at }
+  }
+  const latitude = has('latitude') ? coordinate(body, 'latitude') : current?.latitude ?? null
+  const longitude = has('longitude') ? coordinate(body, 'longitude') : current?.longitude ?? null
+  if ((latitude === null) !== (longitude === null)) throw new InputError('Give both a latitude and a longitude, or neither', 'latitude')
+  const geocodedFrom = has('geocoded_from') ? text(body, 'geocoded_from', { max: 400, label: 'Geocoded from' }) : current?.geocoded_from ?? null
+  const moved = latitude !== (current?.latitude ?? null) || longitude !== (current?.longitude ?? null)
+  return {
+    latitude,
+    longitude,
+    geocoded_from: latitude === null ? null : geocodedFrom,
+    geocoded_at: latitude === null ? null : moved || !current?.geocoded_at ? new Date().toISOString() : current.geocoded_at,
   }
 }
 

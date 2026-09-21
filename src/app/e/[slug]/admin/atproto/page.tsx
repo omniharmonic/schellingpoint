@@ -109,7 +109,38 @@ const PUBLIC_RECORDS: Array<{ record: string; what: string }> = [
   { record: 'Stub proposals', what: 'Only for sessions whose author has no proposal of their own: content only, marked imported, naming no one.' },
   { record: 'Listings', what: 'Sessions whose tags match the gathering’s routing tags, and events of peers you enabled.' },
   { record: 'Tally', what: 'After voting closes: counts per session, with sessions under the privacy threshold suppressed. Never who voted.' },
+  { record: 'Feed posts', what: 'Only when the feed is on: short posts about the gathering being published, proposals and voting opening, the schedule, and sessions scheduled, moved or cancelled — title, day, time, room, a link. A host is named by handle only after they opt in themselves; otherwise “the host”.' },
 ]
+
+interface FeedPostRow {
+  id: string
+  kind: string
+  label: string
+  status: 'queued' | 'posted' | 'failed' | 'digested' | 'deleted'
+  text: string
+  bskyUrl: string | null
+  mentions: Array<{ did: string; handle: string }>
+  error: string | null
+  createdAt: string
+  postedAt: string | null
+}
+
+interface FeedStatus {
+  enabled: boolean
+  digestThreshold: number
+  blocked: string | null
+  actorHandle: string | null
+  counts: { queued: number; posted: number; failed: number }
+  posts: FeedPostRow[]
+}
+
+const FEED_STATUS_LABEL: Record<FeedPostRow['status'], { label: string; badge: 'success' | 'amber' | 'destructive' | 'muted' | 'secondary' }> = {
+  posted: { label: 'Posted', badge: 'success' },
+  queued: { label: 'Queued', badge: 'amber' },
+  failed: { label: 'Failed', badge: 'destructive' },
+  digested: { label: 'In a digest', badge: 'muted' },
+  deleted: { label: 'Deleted', badge: 'secondary' },
+}
 
 // Machine values → organizer words (audit §3: never show "ok" / "allow" raw).
 const HEALTH_LABEL: Record<HealthState, { label: string; badge: 'success' | 'amber' | 'destructive' | 'muted' }> = {
@@ -186,9 +217,11 @@ export default function AdminAtprotoPage() {
   const [peerDid, setPeerDid] = React.useState('')
   const [peerLabel, setPeerLabel] = React.useState('')
   const [unlinkConfirm, setUnlinkConfirm] = React.useState(false)
+  const [feed, setFeed] = React.useState<FeedStatus | null>(null)
 
   const apiBase = `/api/v1/events/${encodeURIComponent(event.slug)}/admin/atproto`
   const approvalsBase = `/api/v1/events/${encodeURIComponent(event.slug)}/approvals`
+  const feedBase = `/api/v1/events/${encodeURIComponent(event.slug)}/feed`
 
   React.useEffect(() => {
     if (!authLoading && !roleLoading && (!user || !allowed)) router.push(`/e/${event.slug}/sessions`)
@@ -198,11 +231,12 @@ export default function AdminAtprotoPage() {
     try {
       setStatus(await apiFetch<Status>(apiBase))
       if (canManage) setApprovals(await apiFetch(approvalsBase))
+      if (canManage) setFeed(await apiFetch<FeedStatus>(feedBase).catch(() => null))
       setError(null)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Network status could not be loaded.')
     }
-  }, [apiBase, approvalsBase, canManage])
+  }, [apiBase, approvalsBase, feedBase, canManage])
 
   React.useEffect(() => {
     if (authLoading || roleLoading || !user || !allowed) return
@@ -599,6 +633,51 @@ export default function AdminAtprotoPage() {
                   </table>
                 </div>
               ) : null}
+            </CardContent>
+          </Card>
+        ) : null}
+
+        {/* ───────────── feed (design §7) ───────────── */}
+        {canManage && feed ? (
+          <Card id="feed">
+            <CardHeader>
+              <CardTitle>Feed</CardTitle>
+              <CardDescription>
+                {feed.enabled
+                  ? feed.blocked ? `Switched on, but nothing is posted right now: ${feed.blocked}.` : `On. Posts go out from @${feed.actorHandle ?? '…'}; more than ${feed.digestThreshold} sessions in one publish become a single digest post.`
+                  : 'Off. The gathering posts nothing until you switch it on.'}
+                {' '}Change this in <Link className="underline" href={`/e/${event.slug}/admin/settings#feed-network`}>settings</Link>.
+                {' '}{feed.counts.posted} posted · {feed.counts.queued} queued · {feed.counts.failed} failed.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {feed.counts.queued > 0 ? (
+                <Button size="sm" variant="outline" loading={busy === 'feed-deliver'} disabled={busy !== null && busy !== 'feed-deliver'} onClick={() => act('feed-deliver', () => apiFetch(feedBase, { method: 'POST', json: { action: 'deliver' } }), 'Queued posts delivered.')}>
+                  Post queued now
+                </Button>
+              ) : null}
+              {feed.posts.length ? (
+                <ul className="space-y-2 text-sm">
+                  {feed.posts.map((p) => (
+                    <li key={p.id} className="flex flex-wrap items-start gap-2 rounded-lg border p-3">
+                      <Badge variant={FEED_STATUS_LABEL[p.status].badge}>{FEED_STATUS_LABEL[p.status].label}</Badge>
+                      <span className="text-muted-foreground">{p.label}</span>
+                      <span className="ml-auto text-xs text-muted-foreground">{when(p.postedAt ?? p.createdAt)}</span>
+                      <p className="basis-full break-words">{p.text || <span className="text-muted-foreground">Text is written when the post goes out.</span>}</p>
+                      {p.mentions.length ? <p className="basis-full text-xs text-muted-foreground">Mentions (with consent): {p.mentions.map((m) => `@${m.handle}`).join(', ')}</p> : null}
+                      {p.error ? <p className="basis-full text-xs text-destructive">{p.error}</p> : null}
+                      <span className="flex basis-full gap-3">
+                        {p.bskyUrl ? <a className="inline-flex items-center gap-1 text-xs underline" href={p.bskyUrl} target="_blank" rel="noopener noreferrer">View on Bluesky<ExternalLink className="h-3 w-3" aria-hidden="true" /></a> : null}
+                        {p.status === 'failed' ? (
+                          <Button size="sm" variant="ghost" loading={busy === `feed-retry:${p.id}`} disabled={busy !== null && busy !== `feed-retry:${p.id}`} onClick={() => act(`feed-retry:${p.id}`, () => apiFetch(feedBase, { method: 'POST', json: { action: 'retry', postId: p.id } }), 'Queued again.')}>
+                            Retry
+                          </Button>
+                        ) : null}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              ) : <p className="text-sm text-muted-foreground">No posts yet.</p>}
             </CardContent>
           </Card>
         ) : null}

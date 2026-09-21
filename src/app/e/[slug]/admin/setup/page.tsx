@@ -33,8 +33,10 @@ import { useEvent, useEventRole } from '@/contexts/EventContext'
 import { apiFetch, ApiError } from '@/lib/api/client'
 import { getEventDayLabel, getEventDays } from '@/lib/events/dates'
 import { EN_DASH, plural } from '@/lib/format'
+import { SESSION_FORMATS } from '@/lib/sessions/constants'
 import { cn } from '@/lib/utils'
 import { BulkSlotGenerator, type GeneratedSlot } from '@/components/admin/BulkSlotGenerator'
+import { VenueMapCard } from './VenueMapCard'
 import { networkNotice, type AdminTimeSlot, type AdminVenue, type NetworkSync } from '@/components/admin/types'
 
 /** Form values: wall-clock times ("HH:mm") on an event day, in the event timezone. */
@@ -67,11 +69,13 @@ interface VenueForm {
   country: string
   is_private_residence: boolean
   is_primary: boolean
+  /** Formats this room may host; empty = all. */
+  allowed_formats: string[]
 }
 
 const EMPTY_VENUE: VenueForm = {
   name: '', slug: '', capacity: '', features: '', address: '', locality: '', region: '', postal_code: '', country: '',
-  is_private_residence: false, is_primary: false,
+  is_private_residence: false, is_primary: false, allowed_formats: [],
 }
 
 /** Wall-clock parts of an instant in the event timezone. */
@@ -176,6 +180,7 @@ export default function AdminSetupPage() {
       country: venue.country ?? '',
       is_private_residence: venue.is_private_residence,
       is_primary: venue.is_primary,
+      allowed_formats: venue.allowed_formats ?? [],
     })
     setVenueError(null)
     setShowVenueForm(true)
@@ -203,6 +208,7 @@ export default function AdminSetupPage() {
       country: venueForm.country.trim() || null,
       is_private_residence: venueForm.is_private_residence,
       is_primary: venueForm.is_primary,
+      allowed_formats: venueForm.allowed_formats,
     }
     try {
       const res = editingVenue
@@ -396,6 +402,32 @@ export default function AdminSetupPage() {
                 <Label htmlFor="venue-private" className="font-normal leading-snug">This is a private home. <span className="text-muted-foreground">The public calendar shows only the city or neighborhood, never the street address.</span></Label>
               </div>
               {field('features', 'Features (optional, comma-separated)', { placeholder: 'e.g. projector, whiteboard, round tables' })}
+              <fieldset className="space-y-2">
+                <legend className="text-sm font-medium">Allowed formats (optional)</legend>
+                <p className="text-xs text-muted-foreground">Leave every box empty to allow any format. Auto-schedule only places matching sessions here.</p>
+                <div className="flex flex-wrap gap-2">
+                  {SESSION_FORMATS.map((f) => {
+                    const checked = venueForm.allowed_formats.includes(f.value)
+                    return (
+                      <label
+                        key={f.value}
+                        htmlFor={`venue-format-${f.value}`}
+                        className={cn('inline-flex h-10 cursor-pointer items-center gap-2 rounded-full border px-3 text-sm transition-colors', checked ? 'border-primary bg-primary/10' : 'border-input bg-background hover:bg-muted')}
+                      >
+                        <Checkbox
+                          id={`venue-format-${f.value}`}
+                          checked={checked}
+                          onCheckedChange={(next) => setVenueForm((v) => ({
+                            ...v,
+                            allowed_formats: next === true ? [...v.allowed_formats, f.value] : v.allowed_formats.filter((x) => x !== f.value),
+                          }))}
+                        />
+                        {f.label}
+                      </label>
+                    )
+                  })}
+                </div>
+              </fieldset>
               {venueError && <p role="alert" className="rounded-lg border border-destructive/20 bg-destructive/10 p-3 text-sm text-destructive">{venueError}</p>}
               <div className="flex justify-end gap-2">
                 <Button variant="outline" onClick={resetVenueForm} disabled={isSaving}>Cancel</Button>
@@ -504,6 +536,7 @@ export default function AdminSetupPage() {
               </CardContent>
             </Card>
           )}
+          <VenueMapCard venues={venues} base={base} canManage={canManage} onChanged={refreshVenues} />
         </section>
 
         {venues.length > 0 && sessionSlotCount > 0 && can('manageSchedule') && (

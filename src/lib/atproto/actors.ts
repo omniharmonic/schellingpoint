@@ -35,6 +35,7 @@ import {
   type GatheringActorPort,
   type GatheringSession,
   type MemberRole,
+  type MentionSource,
   type PolicySource,
   type PutAsGatheringInput,
   type ReadYourWrites,
@@ -149,6 +150,38 @@ export const postgresPolicy: PolicySource = {
 const postgresIndex: ReadYourWrites = {
   upsert: (input) => upsertIndexedRecord(input),
   remove: (uri) => deleteIndexedRecord(uri),
+}
+
+/**
+ * THE definition of who a post about a session may @-mention (design §7.2, R9). All three hold
+ * at once, evaluated at write time from the database and nowhere else:
+ *   (a) `event_members.mention_in_posts` for this event — the person's own switch
+ *   (b) they are the session's host (`sessions.host_id`) or a co-host by a `session_cohosts`
+ *       row they wrote themselves (`cohost_uri` set, not inactive)
+ *   (c) their repo is visible (`at_repo_status` does not hide it)
+ * A cancelled session mentions nobody. `feed.ts` uses the same query to decide the text.
+ */
+export async function consentedMentionDids(eventId: string, sessionId: string): Promise<Set<string>> {
+  const rows = await sql<{ did: string }[]>`
+    select a.did
+    from sessions s
+    join event_members m on m.event_id = s.event_id and m.mention_in_posts
+    join accounts a on a.id = m.user_id
+    where s.id = ${sessionId} and s.event_id = ${eventId} and s.cancelled_at is null
+      and (
+        s.host_id = m.user_id
+        or exists (
+          select 1 from session_cohosts c
+          where c.session_id = s.id and c.user_id = m.user_id and c.cohost_uri is not null and c.cohost_inactive_at is null
+        )
+      )
+      and not exists (select 1 from at_repo_status rs where rs.did = a.did and rs.hidden)
+  `
+  return new Set(rows.map((r) => r.did))
+}
+
+export const postgresMentions: MentionSource = {
+  consentedMentionDids,
 }
 
 /* ─────────────────────────────── credential health ─────────────────────────────── */
@@ -308,6 +341,7 @@ export interface GatheringActorOverrides {
   policy?: PolicySource
   index?: ReadYourWrites | null
   actorDidFor?: (eventId: string) => Promise<string>
+  mentions?: MentionSource
 }
 
 let overrides: GatheringActorOverrides = {}
@@ -335,6 +369,7 @@ function buildPort(eventId: string, did: string): GatheringActorPort {
     audit: overrides.audit ?? new PostgresAuditSink(),
     session: overrides.sessionFor ? overrides.sessionFor(eventId, did) : new CredentialGatheringSession(eventId, did),
     index: overrides.index === null ? undefined : (overrides.index ?? postgresIndex),
+    mentions: overrides.mentions ?? postgresMentions,
   })
 }
 

@@ -16,6 +16,7 @@ import {
   BarChart3,
   Menu,
   X,
+  MapPin,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
@@ -41,6 +42,7 @@ export function getNavItems(eventSlug: string) {
     { href: `/e/${eventSlug}/dashboard`, label: 'Home', icon: BarChart3 },
     { href: `/e/${eventSlug}/sessions`, label: 'Sessions', icon: Presentation },
     { href: `/e/${eventSlug}/schedule`, label: 'Schedule', icon: Calendar },
+    { href: `/e/${eventSlug}/map`, label: 'Map', icon: MapPin },
     { href: `/e/${eventSlug}/my-schedule`, label: 'My schedule', icon: Heart },
     { href: `/e/${eventSlug}/my-votes`, label: 'My votes', icon: ClipboardList },
     { href: `/e/${eventSlug}/participants`, label: 'People', icon: Users },
@@ -58,6 +60,7 @@ const ROUTE_LABELS: ReadonlyArray<readonly [suffix: string, label: string]> = [
   ['/propose', 'Propose a session'],
   ['/tickets', 'Tickets'],
   ['/checkin', 'Check-in'],
+  ['/ask', 'Ask the gathering'],
   ['/admin', 'Organizer workspace'],
 ]
 

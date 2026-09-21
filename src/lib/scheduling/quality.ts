@@ -40,6 +40,8 @@ export interface QualityReport {
   violations: string[]
   warnings: string[]
   keepApartConflicts: number
+  /** Concurrent comparable pairs at or above the near-miss line, by session id (for the builder's cells). */
+  conflicts: Array<{ a: string; b: string; overlapPercent: number; kind: 'keepApart' | 'nearMiss' }>
   checks: { noKeepApartConflicts: boolean; constraintsMet: boolean }
   cost: CostBreakdown
   placed: number
@@ -87,8 +89,12 @@ export function qualityScore(assignments: AssignmentMap, ctx: ObjectiveContext):
   // Audience conflicts.
   let conflictPeople = 0
   let keepApartConflicts = 0
+  const conflicts: QualityReport['conflicts'] = []
   for (const { a, b, pair } of concurrentOverlaps(assignments, ctx)) {
     conflictPeople += pair.shared
+    if (pair.coefficient >= NEAR_MISS_THRESHOLD) {
+      conflicts.push({ a, b, overlapPercent: Math.round(pair.coefficient * 100), kind: pair.coefficient >= KEEP_APART_THRESHOLD ? 'keepApart' : 'nearMiss' })
+    }
     if (pair.coefficient >= KEEP_APART_THRESHOLD) {
       keepApartConflicts++
       warnings.push(`Keep apart: ${titleOf(a, ctx)} and ${titleOf(b, ctx)} share ${percent(pair.coefficient)} of their voters but run at the same time`)
@@ -140,6 +146,7 @@ export function qualityScore(assignments: AssignmentMap, ctx: ObjectiveContext):
     violations,
     warnings,
     keepApartConflicts,
+    conflicts,
     checks: { noKeepApartConflicts: keepApartConflicts === 0, constraintsMet: violations.length === 0 },
     cost,
     placed: assignments.size,

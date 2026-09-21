@@ -343,9 +343,12 @@ Admin → **Knowledge** page (new admin nav item):
 
 ### 10.3 Embeddings and "Ask the gathering" (when configured)
 
-- Postgres image becomes `pgvector/pgvector:pg16` (drop-in for `postgres:16-alpine` data); migration
-  `create extension if not exists vector`; `transcript_chunks(id, transcript_id, session_id,
-  event_id, chunk_index, text, embedding vector(1024), created_at)` with an HNSW index.
+- No pgvector: swapping the production image from `postgres:16-alpine` (musl) to the Debian-based
+  pgvector image on a live volume risks collation-version index corruption, and a gathering's corpus
+  is small (hundreds to a few thousand chunks). `transcript_chunks(id, transcript_id, session_id,
+  event_id, chunk_index, text, embedding real[], embedding_model text, created_at)`; ranking is
+  cosine similarity computed in the app over the event's chunks (loaded once per question). If a
+  gathering ever exceeds ~50k chunks, revisit with a purpose-built Postgres image.
 - Provider config (server-only env): `EMBEDDINGS_PROVIDER=voyage|openai`, `EMBEDDINGS_MODEL`,
   `EMBEDDINGS_API_KEY`; `ANTHROPIC_API_KEY` + `AI_CHAT_MODEL=claude-sonnet-5` for answers. Nothing
   runs without them; the Knowledge page says which parts are active.
@@ -374,7 +377,8 @@ Enabled per gathering in Voting settings. Everything else in PRD Phase 2/3 stays
 2. **Feed posts and mentions are off by default**; mention consent is per person per gathering.
 3. **Custodial profile records are opt-in**; the gathering's profile record is always written.
 4. **Overlap coefficient**, not Jaccard, for the organizer-facing percentage; k-suppressed.
-5. **pgvector image swap** on both stacks; export works without any AI provider.
+5. **No Postgres image change**: embeddings live in a `real[]` column and are ranked in the app
+   (see §10.3 for why); export works without any AI provider.
 6. **Attendance voting is a later wave** and opt-in per gathering; no payouts.
 7. **Check-in moves under the organizer workspace.**
 

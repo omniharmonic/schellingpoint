@@ -133,7 +133,7 @@ export function IdentityStep({ state, dispatch }: IdentityStepProps) {
           </Field>
 
           <Field
-            label="Event URL"
+            label="Gathering URL"
             htmlFor="slug"
             error={slugError}
             hint={`${slug.length}/${MAX_SLUG_LENGTH} · Lowercase letters, numbers and hyphens. This also becomes the gathering’s own address and handle on the network.`}

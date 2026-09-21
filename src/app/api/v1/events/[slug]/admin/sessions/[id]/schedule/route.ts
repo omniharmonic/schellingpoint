@@ -10,6 +10,7 @@
  * `awaiting_approval` until enough organizers approve. The app row changes only when the
  * move or cancellation is applied.
  */
+import { after } from 'next/server'
 import { asAccount } from '@/lib/db'
 import {
   InputError,
@@ -30,6 +31,21 @@ export const dynamic = 'force-dynamic'
 const ROLES = rolesWith('manageSchedule')
 
 type Params = { params: Promise<{ slug: string; id: string }> }
+
+/**
+ * Feed (design §7.3): after a destructive move/cancel was applied, make sure its post is claimed
+ * (idempotent — `publish.ts` claims it when it writes the slot) and deliver after the response.
+ * Never inside the transaction, never failing the request.
+ */
+async function feedAfterDestructive(eventId: string, kind: 'session-moved' | 'session-cancelled', sessionId: string, callerUserId: string): Promise<void> {
+  try {
+    const feed = await import('@/lib/atproto/feed')
+    await feed.enqueueSessionPosts({ eventId, kind, sessionIds: [sessionId], callerUserId })
+    after(() => feed.kickFeedDelivery(eventId))
+  } catch (e) {
+    console.warn('[schedule] feed post could not be queued:', e instanceof Error ? e.name : 'error')
+  }
+}
 
 interface SessionState {
   id: string
@@ -144,6 +160,9 @@ export async function PUT(request: Request, { params }: Params) {
       venueId: plan.slot.venue_id!,
       confirmPublicLinkage: body.confirmPublicLinkage === true,
     })
+    // Feed (design §7.3): a move approved and applied. `moveSession` already claimed the row when
+    // it wrote the slot; this is idempotent and only kicks delivery after the response.
+    if (outcome.status === 'applied') await feedAfterDestructive(eventId, 'session-moved', id, ctx.viewer.accountId)
     return json(
       { ...outcome, session: await sessionView(eventId, id) },
       { status: outcome.status === 'awaiting_approval' ? 202 : 200 },
@@ -196,6 +215,7 @@ export async function DELETE(request: Request, { params }: Params) {
       reason,
       confirmPublicLinkage: body?.confirmPublicLinkage === true,
     })
+    if (outcome.status === 'applied') await feedAfterDestructive(eventId, 'session-cancelled', id, ctx.viewer.accountId)
     return json(
       { ...outcome, session: await sessionView(eventId, id) },
       { status: outcome.status === 'awaiting_approval' ? 202 : 200 },

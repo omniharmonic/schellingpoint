@@ -32,7 +32,8 @@ export async function PATCH(request: Request, { params }: Params) {
       const [current] = await tx<VenueInput[]>`
         select name, slug, capacity, coalesce(features, '{}') as features, style, address, locality, region,
                postal_code, country, is_private_residence, notes, coalesce(is_primary, false) as is_primary,
-               coalesce(allowed_formats, '{}') as allowed_formats
+               coalesce(allowed_formats, '{}') as allowed_formats,
+               latitude::float8 as latitude, longitude::float8 as longitude, geocoded_from, geocoded_at
         from venues where id = ${id} and event_id = ${ctx.event.id}
         for update
       `

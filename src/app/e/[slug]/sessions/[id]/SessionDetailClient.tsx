@@ -38,6 +38,7 @@ import { AddToCalendar } from '@/components/AddToCalendar'
 import { RSVPButton } from '@/components/RSVPButton'
 import { SessionFeedback } from '@/components/SessionFeedback'
 import { SessionResources } from '@/components/SessionResources'
+import { TranscriptPanel } from '@/components/knowledge/TranscriptPanel'
 import { AtprotoSessionActions } from '@/components/AtprotoSessionActions'
 import { VoteControl } from '@/components/VoteControl'
 import { setFavorite } from '@/components/SessionCard'
@@ -48,6 +49,8 @@ import { sessionStatusBadge } from '@/lib/labels'
 import { EN_DASH, truncate } from '@/lib/format'
 import { formatDescription, formatLabel } from '@/lib/sessions/constants'
 import { hostByline } from '@/app/api/v1/sessions/_lib/byline'
+import { SessionLocationMap } from '@/components/map/StaticVenueMap'
+import { directionsHref } from '@/lib/geo/directions'
 import type { SessionView, PersonView } from '@/app/api/v1/sessions/_lib/read'
 import { cn } from '@/lib/utils'
 
@@ -430,6 +433,7 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
             {(session.venue || session.time_slot || session.is_self_hosted) && (
               <Card className="border-primary/20 bg-primary/5">
                 <CardContent className="p-4 pt-4 sm:p-6 sm:pt-6">
+                  <SessionLocationMap session={session} className="mb-4" />
                   <div className="grid gap-6 sm:grid-cols-2">
                     {session.is_self_hosted ? (
                       <div>
@@ -452,7 +456,7 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
                             <p className="whitespace-pre-wrap text-muted-foreground">{session.custom_location}</p>
                             <Button asChild variant="outline" size="sm" className="mt-2">
                               <a
-                                href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(session.custom_location)}`}
+                                href={directionsHref({ lat: session.location_geo?.exact ? session.location_geo.lat : null, lng: session.location_geo?.exact ? session.location_geo.lng : null, query: session.custom_location }) ?? '#'}
                                 target="_blank"
                                 rel="noopener noreferrer"
                               >
@@ -484,7 +488,7 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
                         {session.venue.address && (
                           <Button asChild variant="outline" size="sm" className="mt-2">
                             <a
-                              href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(session.venue.address)}`}
+                              href={directionsHref({ lat: session.venue.geo?.lat, lng: session.venue.geo?.lng, query: session.venue.address }) ?? '#'}
                               target="_blank"
                               rel="noopener noreferrer"
                             >
@@ -683,6 +687,7 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
             </Card>
 
             <SessionResources sessionId={sessionId} eventSlug={event.slug} canManage={viewer.can_manage} />
+            <TranscriptPanel sessionId={sessionId} eventSlug={event.slug} sessionTitle={session.title} canManage={viewer.can_manage} />
 
             <AtprotoSessionActions
               sessionId={sessionId}

@@ -39,6 +39,8 @@ export interface AdminSession {
   proposal_withdrawn_at: string | null
   author_inactive_at?: string | null
   cancelled_at: string | null
+  /** Organizer pin: the room this session must be in; null = any room. */
+  pinned_venue_id: string | null
   venue: { id: string; name: string } | null
   time_slot: { id: string; label: string | null; start_time: string; end_time: string; day_date: string | null } | null
   track: { id: string; name: string; color: string | null } | null
@@ -74,6 +76,12 @@ export interface AdminVenue {
   is_private_residence: boolean
   notes: string | null
   is_primary: boolean
+  /** Formats this room may host; empty = all. */
+  allowed_formats: string[]
+  /** Migration 0023 (map). */
+  latitude?: number | null
+  longitude?: number | null
+  geocoded_from?: string | null
   network_published: boolean
   slot_count: number
   scheduled_count: number

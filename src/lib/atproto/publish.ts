@@ -55,6 +55,8 @@ import {
   type ProposalSessionInput,
 } from './records'
 import { deterministicRkey, SELF_RKEY } from './rkey'
+import { coarseSessionGeo, venueGeo } from './records'
+import { parseLatLng } from '@/lib/geo/coarse'
 import type { CalendarEventRecord, GatheringPhase, SlotRecord, StrongRef } from './types'
 import type { FetchedRecord } from './write'
 
@@ -173,6 +175,8 @@ export interface EventRow {
   policy_uri: string | null
   atproto_tags: string[] | null
   policy_thresholds: unknown
+  /** First successful gathering publish (the feed's `gathering-published` fires only once). */
+  atproto_published_at?: string | null
 }
 
 interface VenueRow {
@@ -193,6 +197,9 @@ interface VenueRow {
   created_at: string
   at_uri: string | null
   at_cid: string | null
+  /** Migration 0023. Published (as location.geo) only for a public venue. */
+  latitude?: number | null
+  longitude?: number | null
 }
 
 interface TrackRow {
@@ -243,6 +250,8 @@ export interface SessionRow {
   /** Exact address or meeting link: attendee-only, never written to a record (only `virtual` is derived). */
   custom_location: string | null
   public_place: string | null
+  /** Migration 0023: the COARSE point (≈1 km) of a self-hosted session; the exact one is never selected here. */
+  public_geo?: { lat: number; lng: number } | null
   created_at: string
   proposal_uri: string | null
   proposal_cid: string | null
@@ -267,6 +276,49 @@ export interface PublishContext {
   callerUserId: string | null
   appUrl: string
   thresholds: GatheringPolicyThresholds
+  /**
+   * Feed (design §7): sessions whose slot record was FIRST written in this run. `publishSchedule`
+   * collects them here and flushes once at the end (so a big publish becomes one digest post);
+   * writers without a batch enqueue immediately.
+   */
+  feedBatch?: string[]
+}
+
+/* ─────────────────────────────── feed hooks ─────────────────────────────── */
+
+/**
+ * Post-write feed hooks (design §7.3). Never inside a transaction, never inside the request that
+ * wrote the record's app row, never failing a publish: the ledger row is claimed here and a
+ * `publish_jobs` feed job delivers it. `feed.ts` re-checks every gate itself.
+ */
+async function feedEnqueueSessions(ctx: PublishContext, kind: 'session-scheduled' | 'session-moved' | 'session-cancelled', sessionIds: string[]): Promise<void> {
+  if (!sessionIds.length || !ctx.deps.persist) return
+  try {
+    const { enqueueSessionPosts } = await import('./feed')
+    await enqueueSessionPosts({ eventId: ctx.event.id, kind, sessionIds, callerUserId: ctx.callerUserId })
+  } catch (e) {
+    console.warn('[atproto:feed] could not queue session posts:', e instanceof Error ? e.name : 'error')
+  }
+}
+
+async function feedEnqueueGathering(ctx: PublishContext, kind: 'gathering-published'): Promise<void> {
+  if (!ctx.deps.persist) return
+  try {
+    const { enqueueGatheringPost } = await import('./feed')
+    await enqueueGatheringPost({ eventId: ctx.event.id, kind, callerUserId: ctx.callerUserId })
+  } catch (e) {
+    console.warn('[atproto:feed] could not queue the gathering post:', e instanceof Error ? e.name : 'error')
+  }
+}
+
+/** A session's slot record was written for the first time: `session-scheduled` (batched when the run has a batch). */
+async function feedNoteFirstSlot(ctx: PublishContext, sessionId: string): Promise<void> {
+  if (!ctx.deps.persist) return
+  if (ctx.feedBatch) {
+    ctx.feedBatch.push(sessionId)
+    return
+  }
+  await feedEnqueueSessions(ctx, 'session-scheduled', [sessionId])
 }
 
 function appUrl(): string {
@@ -651,6 +703,8 @@ export async function publishGathering(input: PublishInput, deps?: PublishDeps):
         atproto_published_at = case when ${!!gathering} then now() else atproto_published_at end
       where id = ${event.id}
     `
+    // Feed (design §7.3): the FIRST successful gathering publish announces the gathering.
+    if (gathering && !event.atproto_published_at) await feedEnqueueGathering(ctx, 'gathering-published')
   }
   return { results }
 }
@@ -690,7 +744,7 @@ export async function publishGatheringProfile(input: PublishInput, deps?: Publis
 
 const venueSelect = (db: Sql) => db`
   id, name, slug, capacity, features, style, address, locality, region, postal_code, country,
-  is_private_residence, notes, is_primary, created_at, at_uri, at_cid
+  is_private_residence, notes, is_primary, created_at, at_uri, at_cid, latitude, longitude
 `
 
 function locationOfVenue(venue: VenueRow) {
@@ -705,6 +759,11 @@ function locationOfVenue(venue: VenueRow) {
   })
 }
 
+/** The venue's public geo: its point for a public venue, nothing for a private residence (spec §8.1). */
+function geoOfVenue(venue: VenueRow) {
+  return venueGeo({ latitude: venue.latitude, longitude: venue.longitude, privateResidence: venue.is_private_residence })
+}
+
 export async function publishVenues(input: PublishInput, deps?: PublishDeps): Promise<PublishOutput> {
   const ctx = await loadPublishContext(input, deps)
   const results: PublishResult[] = []
@@ -714,6 +773,7 @@ export async function publishVenues(input: PublishInput, deps?: PublishDeps): Pr
     ctx,
     venues.map((venue) => {
       const location = locationOfVenue(venue)
+      const geo = geoOfVenue(venue)
       return {
         kind: 'venue' as const,
         id: venue.id,
@@ -729,7 +789,7 @@ export async function publishVenues(input: PublishInput, deps?: PublishDeps): Pr
             features: venue.features,
             style: venue.style,
             primary: venue.is_primary,
-            locations: location ? [location] : null,
+            locations: location || geo ? [...(location ? [location] : []), ...(geo ? [geo] : [])] : null,
             // Notes on a private home are exactly where a door code ends up: never published.
             notes: venue.is_private_residence ? null : venue.notes,
             createdAt: venue.created_at,
@@ -872,7 +932,7 @@ export interface SessionBundle {
 const sessionSelect = (db: Sql) => db`
   id, event_id, title, description, format, duration, status, host_id, venue_id, time_slot_id, track_id, topic_tags,
   skill_uris, expected_attendance, required_features, is_self_hosted, self_hosted_start_time, self_hosted_end_time,
-  custom_location, public_place, created_at, proposal_uri, proposal_cid, calendar_event_uri, calendar_event_cid, slot_uri, slot_cid,
+  custom_location, public_place, public_geo, created_at, proposal_uri, proposal_cid, calendar_event_uri, calendar_event_cid, slot_uri, slot_cid,
   cancelled_at, proposal_withdrawn_at, proposal_drift_cid, author_inactive_at
 `
 
@@ -1011,6 +1071,9 @@ function sessionEventRecord(ctx: PublishContext, bundle: SessionBundle, times: {
     virtual: looksLikeUrl(session.custom_location),
     // A self-hosted session has no venue; its exact address stays app-side.
     venueAddress: venue && !session.is_self_hosted ? locationOfVenue(venue) : null,
+    venueGeo: venue && !session.is_self_hosted ? geoOfVenue(venue) : null,
+    // A self-hosted session publishes ONLY its coarse point (spec §8.1); location_lat/lng never leave the app.
+    publicGeo: session.is_self_hosted ? coarseSessionGeo(parseLatLng(session.public_geo)) : null,
     sessionUrl: sessionUrl(ctx, session.id),
     createdAt: session.created_at,
   })
@@ -1120,6 +1183,8 @@ async function writeSession(ctx: PublishContext, bundle: SessionBundle, results:
 
   if (slotRef && opts.eventStatus !== 'cancelled') {
     await routeSessionListing(ctx, { sessionId: session.id, event: calendar, tags }, results)
+    // Feed (design §7.3): a session's slot published for the first time.
+    if (!session.slot_uri && opts.action === 'publish-slot') await feedNoteFirstSlot(ctx, session.id)
   }
   return !!slotRef
 }
@@ -1147,6 +1212,8 @@ function differsFromPublished(live: SlotRecord, bundle: SessionBundle): boolean 
  */
 export async function publishSchedule(input: PublishScheduleInput, deps?: PublishDeps): Promise<PublishOutput> {
   const ctx = await loadPublishContext(input, deps)
+  // Feed: collect first-published sessions for one flush (a big publish → one digest post).
+  ctx.feedBatch = []
   const results: PublishResult[] = []
   const bundles = await loadSessionBundles(ctx, input.sessionIds)
   for (const group of chunk(bundles, SCHEDULE_BATCH_SESSIONS)) {
@@ -1192,6 +1259,9 @@ export async function publishSchedule(input: PublishScheduleInput, deps?: Publis
     if (ctx.deps.applyCreates) await writeSessionsBatched(ctx, ready, results)
     else for (const { bundle, opts } of ready) await writeSession(ctx, bundle, results, opts)
   }
+  const firstPublished = ctx.feedBatch
+  ctx.feedBatch = undefined
+  if (firstPublished?.length) await feedEnqueueSessions(ctx, 'session-scheduled', firstPublished)
   return { results }
 }
 
@@ -1305,6 +1375,7 @@ async function writeSessionsBatched(ctx: PublishContext, items: Array<{ bundle: 
     }
     if (slotRef && opts.eventStatus !== 'cancelled') {
       await routeSessionListing(ctx, { sessionId: session.id, event: calendar, tags: sessionTags(bundle) }, results)
+      if (!session.slot_uri && opts.action === 'publish-slot') await feedNoteFirstSlot(ctx, session.id)
     }
   }
 }
@@ -1439,6 +1510,8 @@ export async function cancelSession(input: SessionInput, deps?: PublishDeps): Pr
         cancelled_at = case when ${!!slotRef} then coalesce(cancelled_at, now()) else cancelled_at end
       where id = ${session.id} and event_id = ${ctx.event.id}
     `
+    // Feed (design §7.3): a destructive cancellation approved and applied.
+    if (slotRef) await feedEnqueueSessions(ctx, 'session-cancelled', [session.id])
   }
   return { results }
 }
@@ -1521,6 +1594,8 @@ export async function moveSession(input: MoveSessionInput, deps?: PublishDeps): 
         published_slot_id = ${slot.id}
       where id = ${session.id} and event_id = ${ctx.event.id}
     `
+    // Feed (design §7.3): a destructive move approved and applied.
+    await feedEnqueueSessions(ctx, 'session-moved', [session.id])
   }
   return { results }
 }

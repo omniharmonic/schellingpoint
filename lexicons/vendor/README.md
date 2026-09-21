@@ -92,3 +92,20 @@ Never extended: records we write under these NSIDs carry only the fields defined
 - Text fields only are written (no avatar/banner blob, labels or pinned post): the app-side record
   builder never carries a DID or a person's name, and `assertNoUnknownFields` applies (`app.bsky.`
   is in `BORROWED_PREFIXES`).
+
+### Feed posts (Wave F)
+
+| File | NSID | Used for |
+|---|---|---|
+| `bsky/app.bsky.feed.post.json` | `app.bsky.feed.post` | the gathering account's own posts about its activity (`src/lib/atproto/feed.ts`), written through the port action `publish-post` (`delete-post` is destructive) |
+| `bsky/app.bsky.richtext.facet.json` | `app.bsky.richtext.facet` | the link facet and the consented mention facets a post carries |
+| `bsky/app.bsky.embed.external.json` | `app.bsky.embed.external` | the link card (session or gathering URL, title, description; no thumb) |
+| `bsky/app.bsky.embed.{images,video,gallery,record,recordWithMedia,defs}.json`, `bsky/app.bsky.{actor,feed,graph,labeler,notification}.defs.json`, `bsky/app.bsky.feed.{threadgate,postgate}.json`, `../atproto/com.atproto.moderation.defs.json` | — | the transitive `ref` closure of `app.bsky.feed.post` (its `embed` union names every embed type, whose view defs name the rest). Vendored only so `lexicons:validate` resolves every ref; nothing under these NSIDs is ever written |
+
+- **Source:** `@atproto/api`'s shipped `schemas` (the same generator output as `app.bsky.actor.profile`
+  above), `lex:` ref prefix removed. Fetched 2026-09-21. Regenerate with the one-liner used for the
+  profile: `require('@atproto/api').schemas.find(d => d.id === nsid)`.
+- A post carries only `text`, `facets`, `langs`, `createdAt` and an `embed` of type
+  `app.bsky.embed.external`; `assertNoUnknownFields` applies. A mention facet may name a DID only
+  through the port's own consent gate (`consentedMentions`, R9): `event_members.mention_in_posts`,
+  host or self-written co-host of the session, visible repo.

@@ -26,11 +26,16 @@ import { isBorrowedNsid } from './nsids'
 import { assertNoUnknownFields, assertValidRecord } from './validate'
 
 const NSID_MEMBERSHIP = 'coop.lexicon.membership'
+const NSID_POST = 'app.bsky.feed.post'
 
 export type GatheringAction =
   | 'publish-gathering'
   /** The gathering account's own `app.bsky.actor.profile` at `self` (name and tagline only). */
   | 'publish-profile'
+  /** One `app.bsky.feed.post` about the gathering's own activity (design §7); mentions only via `consentedMentions`. */
+  | 'publish-post'
+  /** Removing a post people may already have seen or shared: destructive (two organisers). */
+  | 'delete-post'
   | 'write-policy'
   | 'set-peers'
   | 'publish-venue'
@@ -64,6 +69,7 @@ export const DESTRUCTIVE_ACTIONS: ReadonlySet<GatheringAction> = new Set<Gatheri
   'move-slot',
   'remove-listing',
   'delete-record',
+  'delete-post',
 ])
 
 export type MemberRole = 'owner' | 'admin' | 'moderator' | 'track_lead' | 'volunteer' | 'attendee'
@@ -77,6 +83,8 @@ const STEWARD_ROLES: ReadonlySet<MemberRole> = new Set<MemberRole>(['owner', 'ad
 const MIN_ROLE: Record<GatheringAction, 'steward' | 'host' | 'any'> = {
   'publish-gathering': 'steward',
   'publish-profile': 'steward',
+  'publish-post': 'steward',
+  'delete-post': 'steward',
   'write-policy': 'steward',
   'publish-policy': 'steward',
   'set-peers': 'steward',
@@ -172,6 +180,16 @@ export interface PolicySource {
   publishRoles(eventId: string): Promise<boolean>
 }
 
+/**
+ * The feed's consent source (design §7.2, R9): which DIDs a post about `sessionId` may @-mention.
+ * Computed from the database by the adapter — `event_members.mention_in_posts` for this event AND
+ * the session's host (`sessions.host_id`) or a co-host whose `session_cohosts` row they wrote
+ * themselves AND a visible repo (`visibleRepoSql`). Callers never supply DIDs.
+ */
+export interface MentionSource {
+  consentedMentionDids(eventId: string, sessionId: string): Promise<ReadonlySet<string>>
+}
+
 export interface SessionPutInput {
   collection: string
   rkey: string
@@ -234,6 +252,12 @@ export interface PutAsGatheringInput {
   /** Mandatory written reason. */
   reason: string
   approvals?: Approval[]
+  /**
+   * `publish-post` only: the session the post is about, so the port can compute the consented
+   * mention set itself (`MentionSource`). `null`/absent = a gathering-level post: no mention may
+   * appear at all. This is an id, never a DID — the caller cannot widen the set.
+   */
+  feedSubject?: { sessionId: string | null }
 }
 
 export interface DeleteAsGatheringInput {
@@ -282,6 +306,8 @@ export interface GatheringActorDeps {
   session: GatheringSession
   index?: ReadYourWrites
   policySource?: string
+  /** Absent → a post may mention nobody (every mention facet fails R9). `actors.ts` wires Postgres. */
+  mentions?: MentionSource
 }
 
 function describeError(e: unknown): string {
@@ -384,12 +410,30 @@ export class AppCustodyGatheringActor implements GatheringActorPort {
     return did
   }
 
+  /**
+   * The feed exemption (design §7.2): a `publish-post` may @-mention a DID only when the port's own
+   * `MentionSource` says so for the session named by `feedSubject` — consent in this gathering,
+   * host or self-written co-host, visible repo. The caller passes a session id, never a DID; a
+   * gathering-level post (no session) may mention nobody. Any other action gets no set at all.
+   */
+  private async consentedMentions(input: Omit<PutAsGatheringInput, 'eventId'>): Promise<ReadonlySet<string> | undefined> {
+    if (input.action !== 'publish-post') {
+      if (input.feedSubject) throw new Error('feedSubject is only meaningful for publish-post')
+      return undefined
+    }
+    if (input.collection !== NSID_POST) throw new Error('publish-post writes only app.bsky.feed.post')
+    const sessionId = input.feedSubject?.sessionId ?? null
+    if (!sessionId || !this.deps.mentions) return new Set()
+    return this.deps.mentions.consentedMentionDids(this.eventId, sessionId)
+  }
+
   async putRecordAsGathering(input: Omit<PutAsGatheringInput, 'eventId'>): Promise<WriteAsGatheringResult> {
     const record: Record<string, unknown> = { ...input.record, $type: input.collection }
     assertValidRecord(input.collection, record)
     if (isBorrowedNsid(input.collection)) assertNoUnknownFields(input.collection, record)
     const consentedSubjectDid = await this.consentedSubject(input, record)
-    assertNoForeignDid(record, this.actorDid, { gatheringDid: this.actorDid, consentedSubjectDid })
+    const consentedMentionDids = await this.consentedMentions(input)
+    assertNoForeignDid(record, this.actorDid, { gatheringDid: this.actorDid, consentedSubjectDid, consentedMentionDids })
 
     const uri = `at://${this.actorDid}/${input.collection}/${input.rkey}`
     const auditId = await this.gate(input, uri)
@@ -421,6 +465,7 @@ export class AppCustodyGatheringActor implements GatheringActorPort {
       const prepared: Array<{ input: CreateAsGatheringInput; record: Record<string, unknown>; auditId: string }> = []
       for (const input of slice) {
         if (input.action === 'publish-role-claim') throw new Error('role claims are written one at a time (subject consent is checked per record)')
+        if (input.action === 'publish-post') throw new Error('posts are written one at a time (mention consent is checked per record)')
         const record: Record<string, unknown> = { ...input.record, $type: input.collection }
         assertValidRecord(input.collection, record)
         if (isBorrowedNsid(input.collection)) assertNoUnknownFields(input.collection, record)

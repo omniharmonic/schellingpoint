@@ -25,6 +25,16 @@ hosted Supabase, schellingpoint.app) lives on `main`; do not merge this branch i
 - **Votes are never records**: ballot-key rounds (`src/lib/voting`). Nobody, organizers included, sees
   counts while a round is open; at close the key is destroyed and entries are unlinkable.
 - **Indexing**: Jetstream consumer (`scripts/atproto-indexer.ts`) + hourly reconciliation.
+- **Feed** (`src/lib/atproto/feed.ts`): the gathering account posts `app.bsky.feed.post` about its own
+  activity when `events.feed_posts` is on (off by default). A mention facet may name a host only with
+  `event_members.mention_in_posts` (their choice, per gathering) — the port computes the consented set.
+- **Map** (`src/lib/geo`, `src/components/map`): venues carry lat/lng; self-hosted sessions keep an exact
+  point (attendee-only) and a coarse `public_geo` (2 decimals) that is all the record ever sees.
+  Geocoding is server-side (Nominatim, cached, rate-limited); tiles from OpenFreeMap by default.
+- **Scheduling** (`src/lib/scheduling`): greedy seed + hill-climb over ballot-token overlap (k-suppressed),
+  quality score, audience-clusters and schedule-quality endpoints; the builder shows keep-apart pairs.
+- **Knowledge** (`src/lib/knowledge`): transcripts are members-only rows, never records; corpus export
+  (zip) needs no provider; embeddings/ask/summaries run only with `EMBEDDINGS_*`/`ANTHROPIC_API_KEY` set.
 
 ## Rules that are easy to break
 - Never put a DID, name or handle into a public record unless its holder wrote that record
@@ -39,6 +49,12 @@ hosted Supabase, schellingpoint.app) lives on `main`; do not merge this branch i
 - New tables are private by default (migration 0009); grant `authenticated` explicitly only together
   with RLS policies. Use `sql.json(value)` for jsonb parameters, never `JSON.stringify(...)::jsonb`.
 - postgres.js returns timestamps as ISO strings and `count(*)` as numbers (see `src/lib/db`).
+- Exact coordinates (`sessions.location_lat/lng`, private-residence venues) never reach a record or a
+  public read; the privacy audit's `geo` check enforces it. Transcripts and embeddings never leave the
+  members boundary. Feed posts never carry names, addresses or counts.
+- Shared UI: `PageHeader`, `ui/select`, `ui/switch`, `ui/filter-chip`, `ui/segmented-control`,
+  `ui/confirm-inline`, `ui/dialog`, `ui/toast`; labels from `src/lib/labels.ts`; sentence case; tokens
+  (success/amber/destructive) not palette colours; `plural()` for counts. See `docs/design/audits`.
 
 ## Local development
 ```bash

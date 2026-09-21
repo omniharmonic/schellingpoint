@@ -26,6 +26,7 @@ import { apiFetch } from '@/lib/api/client'
 import { useTracks } from '@/hooks/useTracks'
 import { SkillPicker } from '@/components/SkillPicker'
 import { TimePreferences, type TimePreferenceValue } from '@/components/TimePreferences'
+import { LocationPicker } from '@/components/map/LocationPicker'
 import {
   allowedDurationOptions,
   allowedFormatOptions,
@@ -96,6 +97,7 @@ export default function ProposePage() {
   const [publishAvailability, setPublishAvailability] = React.useState(false)
   const [isSelfHosted, setIsSelfHosted] = React.useState(false)
   const [customLocation, setCustomLocation] = React.useState('')
+  const [locationPoint, setLocationPoint] = React.useState<{ lat: number | null; lng: number | null }>({ lat: null, lng: null })
   const [publicPlace, setPublicPlace] = React.useState('')
   const [selfHostedDay, setSelfHostedDay] = React.useState('')
   const [selfHostedStartTime, setSelfHostedStartTime] = React.useState('')
@@ -206,6 +208,8 @@ export default function ProposePage() {
           skills,
           is_self_hosted: isSelfHosted,
           custom_location: isSelfHosted ? customLocation.trim() || null : null,
+          location_lat: isSelfHosted ? locationPoint.lat : null,
+          location_lng: isSelfHosted ? locationPoint.lng : null,
           public_place: isSelfHosted ? publicPlace.trim() || null : null,
           self_hosted_start_time: isSelfHosted && selfHostedDay && selfHostedStartTime
             ? buildTimestamp(selfHostedDay, selfHostedStartTime, event.timezone) : null,
@@ -494,24 +498,16 @@ export default function ProposePage() {
                       </fieldset>
                     )}
 
-                    <div className="space-y-2">
-                      <Label htmlFor="propose-location" className="flex items-center gap-2">
-                        <MapPin className="h-4 w-4" aria-hidden />
-                        Location details
-                      </Label>
-                      <Textarea
-                        id="propose-location"
-                        value={customLocation}
-                        onChange={(e) => setCustomLocation(e.target.value)}
-                        placeholder="Where will your session be held? Include the address, room and any directions attendees need…"
-                        rows={3}
-                        maxLength={300}
-                        aria-describedby="propose-location-hint"
-                      />
-                      <FieldHint id="propose-location-hint">
-                        {customLocation.length}/300 · Shown only to confirmed attendees, hosts and organizers. Never published.
-                      </FieldHint>
-                    </div>
+                    <LocationPicker
+                      eventSlug={event.slug}
+                      idPrefix="propose-location"
+                      value={{ address: customLocation, lat: locationPoint.lat, lng: locationPoint.lng }}
+                      onChange={(next) => {
+                        setCustomLocation(next.address)
+                        setLocationPoint({ lat: next.lat, lng: next.lng })
+                      }}
+                      initialView={event.map ? { center: event.map.center, zoom: event.map.zoom } : null}
+                    />
 
                     <div className="space-y-2">
                       <Label htmlFor="propose-public-place">Public area (optional)</Label>

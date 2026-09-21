@@ -125,6 +125,7 @@ export async function POST(request: Request) {
         throw err
       }
       const row = { ...fields, event_id: access.event.id, host_id: accountId }
+      if ('public_geo' in row && row.public_geo) row.public_geo = sql.json(row.public_geo as never)
       const [inserted] = await t<{ id: string; status: string; title: string }[]>`
         insert into sessions ${t(row as Record<string, string>, Object.keys(row) as never)}
         returning id, status, title

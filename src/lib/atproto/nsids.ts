@@ -24,6 +24,8 @@ export const NSID = {
 
   // app.bsky — borrowed verbatim (vendored under lexicons/vendor/bsky/)
   actorProfile: 'app.bsky.actor.profile',
+  /** The gathering account's own posts (design §7). Facets/embeds are object defs, not records. */
+  post: 'app.bsky.feed.post',
 
   // freeschool.draft — reused verbatim
   policy: 'freeschool.draft.policy',
@@ -102,6 +104,10 @@ export const GATHERING_COLLECTIONS: readonly Nsid[] = [
   // The gathering account's own `app.bsky.actor.profile` (rkey `self`); not indexed (it is not in
   // `INDEXED_COLLECTIONS`, so reconciliation skips it and Jetstream never subscribes to it).
   NSID.actorProfile,
+  // The gathering account's feed posts (design §7): in scope for the privacy audit's live scan
+  // (foreign DIDs only via `feed_posts.mentions`, host-name check over post text); not indexed by
+  // Jetstream — the app's own `feed_posts` ledger is the source of truth.
+  NSID.post,
 ]
 
 /** What a PERSON's repo holds that matters to us (reconciliation scope for `accounts.did`). */

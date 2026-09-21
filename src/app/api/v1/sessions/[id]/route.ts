@@ -188,6 +188,7 @@ export async function PATCH(request: Request, { params }: Params) {
       let row: { host_id: string | null; title: string; status: string } | null = { host_id: rel.host_id, title: rel.title, status: rel.status }
       const keys = Object.keys(fields)
       if (keys.length) {
+        if (fields.public_geo) fields.public_geo = sql.json(fields.public_geo as never)
         const rows = await t<{ host_id: string | null; title: string; status: string }[]>`
           update sessions set ${t(fields as Record<string, string>, keys as never)}, updated_at = now()
           where id = ${id} and event_id = ${access.event.id}

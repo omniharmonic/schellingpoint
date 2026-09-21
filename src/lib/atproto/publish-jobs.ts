@@ -47,6 +47,8 @@ export interface PublishJob {
 interface JobRow {
   id: string
   event_id: string
+  /** `'schedule'` (session chunks) or `'feed'` (drain the gathering's queued `feed_posts`, design §7.4). */
+  kind: 'schedule' | 'feed'
   requested_by: string | null
   session_ids: string[]
   position: number
@@ -115,6 +117,32 @@ export async function enqueueSchedulePublish(input: { eventId: string; callerUse
     order by created_at desc limit 1
   `
   if (!active) throw new Error('could not queue the publish job')
+  return { job: toJob(active), created: false }
+}
+
+/**
+ * Queue a feed delivery job (design §7.4): one live `kind='feed'` job per gathering drains every
+ * queued `feed_posts` row through `deliverQueuedPosts`. When one is already queued or running it
+ * is returned (`created: false`) and, if queued, made due now so newly claimed rows go out promptly.
+ * A `null` caller is a trusted server-side job (the port then runs `publish-post` as `system`).
+ */
+export async function enqueueFeedJob(input: { eventId: string; callerUserId: string | null }): Promise<{ job: PublishJob; created: boolean }> {
+  const inserted = await sql<JobRow[]>`
+    insert into publish_jobs (event_id, kind, requested_by, session_ids)
+    values (${input.eventId}, 'feed', ${input.callerUserId}, '{}'::uuid[])
+    on conflict (event_id, kind) where status in ('queued', 'running') do nothing
+    returning *
+  `
+  if (inserted[0]) return { job: toJob(inserted[0]), created: true }
+  const [active] = await sql<JobRow[]>`
+    update publish_jobs set run_after = least(run_after, now()), updated_at = now()
+    where id = (
+      select id from publish_jobs where event_id = ${input.eventId} and kind = 'feed' and status in ('queued', 'running')
+      order by created_at desc limit 1
+    )
+    returning *
+  `
+  if (!active) throw new Error('could not queue the feed delivery job')
   return { job: toJob(active), created: false }
 }
 
@@ -189,6 +217,7 @@ async function runClaimed(row: JobRow, deadline: number, opts: RunJobsOptions): 
   const total = row.session_ids.length
   let position = row.position
   const summary = (status: PublishJobStatus, error?: string) => ({ id: row.id, status, position, total, ...(error ? { error } : {}) })
+  if (row.kind === 'feed') return runFeedClaimed(row, deadline, summary)
   if (!row.requested_by) {
     await sql`update publish_jobs set status = 'failed', last_error = 'the organiser who queued this publish no longer has an account', finished_at = now(), locked_at = null, updated_at = now() where id = ${row.id}`
     return summary('failed', 'requester gone')
@@ -243,6 +272,63 @@ async function runClaimed(row: JobRow, deadline: number, opts: RunJobsOptions): 
   } catch (e) {
     const detail = describe(e)
     const permanent = (e as { name?: string })?.name === 'GatheringActionDeniedError' || (e as { name?: string })?.name === 'GatheringNotLinkedError' || row.attempts >= MAX_ATTEMPTS
+    if (permanent) {
+      await sql`update publish_jobs set status = 'failed', last_error = ${detail}, finished_at = now(), locked_at = null, updated_at = now() where id = ${row.id}`
+      return summary('failed', detail)
+    }
+    const backoffMs = Math.min(30 * 60_000, 30_000 * 2 ** Math.max(0, row.attempts - 1))
+    await sql`
+      update publish_jobs set status = 'queued', last_error = ${detail}, locked_at = null,
+        run_after = now() + ${`${backoffMs} milliseconds`}::interval, updated_at = now()
+      where id = ${row.id}
+    `
+    return summary('queued', detail)
+  }
+}
+
+/**
+ * A `kind='feed'` job (design §7.4): post the gathering's queued `feed_posts` rows, oldest first,
+ * until none are left or the time budget runs out. A rate limit re-queues the job for when the
+ * limit lifts; any other thrown error backs off like a schedule job. Per-row failures are recorded
+ * on the rows themselves (organisers retry from the Feed section) and never fail the job.
+ */
+async function runFeedClaimed(
+  row: JobRow,
+  deadline: number,
+  summary: (status: PublishJobStatus, error?: string) => RunJobsResult['jobs'][number],
+): Promise<RunJobsResult['jobs'][number]> {
+  const { deliverQueuedPosts } = await import('./feed')
+  try {
+    let posted = 0
+    let failed = 0
+    for (let pass = 0; pass < 100; pass++) {
+      if (Date.now() >= deadline) {
+        await sql`update publish_jobs set status = 'queued', locked_at = null, run_after = now(), updated_at = now() where id = ${row.id} and status = 'running'`
+        return summary('queued')
+      }
+      const [current] = await sql<{ status: PublishJobStatus }[]>`select status from publish_jobs where id = ${row.id}`
+      if (current?.status === 'cancelled') return summary('cancelled')
+      const out = await deliverQueuedPosts({ eventId: row.event_id, callerUserId: row.requested_by })
+      posted += out.posted
+      failed += out.failed
+      await sql`update publish_jobs set published = published + ${out.posted}, failed = failed + ${out.failed}, locked_at = now(), updated_at = now() where id = ${row.id}`
+      if (typeof out.retryAfterMs === 'number') {
+        const waitMs = Math.max(1_000, out.retryAfterMs)
+        await sql`
+          update publish_jobs set status = 'queued', locked_at = null, attempts = greatest(attempts - 1, 0),
+            run_after = now() + ${`${waitMs} milliseconds`}::interval,
+            last_error = ${`rate limited by the PDS; resuming in ${Math.ceil(waitMs / 1000)}s`}, updated_at = now()
+          where id = ${row.id}
+        `
+        return summary('queued', 'rate-limited')
+      }
+      if (out.remaining === 0 || (out.posted === 0 && out.failed === 0)) break
+    }
+    await sql`update publish_jobs set status = 'succeeded', last_error = ${failed ? `${failed} post(s) failed; see the feed ledger` : null}, finished_at = now(), locked_at = null, updated_at = now() where id = ${row.id}`
+    return summary('succeeded', failed ? `${posted} posted, ${failed} failed` : undefined)
+  } catch (e) {
+    const detail = describe(e)
+    const permanent = (e as { name?: string })?.name === 'GatheringNotLinkedError' || row.attempts >= MAX_ATTEMPTS
     if (permanent) {
       await sql`update publish_jobs set status = 'failed', last_error = ${detail}, finished_at = now(), locked_at = null, updated_at = now() where id = ${row.id}`
       return summary('failed', detail)

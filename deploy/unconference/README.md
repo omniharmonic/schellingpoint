@@ -11,7 +11,7 @@ SSH-only firewall).
 | `app` | `unconference-app` (this repo, `Dockerfile`) | Next.js AppView + web |
 | `migrate` | same image | one-shot `db/migrations` runner, before `app` |
 | `indexer` | same image | Jetstream consumer |
-| `scheduler` | `curlimages/curl` | job loop: close rounds (1 min), dispatch notifications (5 min), reconcile ATProto (hourly), retention (daily) |
+| `scheduler` | `curlimages/curl` | job loop: close rounds + drain publish/feed jobs (1 min), dispatch notifications and knowledge jobs (5 min), reconcile ATProto (hourly), retention (daily) |
 | `postgres` | `postgres:16-alpine` | the AppView database |
 | `pds` | `ghcr.io/bluesky-social/pds:0.4` | our PDS: custodial and gathering accounts |
 | `backup` | `backup.Dockerfile` | nightly encrypted Postgres + PDS backup to R2 |
@@ -111,6 +111,20 @@ The contribution is snapshotted when checkout opens; changing the event's rate a
 checkouts. Disconnecting payouts stops paid sales while preserving ticket admission restrictions.
 Free passes can operate without Stripe configuration. Missing secrets or incomplete payout
 onboarding must never be presented as a successful live payment verification.
+
+## Feed, map and knowledge (optional services)
+
+- **Feed**: no configuration. Organizers turn it on per gathering (Settings → Feed & network); posts
+  go through the audited port as the gathering account. Off by default.
+- **Map**: `NEXT_PUBLIC_MAP_STYLE_URL` (default OpenFreeMap `liberty`, key-less) and `GEOCODER_URL`
+  (default Nominatim; the app sends `User-Agent: unconference.events (hello@unconference.events)`,
+  paces to 1 request/s and caches 30 days). The map style is compiled in at build time, so changing
+  it needs a release.
+- **Knowledge**: the corpus export works with nothing configured. Set `EMBEDDINGS_PROVIDER`
+  (`voyage`|`openai`), `EMBEDDINGS_MODEL`, `EMBEDDINGS_API_KEY` for embeddings and
+  `ANTHROPIC_API_KEY` (+ `AI_CHAT_MODEL`, default `claude-sonnet-5`) for "Ask the gathering",
+  summaries and themes; the Knowledge page shows which parts are active. Transcript text reaches
+  those providers only when they are configured; the Participation settings disclose this.
 
 ## Health and verification
 

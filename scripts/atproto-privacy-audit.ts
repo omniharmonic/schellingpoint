@@ -9,8 +9,11 @@
  *                     AND every record fetched LIVE from our PDS with `listRecords` (the index could
  *                     be stale or incomplete). The single exemption is a `coop.lexicon.membership`
  *                     claim whose subject passes all three gates right now (policy publishRoles,
- *                     subject opted in, derived role >= host).
+ *                     subject opted in, derived role >= host). Feed posts (`app.bsky.feed.post`,
+ *                     design §7) may name a DID only in a mention facet, and only when the ledger
+ *                     (`feed_posts.mentions`) recorded that DID as consented at post time.
  *   2. host-name      no gathering-written record contains a name an organiser typed for a person
+ *                     — post text included —
  *                     (`session_host_listings.host_name`, `sessions.host_name`, `tracks.lead_name`,
  *                     `tracks.lead_email`) or equals a host's or co-host's display name.
  *   3. vote-columns   `vote_entries` and `vote_ballots` carry no account/user/DID column
@@ -24,6 +27,10 @@
  *   8. exact-location no indexed record (any repo) and no live gathering record contains a value
  *                     equal to a session's exact location or meeting link (`sessions.custom_location`);
  *                     a gathering-written record may not even contain one.
+ *   9. geo           no gathering-written record carries a `community.lexicon.location.geo` within
+ *                     0.005° of a private-residence venue's point or of a session's exact
+ *                     `location_lat/lng`, unless it equals that session's coarse `public_geo`
+ *                     (spec §8.1: exact points are attendee-only; only the ≈1 km point is published).
  *
  * Read-only. Output names collections, rkeys and counts — never a DID, handle or record body.
  */
@@ -63,7 +70,7 @@ async function loadValidate(): Promise<Validate> {
   return (await import(pathToFileURL(path.join(outdir, 'validate.js')).href)) as Validate
 }
 
-type Check = 'foreign-did' | 'host-name' | 'exact-location' | 'vote-columns' | 'ballot-key' | 'event-scope' | 'borrowed' | 'tally-k'
+type Check = 'foreign-did' | 'host-name' | 'exact-location' | 'vote-columns' | 'ballot-key' | 'event-scope' | 'borrowed' | 'tally-k' | 'geo'
 
 interface Finding {
   check: Check
@@ -162,6 +169,18 @@ async function main(): Promise<void> {
     `
     const consent = new Set(consented.map((c) => `${c.actor_did}|${c.subject_did}`))
 
+    // Feed posts (design §7.4): a mention facet may name a DID only when the ledger recorded that
+    // DID as consented at post time (`feed_posts.mentions`). Keyed by the post's at-uri.
+    const mentionsByUri = new Map<string, Set<string>>()
+    if (await tableExists(sql, 'feed_posts')) {
+      const posts = await sql<{ uri: string; mentions: unknown }[]>`select uri, mentions from feed_posts where uri is not null`
+      for (const p of posts) {
+        const dids = Array.isArray(p.mentions) ? (p.mentions as Array<{ did?: unknown }>).map((m) => m?.did).filter((d): d is string => typeof d === 'string') : []
+        mentionsByUri.set(p.uri, new Set(dids))
+      }
+      counts['feed posts (ledger)'] = posts.length
+    }
+
     /* ───────────── gathering-written records: index + live ───────────── */
     const gatheringRecords: Rec[] = []
     if (actorDids.size) {
@@ -188,8 +207,10 @@ async function main(): Promise<void> {
     for (const r of gatheringRecords) {
       const subject = r.collection === NSID.membership && typeof r.record.subject === 'string' ? r.record.subject : undefined
       const consentedSubjectDid = subject && consent.has(`${r.did}|${subject}`) ? subject : undefined
+      // A post not in the ledger gets NO mention allowance: any foreign DID in it is a violation.
+      const consentedMentionDids = r.collection === NSID.post ? mentionsByUri.get(r.uri) : undefined
       try {
-        assertNoForeignDid(r.record, r.did, { gatheringDid: r.did, consentedSubjectDid })
+        assertNoForeignDid(r.record, r.did, { gatheringDid: r.did, consentedSubjectDid, consentedMentionDids })
       } catch (e) {
         const detail = e instanceof ForeignDidError ? `names a foreign DID at ${e.path}` : e instanceof Error ? e.message : String(e)
         findings.push({ check: 'foreign-did', where: where(r), detail })
@@ -266,6 +287,63 @@ async function main(): Promise<void> {
       }
     }
 
+    /* ───────────── geo (spec §8.1) ───────────── */
+    {
+      const geos: Array<{ path: string; lat: number; lng: number; rec: Rec }> = []
+      const walk = (node: unknown, path: string, rec: Rec) => {
+        if (Array.isArray(node)) node.forEach((n, i) => walk(n, `${path}[${i}]`, rec))
+        else if (node && typeof node === 'object') {
+          const o = node as Record<string, unknown>
+          if (o.$type === NSID.locationGeo) {
+            const lat = Number(o.latitude)
+            const lng = Number(o.longitude)
+            if (Number.isFinite(lat) && Number.isFinite(lng)) geos.push({ path, lat, lng, rec })
+          }
+          for (const [k, v] of Object.entries(o)) walk(v, path ? `${path}.${k}` : k, rec)
+        }
+      }
+      for (const r of gatheringRecords) walk(r.record, '', r)
+      counts['geo points in gathering records'] = geos.length
+      const columns = await sql<{ table_name: string; column_name: string }[]>`
+        select table_name, column_name from information_schema.columns
+        where table_schema = 'public' and (table_name, column_name) in (('venues', 'latitude'), ('sessions', 'location_lat'))
+      `
+      const hasVenueGeo = columns.some((c) => c.table_name === 'venues')
+      const hasSessionGeo = columns.some((c) => c.table_name === 'sessions')
+      const near = (a: { lat: number; lng: number }, b: { lat: number; lng: number }) => Math.abs(a.lat - b.lat) <= 0.005 && Math.abs(a.lng - b.lng) <= 0.005
+      const homes = hasVenueGeo
+        ? await sql<{ lat: number; lng: number }[]>`
+            select latitude::float8 as lat, longitude::float8 as lng from venues
+            where is_private_residence and latitude is not null and longitude is not null
+          `
+        : []
+      const exact = hasSessionGeo
+        ? await sql<{ lat: number; lng: number; coarse: { lat: number; lng: number } | null }[]>`
+            select location_lat::float8 as lat, location_lng::float8 as lng, public_geo as coarse from sessions
+            where location_lat is not null and location_lng is not null
+          `
+        : []
+      counts['private-residence points'] = homes.length
+      counts['exact session points'] = exact.length
+      for (const g of geos) {
+        if (homes.some((h) => near(g, h))) {
+          findings.push({ check: 'geo', where: where(g.rec), detail: `${g.path} is within 0.005° of a private residence` })
+          continue
+        }
+        for (const e of exact) {
+          if (!near(g, e)) continue
+          const coarse = e.coarse && Number.isFinite(Number(e.coarse.lat)) && Number.isFinite(Number(e.coarse.lng))
+            ? { lat: Math.round(Number(e.coarse.lat) * 100) / 100, lng: Math.round(Number(e.coarse.lng) * 100) / 100 }
+            : null
+          const equalsCoarse = coarse !== null && Math.abs(g.lat - coarse.lat) < 1e-9 && Math.abs(g.lng - coarse.lng) < 1e-9
+          if (!equalsCoarse) {
+            findings.push({ check: 'geo', where: where(g.rec), detail: `${g.path} is within 0.005° of a session's exact location and is not its coarse point` })
+            break
+          }
+        }
+      }
+    }
+
     /* ───────────── voting tables ───────────── */
     for (const table of ['vote_entries', 'vote_ballots']) {
       if (!(await tableExists(sql, table))) {
@@ -308,7 +386,7 @@ async function main(): Promise<void> {
     const ourRows = await sql<{ uri: string; did: string; collection: string; record: Record<string, unknown> }[]>`
       select r.uri, r.did, r.collection, r.record from at_records r
       where r.did in (select did from accounts union select actor_did from events where actor_did is not null)
-        and (r.collection like 'community.lexicon.%' or r.collection like 'coop.lexicon.%' or r.collection like 'freeschool.draft.%')
+        and (r.collection like 'community.lexicon.%' or r.collection like 'coop.lexicon.%' or r.collection like 'freeschool.draft.%' or r.collection like 'app.bsky.%')
     `
     const borrowed: Rec[] = [...ourRows.map((r) => ({ ...r, source: 'index' as const })), ...gatheringRecords.filter((r) => r.source === 'live' && isBorrowedNsid(r.collection))]
     counts['borrowed records checked'] = borrowed.length
@@ -345,7 +423,7 @@ async function main(): Promise<void> {
   for (const [k, v] of Object.entries(counts)) console.log(`  ${`${k}:`.padEnd(40)} ${v}`)
   const byCheck = new Map<Check, number>()
   for (const f of findings) byCheck.set(f.check, (byCheck.get(f.check) ?? 0) + 1)
-  for (const check of ['foreign-did', 'host-name', 'exact-location', 'vote-columns', 'ballot-key', 'event-scope', 'borrowed', 'tally-k'] as Check[]) {
+  for (const check of ['foreign-did', 'host-name', 'exact-location', 'vote-columns', 'ballot-key', 'event-scope', 'borrowed', 'tally-k', 'geo'] as Check[]) {
     console.log(`  [${byCheck.get(check) ? 'FAIL' : ' ok '}] ${check}${byCheck.get(check) ? ` (${byCheck.get(check)})` : ''}`)
   }
   for (const f of findings.slice(0, 200)) console.log(`  ${f.check}: ${f.where} — ${f.detail}`)

@@ -80,7 +80,7 @@ export default function EventSettingsPage() {
 
   return <div className="max-w-4xl space-y-8">
     <PageHeader
-      title="Event settings"
+      title="Settings"
       subtitle={<>Currently <span className="font-medium text-foreground">{eventStatusBadge(status).label.toLowerCase()}</span>. Each section saves on its own.</>}
       actions={<Button variant="outline" asChild><Link href={`/e/${event.slug}`}>Gathering page<ArrowUpRight className="ml-2 h-4 w-4" aria-hidden="true" /></Link></Button>}
       className="mb-0"

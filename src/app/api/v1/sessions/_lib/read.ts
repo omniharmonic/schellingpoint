@@ -1,4 +1,5 @@
 import 'server-only'
+import { isLatLng, parseLatLng, roundCoarse } from '@/lib/geo/coarse'
 /**
  * Session reads for the app (work package B): one query shape for the list, the detail
  * page, my-schedule and the schedule, serialized through one R9 filter.
@@ -56,6 +57,12 @@ interface SessionRow {
   is_self_hosted: boolean | null
   custom_location: string | null
   public_place: string | null
+  /** Migration 0023: exact point (attendee-only) and its coarse public counterpart. */
+  location_lat: number | null
+  location_lng: number | null
+  public_geo: { lat: number; lng: number } | null
+  venue_latitude: number | null
+  venue_longitude: number | null
   self_hosted_start_time: string | null
   self_hosted_end_time: string | null
   telegram_group_url: string | null
@@ -141,7 +148,15 @@ export interface SessionView {
   cohosts: (PersonView & { id: string; is_viewer: boolean })[]
   track: { id: string; name: string; slug: string | null; color: string | null } | null
   track_id: string | null
-  venue: { id: string; name: string; capacity: number | null; features: string[]; address: string | null } | null
+  venue: {
+    id: string
+    name: string
+    capacity: number | null
+    features: string[]
+    address: string | null
+    /** The room's point: always for a public venue; for a private residence only with attendee details. */
+    geo: { lat: number; lng: number } | null
+  } | null
   time_slot: { id: string; label: string | null; start_time: string; end_time: string; day_date: string | null } | null
   proposal_uri: string | null
   calendar_event_uri: string | null
@@ -164,6 +179,12 @@ export interface SessionView {
   custom_location?: string | null
   /** The proposer's coarse public label for a self-hosted place ("Near Pearl St, Boulder"). Public. */
   public_place: string | null
+  /**
+   * Where a self-hosted session is, by tier: the EXACT point (`exact: true`) for confirmed
+   * attendees, hosts and organizers; otherwise the coarse ≈1 km point (`exact: false`); null when
+   * the host placed no pin.
+   */
+  location_geo: { lat: number; lng: number; exact: boolean } | null
   has_telegram_group: boolean
   has_private_location: boolean
   /** Hosts and organizers only. */
@@ -211,6 +232,8 @@ async function queryRows(access: EventAccess, filters: SessionListFilters, sessi
     select
       s.id, s.event_id, s.title, s.description, s.format, s.duration, s.topic_tags, s.skill_uris as skills, s.status,
       s.session_type, s.is_self_hosted, s.custom_location, s.public_place, s.self_hosted_start_time, s.self_hosted_end_time,
+      s.location_lat::float8 as location_lat, s.location_lng::float8 as location_lng, s.public_geo,
+      v.latitude::float8 as venue_latitude, v.longitude::float8 as venue_longitude,
       s.telegram_group_url, s.expected_attendance, s.required_features, s.time_preferences,
       s.rsvp_count, s.waitlist_count, s.host_id, s.rejection_reason, s.proposal_uri, s.calendar_event_uri,
       s.proposal_withdrawn_at, s.created_at, s.updated_at,
@@ -272,6 +295,18 @@ function person(display_name: string | null, handle: string | null, avatar_url: 
   return { display_name, handle, avatar_url }
 }
 
+/** The self-hosted point by tier: exact with attendee details, else the stored coarse point, re-rounded. */
+function selfHostedGeo(row: SessionRow, attendeeDetails: boolean): SessionView['location_geo'] {
+  if (!row.is_self_hosted) return null
+  if (attendeeDetails && isLatLng(row.location_lat, row.location_lng)) {
+    return { lat: row.location_lat as number, lng: row.location_lng as number, exact: true }
+  }
+  const coarse = parseLatLng(row.public_geo)
+  if (!coarse) return null
+  const c = roundCoarse(coarse.lat, coarse.lng)
+  return { lat: c.lat, lng: c.lng, exact: false }
+}
+
 export function serializeSession(row: SessionRow, access: EventAccess, detail: boolean): SessionView {
   const viewerId = access.viewer?.accountId ?? null
   const cohostRows = row.cohosts ?? []
@@ -328,6 +363,10 @@ export function serializeSession(row: SessionRow, access: EventAccess, detail: b
           features: row.venue_features ?? [],
           // A private residence's street address is ticket-holder detail, never public (spec §10).
           address: row.venue_is_private_residence && !attendeeDetails ? row.venue_locality : row.venue_address,
+          // Same tier for its point (spec §8.1): a private home's pin is attendee-only.
+          geo: isLatLng(row.venue_latitude, row.venue_longitude) && (!row.venue_is_private_residence || attendeeDetails)
+            ? { lat: row.venue_latitude as number, lng: row.venue_longitude as number }
+            : null,
         }
       : null,
     time_slot: row.time_slot_id && row.slot_start_time && row.slot_end_time
@@ -351,6 +390,7 @@ export function serializeSession(row: SessionRow, access: EventAccess, detail: b
     has_telegram_group: !!row.telegram_group_url,
     has_private_location: !!(row.is_self_hosted && row.custom_location),
     public_place: row.is_self_hosted ? row.public_place : null,
+    location_geo: selfHostedGeo(row, attendeeDetails),
   }
 
   if (isOrganizer && !row.host_id) view.listed_as = row.listed_as

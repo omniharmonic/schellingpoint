@@ -15,6 +15,7 @@ import {
   MoreHorizontal,
   PanelLeft,
   PanelLeftClose,
+  Pin,
   Redo2,
   RotateCcw,
   Send,
@@ -31,7 +32,7 @@ import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { ConfirmInline } from '@/components/ui/confirm-inline'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { PageHeader } from '@/components/PageHeader'
 import { useEvent, useEventRole } from '@/contexts/EventContext'
 import { apiFetch, ApiError } from '@/lib/api/client'
@@ -40,7 +41,10 @@ import { formatInEventTimezone } from '@/lib/events/timezone'
 import { cn } from '@/lib/utils'
 import { plural } from '@/lib/format'
 import { PublishJobProgress } from '@/components/PublishJobProgress'
-import { hostLabel, type AdminSession, type AdminSessionsResponse, type AdminTimeSlot, type AdminVenue } from '@/components/admin/types'
+import { hostLabel, type AdminSession, type AdminSessionsResponse, type AdminTimeSlot, type AdminVenue, type RoundStatus } from '@/components/admin/types'
+import { AudienceClusters } from '@/components/admin/AudienceClusters'
+import { AutoScheduleRun, type HillClimbStats, type SchedulerStage } from '@/components/admin/AutoScheduleRun'
+import { QualityChip, QualityScore, useDraftQuality, type QualityReport } from '@/components/admin/ScheduleQuality'
 
 interface ApprovalRequest {
   id: string
@@ -76,7 +80,10 @@ interface PublishResponse {
 interface AutoScheduleResult {
   assignments: Array<{ sessionId: string; sessionTitle: string; slotId: string; venueId: string; score: number; warnings: string[] }>
   unassigned: Array<{ sessionId: string; sessionTitle: string; reason: string }>
-  stats: { totalSessions: number; assigned: number; unassigned: number; averageScore: number; usedBallots: boolean }
+  stats: { totalSessions: number; assigned: number; unassigned: number; averageScore: number; usedBallots: boolean; k: number; keepApartPairs: number }
+  quality: QualityReport
+  improvement: HillClimbStats
+  stages: SchedulerStage[]
 }
 
 interface ScheduleResponse {
@@ -113,6 +120,38 @@ const slotMinutes = (slot: Pick<AdminTimeSlot, 'start_time' | 'end_time'>) =>
 
 const errorText = (e: unknown, fallback: string) => (e instanceof ApiError ? e.message : fallback)
 
+/** "Pin to room": organizer constraint the auto-scheduler and the quality check honor. */
+function PinMenu({ session, venues, busy, onPin, className }: { session: AdminSession; venues: AdminVenue[]; busy: boolean; onPin: (venueId: string | null) => void; className?: string }) {
+  const pinnedRoom = venues.find((v) => v.id === session.pinned_venue_id)
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          disabled={busy}
+          aria-label={pinnedRoom ? `Pinned to ${pinnedRoom.name}; change room` : `Pin ${session.title} to a room`}
+          title={pinnedRoom ? `Pinned to ${pinnedRoom.name}` : 'Pin to room'}
+          className={cn('inline-flex items-center gap-1 text-[11px] hover:underline disabled:opacity-50', pinnedRoom ? 'text-primary' : 'text-muted-foreground', className)}
+          data-testid="pin-menu-trigger"
+        >
+          <Pin className={cn('h-3 w-3', pinnedRoom && 'fill-current')} aria-hidden="true" />
+          {pinnedRoom ? pinnedRoom.name : 'Pin…'}
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start">
+        <DropdownMenuLabel>Pin to room</DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        <DropdownMenuRadioGroup value={session.pinned_venue_id ?? ''} onValueChange={(value) => onPin(value || null)}>
+          <DropdownMenuRadioItem value="">Any room</DropdownMenuRadioItem>
+          {venues.map((v) => (
+            <DropdownMenuRadioItem key={v.id} value={v.id}>{v.name}</DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
 export default function AdminSchedulePage() {
   const event = useEvent()
   const { can } = useEventRole()
@@ -124,7 +163,7 @@ export default function AdminSchedulePage() {
   const [venues, setVenues] = React.useState<AdminVenue[]>([])
   const [timeSlots, setTimeSlots] = React.useState<AdminTimeSlot[]>([])
   const [sessions, setSessions] = React.useState<AdminSession[]>([])
-  const [votingStatus, setVotingStatus] = React.useState<string>('none')
+  const [votingStatus, setVotingStatus] = React.useState<RoundStatus>('none')
   const [approvals, setApprovals] = React.useState<ApprovalRequest[]>([])
   const [approvalsError, setApprovalsError] = React.useState<string | null>(null)
   const [viewerAccountId, setViewerAccountId] = React.useState<string | null>(null)
@@ -150,6 +189,10 @@ export default function AdminSchedulePage() {
   const [autoLoading, setAutoLoading] = React.useState(false)
   const [autoResult, setAutoResult] = React.useState<AutoScheduleResult | null>(null)
   const [selectedAssignments, setSelectedAssignments] = React.useState<Set<string>>(new Set())
+
+  const [qualityOpen, setQualityOpen] = React.useState(false)
+  const [pinning, setPinning] = React.useState<string | null>(null)
+  const [pinRevision, setPinRevision] = React.useState(0)
 
   const [publishOpen, setPublishOpen] = React.useState(false)
   const [publishing, setPublishing] = React.useState(false)
@@ -205,6 +248,14 @@ export default function AdminSchedulePage() {
     for (const s of sessions) if (s.time_slot_id && s.status === 'scheduled') map.set(s.time_slot_id, s)
     return map
   }, [sessions])
+
+  // Live quality (§9.3): every placement on the grid, scored server-side after each change.
+  const draftAssignments = React.useMemo(
+    () => sessions.filter((s) => s.status === 'scheduled' && s.time_slot_id).map((s) => ({ sessionId: s.id, slotId: s.time_slot_id!, venueId: s.venue_id })),
+    [sessions],
+  )
+  const draftQuality = useDraftQuality(base, draftAssignments, canSchedule && !isLoading && votingStatus !== 'open', 400, pinRevision)
+  const titleOf = React.useCallback((id: string) => sessions.find((s) => s.id === id)?.title ?? 'another session', [sessions])
 
   const openRequestBySession = React.useMemo(() => {
     const map = new Map<string, ApprovalRequest>()
@@ -450,6 +501,23 @@ export default function AdminSchedulePage() {
     setBusy(false)
   }
 
+  const pinSession = async (session: AdminSession, venueId: string | null) => {
+    if (pinning) return
+    setPinning(session.id)
+    setNotice(null)
+    try {
+      const res = await apiFetch<{ session: AdminSession }>(`${base}/admin/sessions/${session.id}`, { method: 'PATCH', json: { pinned_venue_id: venueId } })
+      setSessions((prev) => prev.map((s) => (s.id === session.id ? { ...s, pinned_venue_id: res.session?.pinned_venue_id ?? venueId } : s)))
+      setPinRevision((n) => n + 1)
+      const room = venues.find((v) => v.id === venueId)?.name
+      setNotice({ kind: 'success', text: venueId ? `Pinned “${session.title}” to ${room ?? 'that room'}. Auto-schedule keeps it there.` : `Unpinned “${session.title}”.` })
+    } catch (e) {
+      setNotice({ kind: 'error', text: errorText(e, 'The pin could not be saved.') })
+    } finally {
+      setPinning(null)
+    }
+  }
+
   const previewAutoSchedule = async () => {
     setAutoOpen(true)
     setAutoLoading(true)
@@ -598,6 +666,8 @@ export default function AdminSchedulePage() {
         </p>
       )}
 
+      <AudienceClusters base={base} votingStatus={votingStatus} refreshKey={sessions.length} className="mb-4" />
+
       <div className="relative flex min-h-[600px] h-[calc(100dvh-220px)] calendar-workspace overflow-hidden bg-card">
         <div className={cn('border-r bg-muted/30 flex flex-col transition-all duration-200', showSidebar ? 'absolute inset-y-0 left-0 z-10 w-72 bg-card shadow-xl lg:static lg:w-72 lg:shadow-none shrink-0' : 'w-0 overflow-hidden')}>
           <div className="p-3 sm:p-4 border-b bg-background flex items-center justify-between gap-2">
@@ -643,9 +713,12 @@ export default function AdminSchedulePage() {
                             </Badge>
                           ))}
                         </div>
-                        <Button size="sm" variant="ghost" className="mt-2 text-xs" onClick={() => setPicked(picked?.id === session.id ? null : session)} aria-pressed={picked?.id === session.id}>
-                          {picked?.id === session.id ? 'Cancel placing' : 'Place…'}
-                        </Button>
+                        <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                          <Button size="sm" variant="ghost" className="text-xs -ml-2" onClick={() => setPicked(picked?.id === session.id ? null : session)} aria-pressed={picked?.id === session.id}>
+                            {picked?.id === session.id ? 'Cancel placing' : 'Place…'}
+                          </Button>
+                          <PinMenu session={session} venues={venues} busy={pinning === session.id} onPin={(venueId) => void pinSession(session, venueId)} />
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -673,8 +746,11 @@ export default function AdminSchedulePage() {
               {unscheduled.length > 0 && (
                 <Button variant="outline" size="sm" onClick={previewAutoSchedule} disabled={autoLoading || busy} className="gap-1.5" title={votingStatus === 'open' ? 'Available after voting closes' : undefined}>
                   {votingStatus === 'open' ? <Lock className="h-4 w-4" /> : <SlidersHorizontal className="h-4 w-4" />}
-                  <span className="hidden sm:inline">Auto-schedule</span>
+                  <span className="hidden sm:inline">{votingStatus === 'closed' ? 'Auto-schedule' : 'Run without ballots'}</span>
                 </Button>
+              )}
+              {!draftQuality.unavailable && draftAssignments.length > 0 && (
+                <QualityChip quality={draftQuality.quality} loading={draftQuality.loading} onClick={() => setQualityOpen(true)} />
               )}
               <div className="w-px h-6 bg-border mx-1 hidden sm:block" />
               <Button variant="ghost" size="icon-sm" onClick={() => void undo()} disabled={historyIndex < 0 || busy} aria-label="Undo (Ctrl+Z)" title="Undo (Ctrl+Z)"><Undo2 className="h-4 w-4" aria-hidden="true" /></Button>
@@ -758,12 +834,17 @@ export default function AdminSchedulePage() {
                         const duration = slotMinutes(slot)
                         const mismatch = session.duration !== null && session.duration !== duration
                         const overCapacity = Boolean(venue.capacity && session.expected_attendance && session.expected_attendance > venue.capacity)
+                        const keepApart = draftQuality.keepApartBySession.get(session.id) ?? []
+                        const pinnedElsewhere = Boolean(session.pinned_venue_id && session.pinned_venue_id !== venue.id)
                         return (
                           <div
                             key={venue.id}
                             onDragOver={(e) => { if (dragged) e.preventDefault() }}
                             onDrop={(e) => { e.preventDefault(); if (dragged) void dropOnSlot(dragged, slot.id) }}
-                            className={cn('min-h-24 rounded-xl border-l-4 border p-3 relative group overflow-hidden', session.proposal_withdrawn_at ? 'bg-destructive/5 border-destructive/40' : mismatch || overCapacity || session.proposal_drift_at ? 'bg-signal-amber/10 border-signal-amber/40' : 'bg-secondary border-primary/60')}
+                            data-testid="scheduled-cell"
+                            data-session-id={session.id}
+                            data-keep-apart={keepApart.length > 0 ? 'true' : undefined}
+                            className={cn('min-h-24 rounded-xl border-l-4 border p-3 relative group overflow-hidden', session.proposal_withdrawn_at || keepApart.length > 0 || pinnedElsewhere ? 'bg-destructive/5 border-destructive/40' : mismatch || overCapacity || session.proposal_drift_at ? 'bg-signal-amber/10 border-signal-amber/40' : 'bg-secondary border-primary/60')}
                           >
                             <button
                               onClick={() => void removeFromSlot(session)}
@@ -779,9 +860,24 @@ export default function AdminSchedulePage() {
                               {request && <Badge variant="amber" className="text-[10px] gap-0.5 px-1"><Hourglass className="h-2.5 w-2.5" aria-hidden="true" />Awaiting approval</Badge>}
                               {mismatch && <span title={`Session is ${session.duration} min; slot is ${duration} min`}><Clock className="h-3 w-3 text-signal-amber" aria-label="Duration mismatch" /></span>}
                               {overCapacity && <span title={`Expected ${session.expected_attendance}; room holds ${venue.capacity}`}><AlertTriangle className="h-3 w-3 text-signal-amber" aria-label="Over capacity" /></span>}
+                              {session.pinned_venue_id && (
+                                <span title={pinnedElsewhere ? `Pinned to ${venues.find((v) => v.id === session.pinned_venue_id)?.name ?? 'another room'}` : 'Pinned to this room'}>
+                                  <Pin className={cn('h-3 w-3 fill-current', pinnedElsewhere ? 'text-destructive' : 'text-primary')} aria-label={pinnedElsewhere ? 'Pinned to another room' : 'Pinned to this room'} />
+                                </span>
+                              )}
                             </div>
                             <h3 className="text-xs font-medium line-clamp-2 mt-1">{session.title}</h3>
                             {hostLabel(session) && <p className="text-xs text-muted-foreground mt-0.5 truncate">{hostLabel(session)}</p>}
+                            {keepApart.map((c) => {
+                              const other = c.a === session.id ? c.b : c.a
+                              return (
+                                <p key={other} className="text-[11px] text-destructive mt-0.5 flex items-start gap-1" role="alert">
+                                  <AlertTriangle className="h-3 w-3 mt-px shrink-0" aria-hidden="true" />
+                                  <span className="line-clamp-2">Keep apart · {c.overlapPercent}% shared with “{titleOf(other)}”</span>
+                                </p>
+                              )
+                            })}
+                            {pinnedElsewhere && <p className="text-[11px] text-destructive mt-0.5">Pinned to {venues.find((v) => v.id === session.pinned_venue_id)?.name ?? 'another room'}</p>}
                             {session.proposal_withdrawn_at && <p className="text-[11px] text-destructive mt-0.5">Withdrawn by proposer</p>}
                             {!session.proposal_withdrawn_at && session.proposal_drift_at && <p className="text-[11px] text-signal-amber mt-0.5">Proposer edited — re-publish</p>}
                             {session.network_published && !request && (
@@ -800,6 +896,7 @@ export default function AdminSchedulePage() {
                                 {picked?.id === session.id ? 'Cancel move' : 'Move…'}
                               </button>
                             )}
+                            <PinMenu session={session} venues={venues} busy={pinning === session.id} onPin={(venueId) => void pinSession(session, venueId)} className="mt-1 ml-3" />
                           </div>
                         )
                       }
@@ -880,14 +977,17 @@ export default function AdminSchedulePage() {
       <Dialog open={autoOpen} onOpenChange={(open) => { if (!open && !autoLoading) setAutoOpen(false) }}>
         <DialogContent size="lg" className="flex max-h-[85dvh] flex-col">
           <DialogHeader>
-            <DialogTitle className="flex items-center gap-2"><SlidersHorizontal className="h-5 w-5 text-primary" aria-hidden="true" />Auto-schedule preview</DialogTitle>
-            <DialogDescription>Review proposed placements before adding them to the draft.</DialogDescription>
+            <DialogTitle className="flex items-center gap-2"><SlidersHorizontal className="h-5 w-5 text-primary" aria-hidden="true" />{autoResult ? 'Auto-schedule result' : 'Running auto-schedule'}</DialogTitle>
+            <DialogDescription>{autoResult ? 'Review the run and the proposed placements, then add the ones you want to the draft. Nothing is published.' : 'Analyzing ballots, rooms and constraints. This takes a few seconds.'}</DialogDescription>
           </DialogHeader>
           <div className="flex-1 overflow-y-auto">
               {autoLoading && !autoResult ? (
-                <div className="flex items-center justify-center py-12"><Loader2 className="h-8 w-8 animate-spin text-muted-foreground" /></div>
+                <div className="py-2" role="status" aria-live="polite">
+                  <AutoScheduleRun running stages={null} quality={null} improvement={null} usedBallots={votingStatus === 'closed'} />
+                </div>
               ) : autoResult ? (
                 <div className="space-y-4">
+                  <AutoScheduleRun running={false} stages={autoResult.stages} quality={autoResult.quality} improvement={autoResult.improvement} usedBallots={autoResult.stats.usedBallots} />
                   <div className="grid grid-cols-3 gap-3">
                     <div className="bg-muted rounded-lg p-3 text-center"><div className="text-2xl font-semibold tabular-nums">{autoResult.stats.assigned}</div><div className="text-xs text-muted-foreground">Placed</div></div>
                     <div className="bg-muted rounded-lg p-3 text-center"><div className="text-2xl font-semibold tabular-nums">{autoResult.stats.unassigned}</div><div className="text-xs text-muted-foreground">Not placed</div></div>
@@ -895,8 +995,8 @@ export default function AdminSchedulePage() {
                   </div>
                   <p className="text-xs text-muted-foreground">
                     {autoResult.stats.usedBallots
-                      ? 'Ordering and overlap use the closed round’s ballots. Overlap compares anonymous ballot tokens, never people.'
-                      : 'No closed voting round yet: placements use duration, preferences, rooms and tracks only.'}
+                      ? `Ordering, room sizing and overlap use the closed round’s ballots (${plural(autoResult.stats.keepApartPairs, 'keep-apart pair')} across the gathering). Overlap compares anonymous ballot tokens, never people.`
+                      : 'No closed voting round yet, so this run used durations, host availability, rooms and tracks only. Once a round closes, running again also keeps sessions with a shared audience apart, orders by demand and sizes rooms to it.'}
                   </p>
                   {autoResult.assignments.length > 0 && (
                     <div>
@@ -953,6 +1053,21 @@ export default function AdminSchedulePage() {
               </Button>
             </DialogFooter>
           )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={qualityOpen} onOpenChange={setQualityOpen}>
+        <DialogContent size="md" className="flex max-h-[85dvh] flex-col">
+          <DialogHeader>
+            <DialogTitle>Draft quality</DialogTitle>
+            <DialogDescription>Scored from every placement on the grid, using the closed round’s ballots. It updates as you move sessions.</DialogDescription>
+          </DialogHeader>
+          <div className="flex-1 overflow-y-auto">
+            {draftQuality.quality ? <QualityScore quality={draftQuality.quality} usedBallots={votingStatus === 'closed'} /> : <p className="text-sm text-muted-foreground">{draftQuality.error ?? 'Scoring the draft…'}</p>}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setQualityOpen(false)}>Close</Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 

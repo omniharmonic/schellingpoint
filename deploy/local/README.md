@@ -34,6 +34,7 @@ ALLOW_SEED=true DATABASE_URL=postgres://unconference:unconference@127.0.0.1:5543
 #    DATABASE_URL=postgres://unconference_app:unconference_app@127.0.0.1:55432/unconference
 #    DATABASE_MIGRATION_URL=postgres://unconference:unconference@127.0.0.1:55432/unconference
 #    PDS_URL=http://localhost:2583
+#    NEXT_PUBLIC_MAP_STYLE_URL=https://tiles.openfreemap.org/styles/liberty   (optional; map tiles, needs internet)
 #    PDS_INTERNAL_URL=http://localhost:2583
 #    PDS_ADMIN_PASSWORD=local-admin-password
 #    PDS_HANDLE_DOMAIN=test

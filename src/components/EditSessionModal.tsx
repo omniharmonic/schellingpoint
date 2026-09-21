@@ -21,6 +21,7 @@ import { parseTimeInTimezone } from '@/lib/events/timezone'
 import { apiFetch } from '@/lib/api/client'
 import { SkillPicker } from '@/components/SkillPicker'
 import { TimePreferences, type TimePreferenceValue, type TimeWindowValue } from '@/components/TimePreferences'
+import { LocationPicker } from '@/components/map/LocationPicker'
 import { SESSION_STATUS } from '@/lib/labels'
 import { allowedFormatOptions, MAX_TAGS, TIME_OPTIONS } from '@/lib/sessions/constants'
 import type { SessionView } from '@/app/api/v1/sessions/_lib/read'
@@ -129,6 +130,8 @@ export function EditSessionModal({ isOpen, onClose, session, onSave }: EditSessi
       chatUrl: session.telegram_group_url || '',
       isSelfHosted: session.is_self_hosted,
       customLocation: session.custom_location || '',
+      locationLat: session.location_geo?.exact ? session.location_geo.lat : null,
+      locationLng: session.location_geo?.exact ? session.location_geo.lng : null,
       publicPlace: session.public_place || '',
       day: start.day,
       startTime: start.time,
@@ -215,7 +218,11 @@ export function EditSessionModal({ isOpen, onClose, session, onSave }: EditSessi
         if (form.isSelfHosted) {
           body.self_hosted_start_time = withTimes && form.startTime ? parseTimeInTimezone(form.startTime, form.day, event.timezone).toISOString() : null
           body.self_hosted_end_time = withTimes && form.endTime ? parseTimeInTimezone(form.endTime, form.day, event.timezone).toISOString() : null
-          if (canSeeAttendeeDetails) body.custom_location = form.customLocation.trim() || null
+          if (canSeeAttendeeDetails) {
+            body.custom_location = form.customLocation.trim() || null
+            body.location_lat = form.locationLat
+            body.location_lng = form.locationLng
+          }
           body.public_place = form.publicPlace.trim() || null
         }
       }
@@ -415,11 +422,14 @@ export function EditSessionModal({ isOpen, onClose, session, onSave }: EditSessi
                       </div>
                     )}
                     {canSeeAttendeeDetails && (
-                      <div className="space-y-2">
-                        <Label htmlFor="edit-location">Location details</Label>
-                        <Textarea id="edit-location" value={form.customLocation} onChange={(e) => set('customLocation', e.target.value)} placeholder="Address or directions for attendees…" rows={2} maxLength={300} aria-describedby="edit-location-hint" />
-                        <p id="edit-location-hint" className="text-xs text-muted-foreground">Shown only to confirmed attendees, hosts and organizers.</p>
-                      </div>
+                      <LocationPicker
+                        eventSlug={event.slug}
+                        idPrefix="edit-location"
+                        value={{ address: form.customLocation, lat: form.locationLat, lng: form.locationLng }}
+                        onChange={(next) => setForm((f) => ({ ...f, customLocation: next.address, locationLat: next.lat, locationLng: next.lng }))}
+                        initialView={event.map ? { center: event.map.center, zoom: event.map.zoom } : null}
+                        hint="Shown only to confirmed attendees, hosts and organizers."
+                      />
                     )}
                     <div className="space-y-2">
                       <Label htmlFor="edit-public-place">Public area (optional)</Label>

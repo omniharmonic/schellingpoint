@@ -79,7 +79,7 @@ export function WizardStepTabs({ state, dispatch }: WizardCommonProps) {
       <div className="hidden md:block">
         <div
           role="tablist"
-          className="flex items-stretch justify-between gap-1 border-b border-border overflow-x-auto"
+          className="flex flex-wrap items-stretch gap-x-1 border-b border-border"
         >
           {WIZARD_STEPS.map((stepName, index) => {
             const status = getStepStatus(index, currentStep, state);

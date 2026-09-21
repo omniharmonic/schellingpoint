@@ -8,9 +8,13 @@ import { applyRoleClaimOptIn, type RoleClaimOutcome } from './role-claim'
 /**
  * The viewer's own directory settings in one gathering.
  *
- *   GET   → { role, directory_listing, public_role, publish_roles }
- *   PATCH { directory_listing?: boolean, public_role?: boolean }
+ *   GET   → { role, directory_listing, public_role, publish_roles, mention_in_posts, feed_posts, has_handle }
+ *   PATCH { directory_listing?: boolean, public_role?: boolean, mention_in_posts?: boolean }
  *         → same body, plus `role_claim` when `public_role` changed
+ *
+ * `mention_in_posts` (default off, design §7.2) is the viewer's per-gathering consent to be
+ * @-mentioned in the gathering's feed posts about sessions they host; the gathering actor port
+ * re-checks it (with host/co-host and repo visibility) for every post.
  *
  * `directory_listing` (default on) lists the viewer in this gathering's members-only directory.
  * `public_role` (default off) is the viewer's consent to a public "host of this gathering" role
@@ -27,13 +31,21 @@ interface Settings {
   directory_listing: boolean
   public_role: boolean
   publish_roles: boolean
+  /** Feed (design §7.2): the viewer's consent to be @-mentioned in this gathering's posts about their sessions. */
+  mention_in_posts: boolean
+  /** Whether the gathering posts to its feed at all (so the UI can say the switch is dormant). */
+  feed_posts: boolean
+  /** Whether the viewer's account has a handle a mention could render (`accounts.handle`). */
+  has_handle: boolean
 }
 
 async function load(eventId: string, accountId: string): Promise<Settings | null> {
   const [row] = await sql<Settings[]>`
     select m.role, m.directory_listing, m.public_role,
-           coalesce((to_jsonb(e) -> 'policy_thresholds' ->> 'publishRoles')::boolean, false) as publish_roles
-    from event_members m join events e on e.id = m.event_id
+           coalesce((to_jsonb(e) -> 'policy_thresholds' ->> 'publishRoles')::boolean, false) as publish_roles,
+           m.mention_in_posts, e.feed_posts,
+           (a.handle is not null) as has_handle
+    from event_members m join events e on e.id = m.event_id join accounts a on a.id = m.user_id
     where m.event_id = ${eventId} and m.user_id = ${accountId}
   `
   return row ?? null
@@ -56,13 +68,14 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ sl
 
   const body = (await request.json().catch(() => null)) as Record<string, unknown> | null
   if (!body || typeof body !== 'object' || Array.isArray(body)) return jsonError(400, 'Expected a JSON object')
-  const unknown = Object.keys(body).filter((k) => k !== 'directory_listing' && k !== 'public_role')
+  const unknown = Object.keys(body).filter((k) => k !== 'directory_listing' && k !== 'public_role' && k !== 'mention_in_posts')
   if (unknown.length) return jsonError(400, `Unknown field: ${unknown.join(', ')}`, { field: unknown[0] })
-  for (const key of ['directory_listing', 'public_role'] as const) {
+  for (const key of ['directory_listing', 'public_role', 'mention_in_posts'] as const) {
     if (key in body && typeof body[key] !== 'boolean') return jsonError(400, `${key} must be true or false`, { field: key })
   }
   const listing = typeof body.directory_listing === 'boolean' ? body.directory_listing : null
   const publicRole = typeof body.public_role === 'boolean' ? body.public_role : null
+  const mention = typeof body.mention_in_posts === 'boolean' ? body.mention_in_posts : null
 
   const before = await load(event.id, viewer.accountId)
   if (!before) return jsonError(403, 'Forbidden')
@@ -70,6 +83,14 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ sl
   if (listing !== null) {
     await sql`
       update event_members set directory_listing = ${listing}
+      where event_id = ${event.id} and user_id = ${viewer.accountId}
+    `
+  }
+  if (mention !== null) {
+    // The viewer's own switch only (R9): the port re-reads it for every post it writes, so turning
+    // it off takes effect on the next post; posts already made are not rewritten.
+    await sql`
+      update event_members set mention_in_posts = ${mention}
       where event_id = ${event.id} and user_id = ${viewer.accountId}
     `
   }

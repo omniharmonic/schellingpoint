@@ -158,6 +158,7 @@ services:
           job /api/jobs/publish
           [ $$((n % 5)) -eq 0 ] && job /api/notifications/dispatch
           [ $$((n % 60)) -eq 0 ] && job /api/atproto/sync
+          [ $$((n % 5)) -eq 0 ] && job /api/jobs/knowledge
           [ $$((n % 1440)) -eq 0 ] && job /api/jobs/retention
           n=$$((n + 1))
           sleep 60

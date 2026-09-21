@@ -6,6 +6,7 @@ import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { RemovableChip } from '@/components/ui/removable-chip'
+import { Select } from '@/components/ui/select'
 import type { Event } from '@/types/event'
 import { SectionCard, SaveBar, Field, Toggle } from './SectionCard'
 import { useSectionSave, toEventLocal, sameValue } from './shared'
@@ -24,6 +25,8 @@ export function ParticipationSection({ event }: { event: Event }) {
   const [requireApproval, setRequireApproval] = React.useState(event.requireProposalApproval)
   const [topics, setTopics] = React.useState<string[]>(event.suggestedTopics)
   const [topicInput, setTopicInput] = React.useState('')
+  const [transcriptsEnabled, setTranscriptsEnabled] = React.useState(event.transcriptsEnabled ?? true)
+  const [transcriptsVisibility, setTranscriptsVisibility] = React.useState<'members' | 'organizers'>(event.transcriptsVisibility ?? 'members')
   const fieldError = (field: string) => (state.status === 'error' && state.field === field ? state.message : null)
 
   // Deadlines are wall-clock strings in the event timezone; re-render them if the timezone changes.
@@ -52,6 +55,7 @@ export function ParticipationSection({ event }: { event: Event }) {
     allowed_formats: formats, allowed_durations: durations,
     max_proposals_per_user: maxProposals, require_proposal_approval: requireApproval,
     suggested_topics: topics,
+    transcripts_enabled: transcriptsEnabled, transcripts_visibility: transcriptsVisibility,
   }
   const dirty = !sameValue(
     { ...patch, allowed_formats: sorted(formats), allowed_durations: sorted(durations) },
@@ -61,6 +65,7 @@ export function ParticipationSection({ event }: { event: Event }) {
       allowed_formats: sorted(event.allowedFormats), allowed_durations: sorted(event.allowedDurations),
       max_proposals_per_user: event.maxProposalsPerUser, require_proposal_approval: event.requireProposalApproval,
       suggested_topics: event.suggestedTopics,
+      transcripts_enabled: event.transcriptsEnabled ?? true, transcripts_visibility: event.transcriptsVisibility ?? 'members',
     },
   )
 
@@ -127,5 +132,16 @@ export function ParticipationSection({ event }: { event: Event }) {
         <Button type="button" variant="outline" onClick={addTopic} disabled={!topicInput.trim()}><Plus className="mr-1 h-4 w-4" aria-hidden="true" />Add</Button>
       </div>
     </Field>
+    <div className="space-y-4">
+      <Toggle id="transcripts-enabled" checked={transcriptsEnabled} onChange={setTranscriptsEnabled} label="Session transcripts" description="Hosts, co-hosts and organizers can attach a transcript to a session (text, Markdown, WebVTT or SRT, 5 MB). Whoever attaches one confirms that everyone in the room was told the session was being recorded or transcribed. Transcripts are never published." />
+      {transcriptsEnabled ? <div className="ml-14">
+        <Field label="Who can read transcripts" htmlFor="transcripts-visibility" hint="Organizers always can. When this server has an AI provider configured, transcript text is sent to it for search and answers; the Knowledge page shows what is active." error={fieldError('transcripts_visibility')}>
+          <Select id="transcripts-visibility" value={transcriptsVisibility} onChange={e => setTranscriptsVisibility(e.target.value as 'members' | 'organizers')} wrapperClassName="max-w-xs">
+            <option value="members">Members of this gathering</option>
+            <option value="organizers">Organizers only</option>
+          </Select>
+        </Field>
+      </div> : null}
+    </div>
   </SectionCard>
 }

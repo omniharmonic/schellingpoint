@@ -140,6 +140,22 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
       | { attempted: false }
       | { attempted: true; published: number; failed: number; skipped: number; results: Array<{ kind: string; id: string; uri?: string; error?: string }>; error?: string; queued?: boolean; jobId?: string; total?: number }
       = { attempted: false }
+    // Feed (design §7.3): the app-side schedule is published — claim `schedule-published` before
+    // the per-session posts so it goes out first. `feed.ts` re-checks its gates; nothing here can
+    // fail the publish. Delivered by the feed job kicked off after the response.
+    if (committed.actorDid) {
+      try {
+        const [rooms] = await sql<{ rooms: number }[]>`
+          select count(distinct venue_id)::int as rooms from sessions
+          where event_id = ${eventId} and status = 'scheduled' and time_slot_id is not null and venue_id is not null
+        `
+        const feed = await import('@/lib/atproto/feed')
+        await feed.enqueueGatheringPost({ eventId, kind: 'schedule-published', callerUserId: ctx.viewer.accountId, meta: { sessions: committed.scheduled, rooms: rooms?.rooms ?? 0 } })
+      } catch (e) {
+        console.warn('[publish-schedule] feed post could not be queued:', e instanceof Error ? e.name : 'error')
+      }
+    }
+
     const jobs = committed.actorDid ? await import('@/lib/atproto/publish-jobs') : null
     if (committed.actorDid && jobs?.needsJob(committed.scheduled)) {
       try {
@@ -189,6 +205,9 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
         }
       }
     }
+
+    // Deliver whatever the feed claimed (schedule-published, session posts or a digest) after the response.
+    if (committed.actorDid) after(() => import('@/lib/atproto/feed').then((f) => f.kickFeedDelivery(eventId)).catch(() => undefined))
 
     return json({
       success: true,

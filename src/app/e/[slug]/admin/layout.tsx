@@ -6,6 +6,7 @@ import { usePathname } from 'next/navigation'
 import {
   ArrowLeft,
   BarChart3,
+  BookOpen,
   CalendarRange,
   DollarSign,
   FileText,
@@ -53,6 +54,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
       { label: 'Tickets', href: `${base}/tickets`, icon: Ticket, show: isAdmin },
       { label: 'Revenue', href: `${base}/revenue`, icon: DollarSign, show: isAdmin },
       { label: 'Analytics', href: `${base}/analytics`, icon: BarChart3, show: can('viewAnalytics') },
+      { label: 'Knowledge', href: `${base}/knowledge`, icon: BookOpen, show: can('viewAnalytics') || role === 'moderator' },
       { label: 'Network', href: `${base}/atproto`, icon: Globe, show: isAdmin || role === 'moderator' },
     ] },
   ]

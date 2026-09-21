@@ -57,6 +57,8 @@ import type {
   VenueRecord,
   VotingMechanism,
 } from './types'
+import type { GeoLocation } from './types'
+import { isLatLng, roundCoarse } from '@/lib/geo/coarse'
 
 /* ────────────────────────────── helpers ────────────────────────────── */
 
@@ -378,6 +380,40 @@ export function venueLocation(input: VenueAddressInput): AddressLocation | null 
   })
 }
 
+/**
+ * A `community.lexicon.location.geo` (strings, per the borrowed lexicon) from a WGS84 point.
+ * Coordinates are written with at most 6 decimals; `name` is optional and must never be a
+ * person's name (a venue name is fine, a host's is not).
+ */
+export function geoLocation(input: { lat: number; lng: number; name?: string | null }): GeoLocation {
+  return compact({
+    $type: NSID.locationGeo,
+    latitude: input.lat.toFixed(6).replace(/\.?0+$/, ''),
+    longitude: input.lng.toFixed(6).replace(/\.?0+$/, ''),
+    name: text(input.name),
+  })
+}
+
+/**
+ * The public geo of a venue (spec §8.1): the exact point for a public venue, NOTHING for a
+ * private residence (its coordinates are attendee-only, the tier of its street address).
+ */
+export function venueGeo(input: { latitude?: number | null; longitude?: number | null; privateResidence?: boolean | null }): GeoLocation | null {
+  if (input.privateResidence) return null
+  if (!isLatLng(input.latitude, input.longitude)) return null
+  return geoLocation({ lat: input.latitude as number, lng: input.longitude as number })
+}
+
+/**
+ * The coarse public geo of a self-hosted session (spec §8.1): the stored `public_geo` (already
+ * rounded to 2 decimals server-side), re-rounded here so an exact point can never slip through.
+ */
+export function coarseSessionGeo(publicGeo: { lat: number; lng: number } | null | undefined): GeoLocation | null {
+  if (!publicGeo || !isLatLng(publicGeo.lat, publicGeo.lng)) return null
+  const c = roundCoarse(publicGeo.lat, publicGeo.lng)
+  return geoLocation({ lat: c.lat, lng: c.lng })
+}
+
 export interface TrackInput {
   name: string
   slug?: string | null
@@ -456,6 +492,13 @@ export interface SessionCalendarEventInput {
    * yields locality only). A self-hosted session's exact address never reaches this record.
    */
   venueAddress?: AddressLocation | null
+  /** The venue's PUBLIC geo (`venueGeo`: null for a private residence). */
+  venueGeo?: GeoLocation | null
+  /**
+   * A self-hosted session's COARSE point only (`coarseSessionGeo` of `sessions.public_geo`,
+   * ≈ 1 km). The exact `location_lat/lng` is attendee-only and is never an input here.
+   */
+  publicGeo?: GeoLocation | null
   /** The public session page on Schelling Point. */
   sessionUrl: string
   createdAt: string | Date
@@ -470,6 +513,8 @@ export function buildSessionCalendarEvent(input: SessionCalendarEventInput): Cal
   const virtual = input.virtual === true
   const locations: EventLocation[] = []
   if (!virtual && input.venueAddress) locations.push(input.venueAddress)
+  if (!virtual && input.venueGeo) locations.push(input.venueGeo)
+  if (!virtual && input.publicGeo) locations.push(input.publicGeo)
   return compact({
     $type: NSID.event,
     name: input.name.trim(),
@@ -963,6 +1008,33 @@ export interface AssertNoForeignDidOptions {
    * Only `role-claims.ts` passes this, after checking all three gates.
    */
   consentedSubjectDid?: string
+  /**
+   * The feed exemption (design §7.2): DIDs an `app.bsky.feed.post` may name, accepted SOLELY at the
+   * `did` of an `app.bsky.richtext.facet#mention` feature inside `facets` — never in `text`, never
+   * in any other record type. The port computes the set from the database (`consentedMentions`:
+   * `event_members.mention_in_posts`, host or self-written co-host, visible repo); the privacy
+   * audit rebuilds it from `feed_posts.mentions`. Nothing else may pass it.
+   */
+  consentedMentionDids?: ReadonlySet<string>
+}
+
+const NSID_POST = 'app.bsky.feed.post'
+const MENTION_FEATURE = 'app.bsky.richtext.facet#mention'
+
+/** `facets[i].features[j].did` paths of mention features in a post record, else empty. */
+function mentionDidPaths(record: unknown): Set<string> {
+  const out = new Set<string>()
+  if (!record || typeof record !== 'object') return out
+  const r = record as { $type?: unknown; facets?: unknown }
+  if (r.$type !== NSID_POST || !Array.isArray(r.facets)) return out
+  r.facets.forEach((facet, i) => {
+    const features = (facet as { features?: unknown })?.features
+    if (!Array.isArray(features)) return
+    features.forEach((feature, j) => {
+      if ((feature as { $type?: unknown })?.$type === MENTION_FEATURE) out.add(`facets[${i}].features[${j}].did`)
+    })
+  })
+  return out
 }
 
 /**
@@ -971,6 +1043,7 @@ export interface AssertNoForeignDidOptions {
  * Also catches DIDs smuggled inside free text ("cohost: did:plc:…").
  */
 export function assertNoForeignDid(record: unknown, authorDid: string, opts: AssertNoForeignDidOptions = {}): void {
+  const mentionPaths = opts.consentedMentionDids?.size ? mentionDidPaths(record) : new Set<string>()
   const visit = (node: unknown, path: string, field: string | undefined): void => {
     if (typeof node === 'string') {
       if (node.startsWith('at://')) return
@@ -978,6 +1051,7 @@ export function assertNoForeignDid(record: unknown, authorDid: string, opts: Ass
       if (BARE_DID_RE.test(node)) {
         if (node === authorDid) return
         if (path === 'subject' && opts.consentedSubjectDid && node === opts.consentedSubjectDid) return
+        if (mentionPaths.has(path) && opts.consentedMentionDids?.has(node)) return
         if (allowance === 'any') return
         if (allowance === 'gathering' && (!opts.gatheringDid || node === opts.gatheringDid)) return
         throw new ForeignDidError(path, node, authorDid)

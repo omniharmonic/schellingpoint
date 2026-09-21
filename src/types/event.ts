@@ -94,8 +94,19 @@ export interface EventRow {
   ticketing_enabled: boolean;
   stripe_account_id: string | null;
   suggested_topics: string[] | null;
+  transcripts_enabled?: boolean;
+  transcripts_visibility?: 'members' | 'organizers';
+  /** Migration 0023: organizer-chosen map view, app-side only. */
+  map?: EventMapView | null;
   created_at: string;
   updated_at: string;
+}
+
+/** `events.map` (spec §8.1). */
+export interface EventMapView {
+  center: [number, number];
+  zoom: number;
+  bounds?: [[number, number], [number, number]];
 }
 
 // Transformed event for frontend use (camelCase)
@@ -133,6 +144,10 @@ export interface Event {
   ticketingEnabled: boolean;
   stripeAccountId: string | null;
   suggestedTopics: string[];
+  transcriptsEnabled?: boolean;
+  transcriptsVisibility?: 'members' | 'organizers';
+  /** The organizer's chosen map view (spec §8.1), or null when the map area is not set. */
+  map: EventMapView | null;
 }
 
 // Event member relationship
@@ -181,8 +196,11 @@ export function transformEventRow(row: EventRow): Event {
     lastScheduleChangeAt: row.last_schedule_change_at ? new Date(row.last_schedule_change_at) : null,
     ticketingEnabled: row.ticketing_enabled,
     stripeAccountId: row.stripe_account_id,
+    map: row.map ?? null,
     // No hardcoded fallback — topics are organizer-defined.
     // Events created before organizer topics existed may have legacy defaults in the DB.
     suggestedTopics: row.suggested_topics || [],
+    transcriptsEnabled: row.transcripts_enabled ?? true,
+    transcriptsVisibility: row.transcripts_visibility ?? 'members',
   };
 }

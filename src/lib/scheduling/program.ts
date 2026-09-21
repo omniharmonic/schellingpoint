@@ -77,6 +77,8 @@ export interface AdminSessionRow {
   /** The proposer's repo is taken down / suspended / deactivated (migration 0011). */
   author_inactive_at: string | null
   cancelled_at: string | null
+  /** Organizer pin: the room this session must be in (migration 0018); null = any room. */
+  pinned_venue_id: string | null
   venue: { id: string; name: string } | null
   time_slot: { id: string; label: string | null; start_time: string; end_time: string; day_date: string | null } | null
   track: { id: string; name: string; color: string | null } | null
@@ -91,7 +93,7 @@ export async function listAdminSessions(eventId: string, db: Sql = sql, sessionI
            l.host_name as listed_host_name,
            s.topic_tags, s.time_preferences, s.track_id, s.venue_id, s.time_slot_id, s.published_slot_id,
            s.session_type, s.is_votable, s.expected_attendance, s.required_features, s.rejection_reason,
-           s.host_notified_at, s.imported_from, s.created_at,
+           s.host_notified_at, s.imported_from, s.created_at, s.pinned_venue_id,
            (select count(*)::int from session_cohosts c where c.session_id = s.id and c.cohost_inactive_at is null) as cohost_count,
            s.calendar_event_uri, s.proposal_uri,
            (s.calendar_event_uri is not null and s.slot_uri is not null and s.cancelled_at is null) as network_published,
@@ -185,6 +187,10 @@ export interface AdminVenue {
   is_primary: boolean
   /** Formats this room may host; empty = all. */
   allowed_formats: string[]
+  /** Migration 0023: the room's point (organizers see it for every room, private residences included). */
+  latitude: number | null
+  longitude: number | null
+  geocoded_from: string | null
   network_published: boolean
   slot_count: number
   scheduled_count: number
@@ -197,6 +203,7 @@ export async function selectVenues(db: Sql, eventId: string, venueId?: string): 
     select v.id, v.name, v.slug, v.capacity, coalesce(v.features, '{}') as features, v.style, v.address,
            v.locality, v.region, v.postal_code, v.country, v.is_private_residence, v.notes,
            coalesce(v.is_primary, false) as is_primary, coalesce(v.allowed_formats, '{}') as allowed_formats,
+           v.latitude::float8 as latitude, v.longitude::float8 as longitude, v.geocoded_from,
            v.at_uri is not null as network_published,
            (select count(*)::int from time_slots t where t.venue_id = v.id and t.event_id = v.event_id) as slot_count,
            (select count(*)::int from sessions s

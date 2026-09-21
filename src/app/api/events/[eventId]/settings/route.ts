@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server'
+import { NextResponse, after } from 'next/server'
 import type postgres from 'postgres'
 import { sql, dbErrorResponse } from '@/lib/db'
 import { assertSameOrigin, requireViewer } from '@/lib/auth/viewer'
@@ -163,7 +163,36 @@ const ALLOWED_KEYS = new Set([
   'voting_opens_at', 'voting_closes_at', 'proposals_open_at', 'proposals_close_at',
   'allowed_formats', 'allowed_durations', 'max_proposals_per_user', 'require_proposal_approval',
   'suggested_topics', 'theme', 'logo_url', 'banner_url', 'policy_thresholds',
+  // Knowledge (design §10.1): transcripts on/off and their default reading tier.
+  'transcripts_enabled', 'transcripts_visibility',
+  'map',
+  // Feed (design §7.2): the gathering-level gate and the digest threshold. Off by default.
+  'feed_posts', 'feed_digest_threshold',
 ])
+
+/**
+ * `events.map` (spec §8.1): the organizer's chosen view `{ center: [lng, lat], zoom, bounds }`.
+ * App-side only, never published. `null` clears it.
+ */
+function parseMapView(value: unknown): { center: [number, number]; zoom: number; bounds?: [[number, number], [number, number]] } | null {
+  if (value === null) return null
+  if (!isRecord(value)) fail('The map view must be an object.', 'map')
+  const v = value as Record<string, unknown>
+  const pair = (p: unknown, what: string): [number, number] => {
+    if (!Array.isArray(p) || p.length !== 2 || !p.every((n) => typeof n === 'number' && Number.isFinite(n))) fail(`The map ${what} must be [longitude, latitude].`, 'map')
+    const [lng, lat] = p as [number, number]
+    if (lng < -180 || lng > 180 || lat < -90 || lat > 90) fail(`The map ${what} is out of range.`, 'map')
+    return [Math.round(lng * 1e6) / 1e6, Math.round(lat * 1e6) / 1e6]
+  }
+  const center = pair(v.center, 'center')
+  const zoom = typeof v.zoom === 'number' && Number.isFinite(v.zoom) && v.zoom >= 0 && v.zoom <= 22 ? v.zoom : fail('The map zoom must be between 0 and 22.', 'map')
+  const out: { center: [number, number]; zoom: number; bounds?: [[number, number], [number, number]] } = { center, zoom: Math.round((zoom as number) * 100) / 100 }
+  if (v.bounds !== undefined && v.bounds !== null) {
+    const bounds: unknown[] = Array.isArray(v.bounds) && v.bounds.length === 2 ? (v.bounds as unknown[]) : fail('The map bounds must be [[sw], [ne]].', 'map')
+    out.bounds = [pair(bounds[0], 'bounds'), pair(bounds[1], 'bounds')]
+  }
+  return out
+}
 
 /** Build the column update from the untrusted body, validating against the current row. */
 function buildUpdate(body: Body, current: EventRecord): EventUpdate {
@@ -237,6 +266,14 @@ function buildUpdate(body: Body, current: EventRecord): EventUpdate {
     if (typeof body.require_proposal_approval !== 'boolean') fail('Proposal approval must be on or off.', 'require_proposal_approval')
     update.require_proposal_approval = body.require_proposal_approval
   }
+  if ('transcripts_enabled' in body) {
+    if (typeof body.transcripts_enabled !== 'boolean') fail('Session transcripts must be on or off.', 'transcripts_enabled')
+    update.transcripts_enabled = body.transcripts_enabled
+  }
+  if ('transcripts_visibility' in body) {
+    if (body.transcripts_visibility !== 'members' && body.transcripts_visibility !== 'organizers') fail('Choose who can read transcripts.', 'transcripts_visibility')
+    update.transcripts_visibility = body.transcripts_visibility
+  }
   if ('suggested_topics' in body) {
     const topics = body.suggested_topics
     if (topics !== null && (!Array.isArray(topics) || topics.some(t => typeof t !== 'string' || t.length > 80))) fail('Topics must be a list of short names.', 'suggested_topics')
@@ -249,7 +286,21 @@ function buildUpdate(body: Body, current: EventRecord): EventUpdate {
     else update.policy_thresholds = result.value
   }
 
+  if ('feed_posts' in body) {
+    if (typeof body.feed_posts !== 'boolean') fail('Feed posting must be on or off.', 'feed_posts')
+    update.feed_posts = body.feed_posts
+  }
+  if ('feed_digest_threshold' in body) {
+    const n = body.feed_digest_threshold
+    if (!Number.isInteger(n) || (n as number) < 1 || (n as number) > 100) fail('The digest threshold must be a whole number from 1 to 100.', 'feed_digest_threshold')
+    update.feed_digest_threshold = n
+  }
+
   if ('theme' in body) update.theme = mergeTheme(current.theme, body.theme)
+  if ('map' in body) {
+    const view = parseMapView(body.map)
+    update.map = view === null ? null : sql.json(view as never)
+  }
   const logo = optionalImageUrl(body, 'logo_url'); if (logo !== undefined) update.logo_url = logo
   const banner = optionalImageUrl(body, 'banner_url'); if (banner !== undefined) update.banner_url = banner
 
@@ -383,6 +434,18 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ ev
 
   // Committed. Now the network, best-effort, never inside the transaction.
   const network: NetworkWrite[] = []
+  // Feed (design §7.3): lifecycle transitions claim their one post each; `feed.ts` re-checks the
+  // gates (`feed_posts`, actor, public, not draft) and a job delivers after this response.
+  if (statusChanged && (nextStatus === 'proposals_open' || nextStatus === 'voting_open')) {
+    const kind = nextStatus === 'proposals_open' ? 'proposals-open' : 'voting-open'
+    try {
+      const feed = await import('@/lib/atproto/feed')
+      const claimed = await feed.enqueueGatheringPost({ eventId: saved.id, kind, callerUserId: viewer.accountId })
+      if (claimed.queued) after(() => feed.kickFeedDelivery(saved!.id))
+    } catch (e) {
+      console.warn('[settings] feed post could not be queued:', e instanceof Error ? e.name : 'error')
+    }
+  }
   if (saved.actor_did) {
     const alreadyPublished = Boolean(saved.atproto_published_at)
     const gatheringChanged = GATHERING_KEYS.some((key) => key in update)
@@ -392,6 +455,12 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ ev
     } else if (alreadyPublished && policyChanged) {
       network.push(await publishPolicyRecord(saved.id, viewer.accountId))
     }
+  }
+
+  // A first publish claims `gathering-published` inside `publishGathering`; deliver it after the response.
+  if (saved.actor_did && network.length) {
+    const savedId = saved.id
+    after(() => import('@/lib/atproto/feed').then((f) => f.kickFeedDelivery(savedId)).catch(() => undefined))
   }
 
   // The publish step stamps uri/cid columns; answer with the row as it now stands.
