@@ -39,7 +39,9 @@ export interface TranscriptWithContent extends TranscriptRow {
   content: string
 }
 
-const ROW_COLUMNS = sql`
+// Built on demand: `sql` opens the pool the moment it is used, and importing this module must not
+// (`next build` evaluates every route's module graph without DATABASE_URL).
+const rowColumns = () => sql`
   id, event_id, session_id, uploaded_by, source, format, char_count, language, consent_confirmed_at,
   visibility, status, summary, summary_generated_at, replaced_at, created_at
 `
@@ -58,7 +60,7 @@ export function canReadTranscript(tier: ReadTier | null, eventVisibility: string
 
 export async function currentTranscript(db: Sql, sessionId: string): Promise<TranscriptWithContent | null> {
   const [row] = await db<TranscriptWithContent[]>`
-    select ${ROW_COLUMNS}, content from session_transcripts
+    select ${rowColumns()}, content from session_transcripts
     where session_id = ${sessionId} and replaced_at is null
   `
   return row ?? null
@@ -88,7 +90,7 @@ export async function saveTranscript(input: SaveTranscriptInput): Promise<{ tran
       insert into session_transcripts (event_id, session_id, uploaded_by, source, format, content, char_count, language, consent_confirmed_at, visibility, status)
       values (${input.eventId}, ${input.sessionId}, ${input.uploadedBy}, ${input.source}, ${input.normalized.format},
               ${input.normalized.text}, ${input.normalized.charCount}, ${input.language}, now(), ${input.visibility}, 'ready')
-      returning ${ROW_COLUMNS}
+      returning ${rowColumns()}
     `
     if (chunks.length) {
       const rows = chunks.map((c) => ({
