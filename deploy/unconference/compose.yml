@@ -72,6 +72,8 @@ services:
       args:
         NEXT_PUBLIC_APP_URL: https://${WEB_HOST:?Set WEB_HOST}
         NEXT_PUBLIC_CONTACT_EMAIL: ${CONTACT_EMAIL:-}
+        # Map tiles are compiled in at build time; changing the style needs a release.
+        NEXT_PUBLIC_MAP_STYLE_URL: ${NEXT_PUBLIC_MAP_STYLE_URL:-}
     image: unconference-app:${RELEASE:-current}
     restart: 'no'
     command: [node, scripts/db-migrate.mjs]
@@ -94,6 +96,7 @@ services:
       HOSTNAME: 0.0.0.0
       NEXT_PUBLIC_APP_URL: https://${WEB_HOST}
       NEXT_PUBLIC_CONTACT_EMAIL: ${CONTACT_EMAIL:-}
+      NEXT_PUBLIC_MAP_STYLE_URL: ${NEXT_PUBLIC_MAP_STYLE_URL:-}
       DATABASE_URL: postgres://unconference_app:${APP_DB_PASSWORD}@postgres:5432/unconference
       # Clients (and DID documents) see the PDS through Caddy; the app talks to it directly.
       PDS_URL: https://${PDS_HOST}
