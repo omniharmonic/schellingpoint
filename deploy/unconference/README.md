@@ -68,6 +68,13 @@ $C run --rm --no-deps --entrypoint /usr/local/bin/backup.sh backup   # backup no
 Roll back: `git checkout <previous commit> && deploy/unconference/release.sh` (the previous image is
 also tagged `unconference-app:rollback-<commit>`).
 
+A run counts as good only when every artifact it should have produced exists at a plausible size,
+locally and in the bucket (`pds-blocks.tar.gz.age` only once `/pds/blocks` exists). A missing one is
+logged as `BACKUP INCOMPLETE: <artifact>` and the run fails; a good run stamps `/backups/last-ok`.
+The `backup` service's healthcheck (`backup.sh --check`) goes unhealthy when that marker is more
+than 30 hours old — i.e. when a nightly silently stopped producing restorable backups. Check it with
+`$C ps` and `$C exec backup /usr/local/bin/backup.sh --check`.
+
 ## Restore rehearsal
 
 ```sh

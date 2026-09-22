@@ -97,6 +97,8 @@ services:
       NEXT_PUBLIC_APP_URL: https://${WEB_HOST}
       NEXT_PUBLIC_CONTACT_EMAIL: ${CONTACT_EMAIL:-}
       NEXT_PUBLIC_MAP_STYLE_URL: ${NEXT_PUBLIC_MAP_STYLE_URL:-}
+      # Geocoding base (default Nominatim; see src/lib/geo/geocode.ts). Read at runtime, not build time.
+      GEOCODER_URL: ${GEOCODER_URL:-}
       DATABASE_URL: postgres://unconference_app:${APP_DB_PASSWORD}@postgres:5432/unconference
       # Clients (and DID documents) see the PDS through Caddy; the app talks to it directly.
       PDS_URL: https://${PDS_HOST}
@@ -202,6 +204,16 @@ services:
       # The backup only ever reads the PDS data; nothing here writes to it.
       - pds:/pds
       - backups:/backups
+    # Unhealthy once no fully verified run has landed for 30 hours (a nightly plus six hours of
+    # slack): `backup.sh --check` reads the /backups/last-ok marker the run stamps only after every
+    # artifact is confirmed present, locally and in the bucket. The long start_period covers the gap
+    # between recreating this service and its first nightly run when the volume has no marker yet.
+    healthcheck:
+      test: [CMD, /usr/local/bin/backup.sh, --check]
+      interval: 15m
+      timeout: 30s
+      start_period: 25h
+      retries: 2
     depends_on:
       postgres:
         condition: service_healthy
