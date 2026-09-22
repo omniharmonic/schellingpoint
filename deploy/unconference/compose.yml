@@ -197,7 +197,10 @@ services:
       AWS_DEFAULT_REGION: auto
       BACKUP_HOUR_UTC: ${BACKUP_HOUR_UTC:-3}
     volumes:
-      - pds:/pds:ro
+      # Read-write: sqlite3's online .backup has to create the transient -shm for a WAL database
+      # that has none on disk (every actor repo), and fails with SQLITE_CANTOPEN on a :ro mount.
+      # The backup only ever reads the PDS data; nothing here writes to it.
+      - pds:/pds
       - backups:/backups
     depends_on:
       postgres:
