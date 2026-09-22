@@ -14,7 +14,12 @@ loadEnvConfig(process.cwd(), true)
 const base = TEST_BASE_URL
 const ownerUrl = process.env.DATABASE_MIGRATION_URL || process.env.DATABASE_URL || ''
 const configured = Boolean(ownerUrl && (process.env.PDS_INTERNAL_URL || process.env.PDS_URL) && process.env.PDS_ADMIN_PASSWORD)
-const providersOff = !process.env.EMBEDDINGS_PROVIDER && !process.env.ANTHROPIC_API_KEY
+// Embeddings default to the on-box model (no key), so they are on unless the operator says `none`.
+const embeddingsOff = /^(none|off|disabled)$/i.test((process.env.EMBEDDINGS_PROVIDER ?? '').trim())
+const chatOff = !process.env.ANTHROPIC_API_KEY
+// The ranker's own floor; a genuine match scores far above it.
+const DEFAULT_MIN_SCORE_FLOOR = 0.3
+const providersOff = embeddingsOff && chatOff
 
 const VTT = `WEBVTT
 
@@ -183,7 +188,7 @@ test.describe('knowledge: transcripts, coverage, export, providers', () => {
     expect(body.transcript.word_count).toBeGreaterThan(5)
     expect(body.transcript.uploaded_by).toBeUndefined()
     expect(body.chunks).toBe(1)
-    if (providersOff) expect(body.embed_queued).toBe(false)
+    expect(body.embed_queued).toBe(!embeddingsOff) // the default provider needs no key, so a job is queued
 
     const [row] = await sql<{ consent_confirmed_at: string; uploaded_by: string; visibility: string }[]>`
       select consent_confirmed_at, uploaded_by, visibility from session_transcripts where session_id = ${sessionId} and replaced_at is null
@@ -356,10 +361,14 @@ test.describe('knowledge: transcripts, coverage, export, providers', () => {
     expect(withT.host_name).toBe('Know Host')
     expect(cov.sessions.find((s: any) => s.id === bareSessionId).transcript).toBeNull()
     expect(JSON.stringify(cov)).not.toMatch(/api[_-]?key|sk-ant|EMBEDDINGS_API_KEY/i)
-    if (providersOff) {
-      expect(cov.providers.embeddings.configured).toBe(false)
-      expect(cov.providers.chat.configured).toBe(false)
+    expect(cov.providers.embeddings.configured).toBe(!embeddingsOff)
+    if (!embeddingsOff && !process.env.EMBEDDINGS_PROVIDER) {
+      // What the operator reads on the Knowledge page.
+      expect(cov.providers.embeddings.provider).toBe('local')
+      expect(cov.providers.embeddings.label).toBe('local (bge-small-en-v1.5)')
+      expect(cov.providers.embeddings.error).toBeNull()
     }
+    expect(cov.providers.chat.configured).toBe(!chatOff)
 
     const req = await api(`/api/v1/events/${gathering.slug}/knowledge/coverage`, { method: 'POST', cookie: owner.cookie, json: { action: 'request' } })
     expect(req.status).toBe(200)
@@ -433,7 +442,7 @@ test.describe('knowledge: transcripts, coverage, export, providers', () => {
   })
 
   test('embed, summaries and ask no-op cleanly when no provider is configured', async () => {
-    test.skip(!providersOff, 'EMBEDDINGS_PROVIDER / ANTHROPIC_API_KEY are set in this environment')
+    test.skip(!providersOff, 'EMBEDDINGS_PROVIDER=none plus no ANTHROPIC_API_KEY is what this covers')
     const embed = await api(`/api/v1/events/${gathering.slug}/knowledge/embed`, { method: 'POST', cookie: owner.cookie })
     expect(embed.status).toBe(200)
     expect(await jsonOf(embed)).toMatchObject({ configured: false, queued: false })
@@ -481,5 +490,86 @@ test.describe('knowledge: transcripts, coverage, export, providers', () => {
     const [chunks] = await sql<{ count: number }[]>`select count(*)::int as count from transcript_chunks where session_id = ${sessionId} and transcript_id in (select id from session_transcripts where session_id = ${sessionId} and replaced_at is null)`
     expect(chunks.count).toBe(0)
     expect((await api(`/api/v1/sessions/${sessionId}/transcript`, { method: 'DELETE', cookie: host.cookie })).status).toBe(404)
+  })
+
+  // The zero-cost default: Transformers.js on this box. No key, no outbound request; the model is
+  // loaded once per process and cached in EMBEDDINGS_CACHE_DIR (default <repo>/.models).
+  test('the default provider embeds locally end to end, and ranking finds the matching chunk', async () => {
+    test.skip(embeddingsOff, 'EMBEDDINGS_PROVIDER switches embeddings off in this environment')
+    test.setTimeout(120_000)
+
+    // Two short transcripts in two sessions, so ranking has something to choose between.
+    const compost = await api(`/api/v1/sessions/${sessionId}/transcript`, {
+      method: 'POST',
+      cookie: host.cookie,
+      json: { text: '[00:05] Ada: We turn kitchen scraps into compost using worm bins and a hot heap.', consent: true },
+    })
+    expect(compost.status).toBe(201)
+    const bikes = await api(`/api/v1/sessions/${bareSessionId}/transcript`, {
+      method: 'POST',
+      cookie: host.cookie,
+      json: { text: '[00:05] Ben: The bike repair stand is open on Saturdays; we lend spanners and patch kits.', consent: true },
+    })
+    expect(bikes.status).toBe(201)
+
+    // Earlier tests queued an embed job that nothing drained; start from a clean queue so that
+    // "Embed now" creates the job it then drains in `after()`.
+    await sql`delete from knowledge_jobs where event_id = ${gathering.id}`
+    const kick = await api(`/api/v1/events/${gathering.slug}/knowledge/embed`, { method: 'POST', cookie: owner.cookie })
+    expect(kick.status).toBe(200)
+    const kicked = await jsonOf(kick)
+    expect(kicked).toMatchObject({ configured: true, queued: true })
+    if (!process.env.EMBEDDINGS_PROVIDER) expect(kicked).toMatchObject({ provider: 'local', model: 'Xenova/bge-small-en-v1.5' })
+
+    // The job runs after the response; the first run also loads the model.
+    const deadline = Date.now() + 90_000
+    let cov: any = null
+    let job: any = null
+    while (Date.now() < deadline) {
+      cov = await jsonOf(await api(`/api/v1/events/${gathering.slug}/knowledge/coverage`, { cookie: owner.cookie }))
+      job = cov.jobs.find((j: any) => j.kind === 'embed')
+      if (job && (job.status === 'succeeded' || job.status === 'failed')) break
+      await new Promise((r) => setTimeout(r, 500))
+    }
+    expect(job?.last_error).toBeNull() // a provider error would land here rather than throwing
+    expect(job?.status).toBe('succeeded')
+    expect(cov.totals.chunks).toBe(2)
+    expect(cov.totals.embedded).toBe(2)
+
+    // 384 dimensions, unit norm, and a model id that namespaces the local space.
+    const stored = await sql<{ embedding_model: string; embedding: number[]; session_id: string }[]>`
+      select c.embedding_model, c.embedding, c.session_id from transcript_chunks c
+      join session_transcripts t on t.id = c.transcript_id and t.replaced_at is null
+      where c.event_id = ${gathering.id} order by c.session_id
+    `
+    expect(stored.length).toBe(2)
+    for (const row of stored) {
+      expect(row.embedding_model.startsWith('local:')).toBe(true)
+      expect(row.embedding.length).toBe(384)
+      expect(Math.sqrt(row.embedding.reduce((n, v) => n + v * v, 0))).toBeCloseTo(1, 2)
+    }
+
+    // Query embeddings go through the same adapter, and the matching chunk ranks first.
+    const ranked = await withServerOnlyShim(async () => {
+      /* eslint-disable @typescript-eslint/no-require-imports */
+      const embeddings = require('../src/lib/knowledge/embeddings') as typeof import('../src/lib/knowledge/embeddings')
+      const rank = require('../src/lib/knowledge/rank') as typeof import('../src/lib/knowledge/rank')
+      /* eslint-enable @typescript-eslint/no-require-imports */
+      const cfg = embeddings.embeddingsConfig()
+      expect(cfg).not.toBeNull()
+      const [vector] = await embeddings.embedTexts(['How do we compost kitchen scraps?'], 'query', cfg)
+      expect(vector.length).toBe(384)
+      return rank.rankEventChunks(gathering.id, vector, { model: cfg!.storedModel, tier: 'organizers' })
+    })
+    expect(ranked.length).toBeGreaterThan(0)
+    expect(ranked[0].text).toContain('worm bins')
+    expect(ranked[0].session_id).toBe(sessionId)
+    expect(ranked[0].score).toBeGreaterThan(DEFAULT_MIN_SCORE_FLOOR)
+
+    // Availability sees the embeddings side as ready; only the answer model may be missing.
+    const availability = await jsonOf(await api(`/api/v1/events/${gathering.slug}/knowledge/ask`, { cookie: owner.cookie }))
+    expect(availability.embedded_chunks).toBe(2)
+    expect(['embeddings', 'no-embeddings']).not.toContain(availability.reason)
+    expect(availability.available).toBe(!chatOff)
   })
 })

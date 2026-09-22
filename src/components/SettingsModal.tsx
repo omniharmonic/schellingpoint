@@ -18,6 +18,9 @@ import {
   RefreshCw,
   Compass,
   Bell,
+  Bot,
+  Copy,
+  Check,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -843,6 +846,8 @@ export function AccountPanel({ gathering, onDirtyChange, onCancel, active = true
 
         {/* ENS saves on its own; setProfile (not applyProfile) keeps unsaved edits to the profile tab. */}
         {profile && <EnsSection profile={profile} onProfile={setProfile} />}
+
+        <AssistantConnections active={active} />
       </div>
 
       {/* ── Notifications ── */}
@@ -867,6 +872,226 @@ export function AccountPanel({ gathering, onDirtyChange, onCancel, active = true
         )}
       </div>
     </div>
+  )
+}
+
+/** Shape of GET /api/me/assistant-tokens. */
+interface AssistantToken {
+  id: string
+  name: string
+  created_at: string
+  last_used_at: string | null
+}
+
+/**
+ * "Connect an AI assistant" (Account → Identity): mint, list and revoke the personal tokens that
+ * let a member's own assistant read their gatherings through the MCP server at `/api/mcp`.
+ *
+ * The secret is shown exactly once, right after minting: the server stores only its hash. Nothing
+ * here grants an assistant more than the member already has — the block says so in as many words,
+ * because that is the question a person actually has when they see this.
+ */
+function AssistantConnections({ active }: { active: boolean }) {
+  const id = React.useId()
+  const { toast } = useToast()
+  const [tokens, setTokens] = React.useState<AssistantToken[] | null>(null)
+  const [limit, setLimit] = React.useState(5)
+  const [mcpUrl, setMcpUrl] = React.useState('/api/mcp')
+  const [name, setName] = React.useState('')
+  const [busy, setBusy] = React.useState(false)
+  const [error, setError] = React.useState<string | null>(null)
+  const [secret, setSecret] = React.useState<string | null>(null)
+  const [copied, setCopied] = React.useState<string | null>(null)
+  const [confirming, setConfirming] = React.useState<string | null>(null)
+
+  const load = React.useCallback(async () => {
+    try {
+      const res = await apiFetch<{ tokens: AssistantToken[]; limit: number; mcp_url: string }>('/api/me/assistant-tokens', {
+        cache: 'no-store',
+      })
+      setTokens(res.tokens)
+      setLimit(res.limit)
+      setMcpUrl(res.mcp_url)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not load your connected assistants')
+      setTokens([])
+    }
+  }, [])
+
+  React.useEffect(() => {
+    if (!active) return
+    setSecret(null)
+    setError(null)
+    setConfirming(null)
+    load()
+  }, [active, load])
+
+  const copy = async (value: string, what: string) => {
+    try {
+      await navigator.clipboard.writeText(value)
+      setCopied(what)
+      window.setTimeout(() => setCopied((c) => (c === what ? null : c)), 2000)
+    } catch {
+      toast({ title: 'Could not copy', description: 'Select the text and copy it by hand.', variant: 'destructive' })
+    }
+  }
+
+  const create = async () => {
+    const trimmed = name.trim()
+    if (!trimmed) return
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await apiFetch<{ token: string; assistant_token: AssistantToken }>('/api/me/assistant-tokens', {
+        method: 'POST',
+        json: { name: trimmed },
+      })
+      setSecret(res.token)
+      setName('')
+      setTokens((list) => [res.assistant_token, ...(list ?? [])])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not create a token')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const revoke = async (tokenId: string) => {
+    setBusy(true)
+    setError(null)
+    try {
+      await apiFetch(`/api/me/assistant-tokens?id=${encodeURIComponent(tokenId)}`, { method: 'DELETE' })
+      setTokens((list) => (list ?? []).filter((t) => t.id !== tokenId))
+      setConfirming(null)
+      toast({ title: 'Token revoked', description: 'That assistant can no longer read anything.' })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not revoke that token')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const full = (tokens?.length ?? 0) >= limit
+
+  return (
+    <section className="space-y-4" data-testid="assistant-connections" aria-labelledby={`${id}-assistants-heading`}>
+      <h3 id={`${id}-assistants-heading`} className="text-sm font-medium flex items-center gap-2">
+        <Bot className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+        Connect an AI assistant
+      </h3>
+      <p className="text-xs text-muted-foreground leading-relaxed">
+        Point your own assistant — Claude, ChatGPT, Cursor — at your gatherings, so you can ask it about the schedule
+        or what was said in a session. It sees exactly what you see and nothing more: the sessions and schedules of
+        gatherings you belong to, and the transcripts you are allowed to read. It cannot change anything, cannot read
+        other people&apos;s messages or email addresses, and cannot see votes. Your questions and the excerpts it
+        reads go to whoever runs that assistant.{' '}
+        <Link href="/help/assistants" className="underline">
+          How to connect one
+        </Link>
+        .
+      </p>
+
+      <div className="rounded-lg border border-border bg-muted/30 px-3 py-2">
+        <p className="text-xs text-muted-foreground">Server URL</p>
+        <div className="flex items-center gap-2">
+          <code className="text-xs font-mono break-all flex-1" data-testid="mcp-url">
+            {mcpUrl}
+          </code>
+          <Button type="button" variant="ghost" size="sm" onClick={() => copy(mcpUrl, 'url')} aria-label="Copy the server URL">
+            {copied === 'url' ? <Check className="h-4 w-4" aria-hidden="true" /> : <Copy className="h-4 w-4" aria-hidden="true" />}
+          </Button>
+        </div>
+      </div>
+
+      {secret && (
+        <WarningBox title="Copy this token now — it is shown once" data-testid="assistant-token-secret">
+          <p className="text-xs text-muted-foreground">
+            We store only a fingerprint of it, so we cannot show it again. Paste it into your assistant as the bearer
+            token for the server URL above. If you lose it, revoke the token and make a new one.
+          </p>
+          <div className="mt-3 flex items-center gap-2">
+            <code className="text-xs font-mono break-all flex-1 rounded bg-background px-2 py-1">{secret}</code>
+            <Button type="button" variant="outline" size="sm" onClick={() => copy(secret, 'secret')}>
+              {copied === 'secret' ? <Check className="h-4 w-4 mr-1" aria-hidden="true" /> : <Copy className="h-4 w-4 mr-1" aria-hidden="true" />}
+              Copy
+            </Button>
+          </div>
+          <Button type="button" variant="ghost" size="sm" className="mt-2" onClick={() => setSecret(null)}>
+            I have saved it
+          </Button>
+        </WarningBox>
+      )}
+
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+        <div className="flex-1">
+          <label htmlFor={`${id}-assistant-name`} className="text-xs text-muted-foreground">
+            Name this assistant
+          </label>
+          <Input
+            id={`${id}-assistant-name`}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !busy && name.trim() && !full) {
+                e.preventDefault()
+                create()
+              }
+            }}
+            placeholder="Claude on my laptop"
+            maxLength={60}
+            disabled={busy || full}
+          />
+        </div>
+        <Button type="button" onClick={create} loading={busy} disabled={!name.trim() || full}>
+          Create token
+        </Button>
+      </div>
+      {full && (
+        <p className="text-xs text-muted-foreground">
+          You have {limit} connected assistants, the most we allow. Revoke one to add another.
+        </p>
+      )}
+      {error && <p className="text-xs text-destructive">{error}</p>}
+
+      {tokens === null ? (
+        <div className="flex justify-center py-4" role="status" aria-label="Loading your connected assistants">
+          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" aria-hidden="true" />
+        </div>
+      ) : tokens.length === 0 ? (
+        <p className="text-xs text-muted-foreground">No assistant is connected.</p>
+      ) : (
+        <ul className="space-y-2" data-testid="assistant-token-list">
+          {tokens.map((t) => (
+            <li key={t.id} className="rounded-lg border border-border px-3 py-2">
+              {confirming === t.id ? (
+                <ConfirmInline
+                  message={`Revoke “${t.name}”? That assistant stops being able to read anything, immediately.`}
+                  confirmLabel="Revoke"
+                  destructive
+                  loading={busy}
+                  onConfirm={() => revoke(t.id)}
+                  onCancel={() => setConfirming(null)}
+                />
+              ) : (
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium truncate">{t.name}</p>
+                    <p className="text-xs text-muted-foreground">
+                      Added {new Date(t.created_at).toLocaleDateString()}
+                      {' · '}
+                      {t.last_used_at ? `last used ${new Date(t.last_used_at).toLocaleString()}` : 'never used'}
+                    </p>
+                  </div>
+                  <Button type="button" variant="outline" size="sm" onClick={() => setConfirming(t.id)} disabled={busy}>
+                    Revoke
+                  </Button>
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   )
 }
 

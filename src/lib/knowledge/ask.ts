@@ -33,7 +33,7 @@ export async function askAvailability(eventId: string, tier: ReadTier): Promise<
            (select count(*) from transcript_chunks c
               join session_transcripts t on t.id = c.transcript_id and t.replaced_at is null
               join events e on e.id = c.event_id
-              where c.event_id = ${eventId} and c.embedding is not null and c.embedding_model = ${embeddings?.model ?? null} ${tierPredicate(tier)}) as embedded
+              where c.event_id = ${eventId} and c.embedding is not null and c.embedding_model = ${embeddings?.storedModel ?? null} ${tierPredicate(tier)}) as embedded
   `
   const base = { ready_transcripts: counts?.transcripts ?? 0, embedded_chunks: counts?.embedded ?? 0 }
   if (!chat) return { available: false, reason: 'chat', ...base }
@@ -104,7 +104,7 @@ export async function prepareAsk(event: { id: string; name: string; slug: string
   if (!embeddings) return { status: 'unavailable', reason: 'embeddings' }
   const [vector] = await embedTexts([question], 'query', embeddings)
   if (!vector) return { status: 'unavailable', reason: 'embeddings' }
-  const ranked = await rankEventChunks(event.id, vector, { model: embeddings.model, tier })
+  const ranked = await rankEventChunks(event.id, vector, { model: embeddings.storedModel, tier })
   if (!ranked.length) return { status: 'no-sources', sources: [] }
   const sources = ranked.map((chunk, i) => toSource(chunk, i + 1, event.slug))
   const user = [

@@ -11,7 +11,7 @@ import 'server-only'
  * to MAX_ATTEMPTS. Every run also purges transcripts replaced more than 30 days ago.
  */
 import { sql, type Sql } from '@/lib/db'
-import { embedTexts, embeddingsConfig, EMBED_BATCH } from './embeddings'
+import { embedTexts, embeddingsConfig, embedBatchSize } from './embeddings'
 import { runSummaries } from './summaries'
 
 export type KnowledgeJobKind = 'embed' | 'summaries'
@@ -74,15 +74,15 @@ async function runEmbed(job: KnowledgeJobRow, deadline: number): Promise<{ done:
     const rows = await sql<{ id: string; text: string }[]>`
       select c.id, c.text from transcript_chunks c
       join session_transcripts t on t.id = c.transcript_id and t.replaced_at is null and t.status = 'ready'
-      where c.event_id = ${job.event_id} and (c.embedding is null or c.embedding_model is distinct from ${cfg.model})
+      where c.event_id = ${job.event_id} and (c.embedding is null or c.embedding_model is distinct from ${cfg.storedModel})
       order by c.session_id, c.chunk_index
-      limit ${EMBED_BATCH}
+      limit ${embedBatchSize(cfg)}
     `
     if (!rows.length) return { done: true, processed }
     const vectors = await embedTexts(rows.map((r) => r.text), 'document', cfg)
     await sql.begin(async (t) => {
       for (let i = 0; i < rows.length; i++) {
-        await t`update transcript_chunks set embedding = ${vectors[i]}::real[], embedding_model = ${cfg.model} where id = ${rows[i].id}`
+        await t`update transcript_chunks set embedding = ${vectors[i]}::real[], embedding_model = ${cfg.storedModel} where id = ${rows[i].id}`
       }
     })
     processed += rows.length

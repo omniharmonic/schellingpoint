@@ -34,7 +34,7 @@ export interface CorpusExport {
   chunkCount: number
 }
 
-interface SessionRow {
+export interface SessionRow {
   id: string
   title: string
   description: string | null
@@ -134,8 +134,28 @@ function transcriptMarkdown(s: SessionRow): string {
   return meta.join('\n')
 }
 
-export async function buildCorpusExport(eventId: string): Promise<CorpusExport> {
-  const [gathering] = await sql<{ name: string; slug: string; timezone: string; start_date: string; end_date: string }[]>`
+interface GatheringRow {
+  name: string
+  slug: string
+  timezone: string
+  start_date: string
+  end_date: string
+}
+
+/** The corpus itself: the gathering, its transcribed sessions and one line per chunk. */
+export interface CorpusRows {
+  gathering: GatheringRow
+  sessions: SessionRow[]
+  lines: CorpusLine[]
+}
+
+/**
+ * Read the corpus. Shared by the zip export and the MCP `export_corpus` tool, so both serve
+ * exactly the same rows under exactly the same rules (hosts by display name only, ready and
+ * un-replaced transcripts only). Organizer-gated by every caller.
+ */
+export async function buildCorpusRows(eventId: string): Promise<CorpusRows> {
+  const [gathering] = await sql<GatheringRow[]>`
     select name, slug, timezone, start_date, end_date from events where id = ${eventId}
   `
   if (!gathering) throw new Error('gathering not found')
@@ -186,6 +206,11 @@ export async function buildCorpusExport(eventId: string): Promise<CorpusExport> 
       }
     })
     .filter((l): l is CorpusLine => l !== null)
+  return { gathering, sessions, lines }
+}
+
+export async function buildCorpusExport(eventId: string): Promise<CorpusExport> {
+  const { gathering, sessions, lines } = await buildCorpusRows(eventId)
 
   const sessionsJson = {
     schema_version: CORPUS_SCHEMA_VERSION,
@@ -226,11 +251,24 @@ export async function buildCorpusExport(eventId: string): Promise<CorpusExport> 
   return { zip, sessionCount: sessions.length, chunkCount: lines.length }
 }
 
-/** Log a download (a plain server log line plus a `knowledge_exports` row). */
-export async function logExport(eventId: string, accountId: string, result: CorpusExport): Promise<void> {
-  console.info(`[knowledge:export] gathering ${eventId} exported by ${accountId}: ${result.sessionCount} sessions, ${result.chunkCount} chunks, ${result.zip.byteLength} bytes`)
+/**
+ * Log that the corpus left the server (a plain server log line plus a `knowledge_exports` row).
+ * `via` distinguishes the zip download from a page handed to a member's own AI assistant over MCP.
+ */
+export async function logCorpusAccess(
+  eventId: string,
+  accountId: string,
+  stats: { sessionCount: number; chunkCount: number; bytes: number },
+  via: 'download' | 'mcp' = 'download',
+): Promise<void> {
+  console.info(`[knowledge:export] gathering ${eventId} exported by ${accountId} (${via}): ${stats.sessionCount} sessions, ${stats.chunkCount} chunks, ${stats.bytes} bytes`)
   await sql`
     insert into knowledge_exports (event_id, exported_by, session_count, chunk_count, bytes)
-    values (${eventId}, ${accountId}, ${result.sessionCount}, ${result.chunkCount}, ${result.zip.byteLength})
+    values (${eventId}, ${accountId}, ${stats.sessionCount}, ${stats.chunkCount}, ${stats.bytes})
   `
+}
+
+/** Log a zip download. */
+export async function logExport(eventId: string, accountId: string, result: CorpusExport): Promise<void> {
+  await logCorpusAccess(eventId, accountId, { sessionCount: result.sessionCount, chunkCount: result.chunkCount, bytes: result.zip.byteLength }, 'download')
 }

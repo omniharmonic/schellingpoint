@@ -10,6 +10,13 @@ COPY package.json package-lock.json ./
 # Dev dependencies stay: the indexer and audit scripts run through tsx/esbuild.
 RUN npm ci --no-audit --no-fund
 
+# The local embeddings model, baked in so the running server never reaches the Hugging Face hub
+# (EMBEDDINGS_PROVIDER=local is the default; EMBEDDINGS_OFFLINE=1 below enforces it). ~35 MB.
+FROM deps AS models
+ENV EMBEDDINGS_CACHE_DIR=/models
+COPY scripts/fetch-embedding-model.mjs ./scripts/fetch-embedding-model.mjs
+RUN node scripts/fetch-embedding-model.mjs
+
 FROM deps AS build
 ARG NEXT_PUBLIC_APP_URL
 ARG NEXT_PUBLIC_CONTACT_EMAIL=
@@ -26,8 +33,11 @@ WORKDIR /app
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
     PORT=3000 \
-    HOSTNAME=0.0.0.0
+    HOSTNAME=0.0.0.0 \
+    EMBEDDINGS_CACHE_DIR=/models \
+    EMBEDDINGS_OFFLINE=1
 RUN mkdir -p /data/uploads && chown -R node:node /data
+COPY --from=models --chown=node:node /models /models
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/.next ./.next
 COPY --from=build --chown=node:node /app/public ./public

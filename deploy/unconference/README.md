@@ -127,11 +127,45 @@ onboarding must never be presented as a successful live payment verification.
   (default Nominatim; the app sends `User-Agent: unconference.events (hello@unconference.events)`,
   paces to 1 request/s and caches 30 days). The map style is compiled in at build time, so changing
   it needs a release.
-- **Knowledge**: the corpus export works with nothing configured. Set `EMBEDDINGS_PROVIDER`
-  (`voyage`|`openai`), `EMBEDDINGS_MODEL`, `EMBEDDINGS_API_KEY` for embeddings and
-  `ANTHROPIC_API_KEY` (+ `AI_CHAT_MODEL`, default `claude-sonnet-5`) for "Ask the gathering",
-  summaries and themes; the Knowledge page shows which parts are active. Transcript text reaches
-  those providers only when they are configured; the Participation settings disclose this.
+- **Knowledge — embeddings**: on by default and free. With `EMBEDDINGS_PROVIDER` unset the server
+  embeds on its own CPU with Transformers.js (`Xenova/bge-small-en-v1.5`, 384 dims, q8 ONNX,
+  ~33 MB), so the corpus is searchable with no API key and no transcript text leaving the box. The
+  weights are baked into the image at `/models` by a build stage (`scripts/fetch-embedding-model.mjs`)
+  and the runtime image sets `EMBEDDINGS_CACHE_DIR=/models` and `EMBEDDINGS_OFFLINE=1`, so the
+  running server never reaches the Hugging Face hub — a release carries its own weights and a
+  rollback keeps working. The Knowledge page reads `Embeddings: local (bge-small-en-v1.5)`; a model
+  that fails to load shows there as an error instead of breaking the page.
+  - `EMBEDDINGS_MODEL` picks a different Transformers.js model (rebuild so the image prefetches it).
+    Chunks record their model as `local:<model>`, so changing it retires the old vectors and the
+    embed job re-embeds; press **Embed now** on the Knowledge page or wait for the five-minute
+    scheduler tick.
+  - `EMBEDDINGS_PROVIDER=none` switches embeddings off entirely (export still works).
+    `voyage`/`openai` stay opt-in and need `EMBEDDINGS_MODEL` + `EMBEDDINGS_API_KEY`; those do send
+    transcript text off the box, which the Participation settings disclose.
+- **Knowledge — answers**: `ANTHROPIC_API_KEY` (+ `AI_CHAT_MODEL`, default `claude-sonnet-5`) for
+  "Ask the gathering", summaries and themes. Without it the Knowledge page reads
+  `Answers: not configured` and those buttons stay disabled; search and the export are unaffected.
+
+## Remote MCP server (members' own AI assistants)
+
+`https://unconference.events/api/mcp` is a read-only MCP server (Streamable HTTP, stateless) that a
+member connects their own assistant to — Claude, ChatGPT, Cursor. No configuration and no key: it
+is on wherever the app is. A member mints a personal token in Account → Identity ("Connect an AI
+assistant"); the token is `unc_<32 bytes base64url>`, shown once, stored only as its sha256
+(`assistant_tokens`, migration 0028, server-only), at most five live per person, revoked
+immediately from the same place. Requests authenticate with `Authorization: Bearer unc_…`; anything
+else gets a 401 with `WWW-Authenticate: Bearer`. The route answers
+`Access-Control-Allow-Origin: *` so browser-based clients (claude.ai custom connectors) can reach
+it — safe because the credential is a header token and never an ambient cookie, and because every
+tool is read-only. `/.well-known/oauth-protected-resource` serves RFC 9728 metadata with an empty
+`authorization_servers` list, so a client that probes for an OAuth dance gets clean JSON pointing at
+`/help/assistants` instead of the app's HTML 404. Budget: 120 requests a minute per token, counted
+in the app process (one container, so that is the whole limit; more than one replica would multiply
+it). Tools resolve the token to an account and then go through the same membership, session
+visibility and transcript-tier checks the browser does — `search_knowledge` uses whatever embeddings
+adapter is configured above and says so plainly when there is none, `export_corpus` is organizers
+only and each page is logged to `knowledge_exports` like a zip download. Members-facing
+instructions live at `/help/assistants`.
 
 ## Health and verification
 

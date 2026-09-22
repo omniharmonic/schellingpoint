@@ -9,7 +9,7 @@ import { sql, tx, type Sql } from '@/lib/db'
 import type { EventRoleName } from '@/types/event'
 import { chunkParagraphs } from './chunk'
 import type { NormalizedTranscript, TranscriptFormat } from './normalize'
-import { embeddingsConfig } from './embeddings'
+import { embeddingsConfig, localModelState, type EmbeddingsConfig } from './embeddings'
 import { chatConfig } from './anthropic'
 import { enqueueKnowledgeJob } from './jobs'
 
@@ -127,15 +127,32 @@ export async function readyTranscriptCount(eventId: string): Promise<number> {
 
 /** Which parts of the pipeline are configured. Never the keys. */
 export interface ProviderStatus {
-  embeddings: { configured: true; provider: string; model: string } | { configured: false }
+  embeddings:
+    | { configured: true; provider: string; model: string; label: string; local: boolean; error: string | null }
+    | { configured: false }
   chat: { configured: true; model: string } | { configured: false }
+}
+
+/** What the operator reads on the Knowledge page: `local (bge-small-en-v1.5)`, `voyage · voyage-3`. */
+export function embeddingsLabel(cfg: EmbeddingsConfig): string {
+  return cfg.provider === 'local' ? `local (${cfg.model.split('/').pop()})` : `${cfg.provider} · ${cfg.model}`
 }
 
 export function providerStatus(): ProviderStatus {
   const e = embeddingsConfig()
   const c = chatConfig()
   return {
-    embeddings: e ? { configured: true, provider: e.provider, model: e.model } : { configured: false },
+    embeddings: e
+      ? {
+          configured: true,
+          provider: e.provider,
+          model: e.model,
+          label: embeddingsLabel(e),
+          local: e.provider === 'local',
+          // A model that failed to load shows up here rather than taking the page down.
+          error: e.provider === 'local' ? localModelState().error : null,
+        }
+      : { configured: false },
     chat: c ? { configured: true, model: c.model } : { configured: false },
   }
 }
@@ -172,7 +189,7 @@ export interface Coverage {
 
 /** Organizer view: every approved / scheduled session, with or without a transcript. */
 export async function coverage(eventId: string): Promise<Coverage> {
-  const embeddingModel = embeddingsConfig()?.model ?? null
+  const embeddingModel = embeddingsConfig()?.storedModel ?? null
   const [event] = await sql<{ transcripts_enabled: boolean; transcripts_visibility: TranscriptVisibility; themes: unknown }[]>`
     select transcripts_enabled, transcripts_visibility, themes from events where id = ${eventId}
   `

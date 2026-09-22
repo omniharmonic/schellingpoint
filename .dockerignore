@@ -14,3 +14,4 @@ deploy/unconference/.env
 deploy/unconference/backups
 .playwright-mcp
 *.log
+.models

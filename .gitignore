@@ -53,3 +53,6 @@ screenshots/
 # Local AppView uploads (production uses the uploads volume)
 .uploads/
 deploy/local/pds.env
+
+# Local embeddings model cache (production bakes it into the image at /models)
+.models/

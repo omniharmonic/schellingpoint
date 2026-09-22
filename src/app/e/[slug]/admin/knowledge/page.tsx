@@ -39,7 +39,9 @@ interface Coverage {
   jobs: Array<{ id: string; kind: 'embed' | 'summaries'; status: string; processed: number; last_error: string | null; updated_at: string }>
   themes: { generated_at: string; model: string; themes: Array<{ title: string; summary: string; sessions: string[] }> } | null
   providers: {
-    embeddings: { configured: true; provider: string; model: string } | { configured: false }
+    embeddings:
+      | { configured: true; provider: string; model: string; label: string; local: boolean; error: string | null }
+      | { configured: false }
     chat: { configured: true; model: string } | { configured: false }
   }
 }
@@ -191,16 +193,19 @@ export default function AdminKnowledgePage() {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-lg"><Cpu className="h-5 w-5 text-muted-foreground" aria-hidden />Search and answers</CardTitle>
-            <CardDescription>Configured by the server operator through environment variables; keys are never shown here. When on, transcript text is sent to these providers — the consent checkbox and Participation settings say so.</CardDescription>
+            <CardDescription>Configured by the server operator through environment variables; keys are never shown here. Embeddings run on this server by default, so nothing leaves it; if the operator switches to a hosted provider, transcript text is sent there — the consent checkbox and Participation settings say so. Answers need an Anthropic key.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <dl className="space-y-2 text-sm">
               <div className="flex items-start justify-between gap-3">
                 <dt className="text-muted-foreground">Embeddings</dt>
                 <dd className="flex items-center gap-1.5 text-right">
-                  {data.providers.embeddings.configured ? <><CheckCircle2 className="h-4 w-4 text-success" aria-hidden />{data.providers.embeddings.provider} · {data.providers.embeddings.model}</> : <><XCircle className="h-4 w-4 text-muted-foreground" aria-hidden />Not configured</>}
+                  {data.providers.embeddings.configured ? <><CheckCircle2 className="h-4 w-4 text-success" aria-hidden />{data.providers.embeddings.label}</> : <><XCircle className="h-4 w-4 text-muted-foreground" aria-hidden />Not configured</>}
                 </dd>
               </div>
+              {data.providers.embeddings.configured && data.providers.embeddings.error ? (
+                <p className="text-right text-xs text-destructive">The on-box model did not load: {data.providers.embeddings.error}</p>
+              ) : null}
               <div className="flex items-start justify-between gap-3">
                 <dt className="text-muted-foreground">Answers</dt>
                 <dd className="flex items-center gap-1.5 text-right">
