@@ -8,8 +8,8 @@ node_modules/
 out/
 build/
 
-# Testing
-coverage/
+# Testing (root only: `src/app/api/.../knowledge/coverage` is a route, not a report)
+/coverage/
 
 # Production
 dist/

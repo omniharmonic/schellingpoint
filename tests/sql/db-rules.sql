@@ -7,7 +7,8 @@
 --   session guard (hosts edit content; organizers own status, scheduling, counters; event pinned)
 --   proposal rules (approval requirement, per-person cap)
 --   ticket insert lockout, roster administration, co-host event backfill
---   server-only secrets and ballots are unreadable to signed-in accounts
+--   server-only secrets, ballots and payment references are unreadable to signed-in accounts
+--   checkout references are immutable money facts (0029)
 BEGIN;
 
 DO $$
@@ -106,6 +107,14 @@ BEGIN
     RAISE EXCEPTION 'Host inflated a counter';
   EXCEPTION WHEN insufficient_privilege THEN NULL;
   END;
+  -- Migration 0031: a merger is a double opt-in through the merge route, never a direct write.
+  BEGIN
+    UPDATE public.sessions SET merged_into = sid WHERE id = sid;
+    RAISE EXCEPTION 'Host merged a session by a direct update';
+  EXCEPTION WHEN insufficient_privilege THEN
+    IF SQLERRM <> 'Only organizers can change scheduling or status fields' THEN RAISE; END IF;
+  WHEN check_violation THEN NULL;  -- the self-merge CHECK may fire first
+  END;
 
   -- Tickets are server-written only.
   BEGIN
@@ -141,6 +150,37 @@ BEGIN
   BEGIN
     PERFORM 1 FROM public.at_credentials LIMIT 1;
     RAISE EXCEPTION 'A signed-in account could read gathering credentials';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  -- Migration 0031: merge offers and round controls are server-only.
+  BEGIN
+    PERFORM 1 FROM public.session_merge_requests LIMIT 1;
+    RAISE EXCEPTION 'A signed-in account could read merge requests';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    PERFORM 1 FROM public.round_actions LIMIT 1;
+    RAISE EXCEPTION 'A signed-in account could read round actions';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  -- Payment references and the webhook ledger are the AppView's alone: a signed-in account
+  -- must not be able to read what anyone paid, or to forge a settlement by writing one.
+  BEGIN
+    PERFORM 1 FROM public.checkout_references LIMIT 1;
+    RAISE EXCEPTION 'A signed-in account could read checkout references';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    INSERT INTO public.checkout_references
+      (session_id, connected_account_id, event_id, tier_id, holder_account_id,
+       unit_amount, currency, contribution_percent, application_fee_amount, model)
+    VALUES ('cs_forged', 'acct_forged', eid, current_setting('test.tier')::uuid, me, 2500, 'usd', 1, 25, 'direct');
+    RAISE EXCEPTION 'A signed-in account inserted a checkout reference';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    PERFORM 1 FROM public.stripe_events LIMIT 1;
+    RAISE EXCEPTION 'A signed-in account could read the Stripe delivery ledger';
   EXCEPTION WHEN insufficient_privilege THEN NULL;
   END;
 END $$;
@@ -247,7 +287,268 @@ BEGIN
              AND column_name IN ('account_id', 'user_id', 'did', 'voter_id')) THEN
     RAISE EXCEPTION 'ballot tables grew an identifying column';
   END IF;
-  RAISE NOTICE 'PASS: proposal approval/cap/format/self-authorship, session guard, event pinning, ticket lockout, roster administration, server-only secrets and ballots, co-host backfill, attendance voting defaults';
+
+  -- Mergers (0031): a session is never merged into itself, only one live offer per source,
+  -- only the four known statuses, and round_actions never grows a column carrying a count.
+  BEGIN
+    UPDATE public.sessions SET merged_into = sid WHERE id = sid;
+    RAISE EXCEPTION 'A session was merged into itself';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+  DECLARE
+    target_sid uuid;
+  BEGIN
+    INSERT INTO public.sessions(event_id, host_id, title, format, duration, status)
+      VALUES (eid, current_setting('test.owner')::uuid, 'Merge target', 'discussion', 30, 'approved')
+      RETURNING id INTO target_sid;
+    INSERT INTO public.session_merge_requests(event_id, source_session_id, target_session_id, requested_by)
+      VALUES (eid, sid, target_sid, current_setting('test.host')::uuid);
+    BEGIN
+      INSERT INTO public.session_merge_requests(event_id, source_session_id, target_session_id, requested_by)
+        VALUES (eid, sid, target_sid, current_setting('test.host')::uuid);
+      RAISE EXCEPTION 'A second pending merge offer was accepted for one source';
+    EXCEPTION WHEN unique_violation THEN NULL;
+    END;
+    BEGIN
+      INSERT INTO public.session_merge_requests(event_id, source_session_id, target_session_id, status)
+        VALUES (eid, target_sid, sid, 'maybe');
+      RAISE EXCEPTION 'An unknown merge status was accepted';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+    BEGIN
+      INSERT INTO public.session_merge_requests(event_id, source_session_id, target_session_id)
+        VALUES (eid, target_sid, target_sid);
+      RAISE EXCEPTION 'A session was offered a merge into itself';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+  END;
+  -- `merged_into` is ON DELETE RESTRICT, not SET NULL: a target cannot vanish and silently
+  -- un-merge its sources. The gathering's own cascade still removes both rows together.
+  IF (SELECT confdeltype FROM pg_constraint WHERE conname = 'sessions_merged_into_fkey') <> 'r' THEN
+    RAISE EXCEPTION 'sessions.merged_into must be ON DELETE RESTRICT';
+  END IF;
+  DECLARE
+    probe_event uuid; probe_target uuid; probe_source uuid;
+  BEGIN
+    INSERT INTO public.events(slug, name, start_date, end_date, status, visibility)
+      VALUES ('db-rules-merge-' || left(replace(gen_random_uuid()::text, '-', ''), 8), 'Rollback only (merge)',
+              '2026-10-16', '2026-10-17', 'proposals_open', 'public')
+      RETURNING id INTO probe_event;
+    INSERT INTO public.event_members(event_id, user_id, role)
+      VALUES (probe_event, current_setting('test.owner')::uuid, 'owner');
+    INSERT INTO public.sessions(event_id, host_id, title, format, duration, status)
+      VALUES (probe_event, current_setting('test.owner')::uuid, 'Merge probe target', 'discussion', 30, 'approved')
+      RETURNING id INTO probe_target;
+    INSERT INTO public.sessions(event_id, host_id, title, format, duration, status)
+      VALUES (probe_event, current_setting('test.owner')::uuid, 'Merge probe source', 'discussion', 30, 'approved')
+      RETURNING id INTO probe_source;
+    UPDATE public.sessions SET merged_into = probe_target, is_votable = false WHERE id = probe_source;
+    BEGIN
+      DELETE FROM public.sessions WHERE id = probe_target;
+      RAISE EXCEPTION 'A merge target was deleted out from under its source';
+    EXCEPTION WHEN foreign_key_violation THEN NULL;
+    END;
+    -- Deleting the gathering removes both in one statement, which RESTRICT permits.
+    DELETE FROM public.events WHERE id = probe_event;
+    IF EXISTS (SELECT 1 FROM public.sessions WHERE id IN (probe_source, probe_target)) THEN
+      RAISE EXCEPTION 'The gathering cascade left merged sessions behind';
+    END IF;
+  END;
+
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'round_actions'
+             AND column_name IN ('votes', 'voters', 'credits', 'tally', 'ballot_token', 'ballot_key')) THEN
+    RAISE EXCEPTION 'round_actions grew a column that could carry a count';
+  END IF;
+  BEGIN
+    INSERT INTO public.round_actions(event_id, phase, action) VALUES (eid, 'pre-event', 'peek');
+    RAISE EXCEPTION 'An unknown round action was accepted';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+  INSERT INTO public.round_actions(event_id, phase, action, actor_id)
+    VALUES (eid, 'pre-event', 'close', current_setting('test.owner')::uuid);
+  -- Checkout references (0029): the quote a settlement verifies against is write-once, and
+  -- refunded totals only ever grow. Even the service connection cannot rewrite them.
+  DECLARE
+    tid uuid := current_setting('test.tier')::uuid;
+  BEGIN
+    INSERT INTO public.checkout_references
+      (session_id, connected_account_id, event_id, tier_id, holder_account_id,
+       unit_amount, currency, contribution_percent, application_fee_amount, model)
+    VALUES ('cs_rules_' || eid::text, 'acct_rules', eid, tid, current_setting('test.host')::uuid,
+            2500, 'usd', 1, 25, 'direct');
+    BEGIN
+      UPDATE public.checkout_references SET unit_amount = 1 WHERE session_id = 'cs_rules_' || eid::text;
+      RAISE EXCEPTION 'A checkout reference price was rewritten';
+    EXCEPTION WHEN insufficient_privilege THEN NULL;
+    END;
+    BEGIN
+      UPDATE public.checkout_references SET connected_account_id = 'acct_other' WHERE session_id = 'cs_rules_' || eid::text;
+      RAISE EXCEPTION 'A checkout reference was moved to another merchant account';
+    EXCEPTION WHEN insufficient_privilege THEN NULL;
+    END;
+    UPDATE public.checkout_references SET refunded_amount = 500 WHERE session_id = 'cs_rules_' || eid::text;
+    BEGIN
+      UPDATE public.checkout_references SET refunded_amount = 0 WHERE session_id = 'cs_rules_' || eid::text;
+      RAISE EXCEPTION 'A refunded amount was reduced';
+    EXCEPTION WHEN insufficient_privilege THEN NULL;
+    END;
+    BEGIN
+      UPDATE public.checkout_references SET refunded_amount = 9999 WHERE session_id = 'cs_rules_' || eid::text;
+      RAISE EXCEPTION 'More was refunded than was ever charged';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+    -- The hold may be forgotten by the sweep and filled in once by a delayed settlement, but
+    -- a recorded sale must never be pointed at a different, live ticket.
+    UPDATE public.checkout_references SET ticket_id = NULL WHERE session_id = 'cs_rules_' || eid::text;
+    UPDATE public.checkout_references SET ticket_id = (
+      SELECT id FROM public.tickets WHERE event_id = eid LIMIT 1
+    ) WHERE session_id = 'cs_rules_' || eid::text AND EXISTS (SELECT 1 FROM public.tickets WHERE event_id = eid);
+    IF EXISTS (SELECT 1 FROM public.checkout_references
+               WHERE session_id = 'cs_rules_' || eid::text AND ticket_id IS NOT NULL) THEN
+      BEGIN
+        UPDATE public.checkout_references SET ticket_id = gen_random_uuid()
+          WHERE session_id = 'cs_rules_' || eid::text;
+        RAISE EXCEPTION 'A recorded sale was pointed at a different ticket';
+      EXCEPTION WHEN insufficient_privilege THEN NULL;
+        WHEN foreign_key_violation THEN NULL;
+      END;
+    END IF;
+
+    -- The holder may only be forgotten, never reassigned (the 90-day retention rule).
+    UPDATE public.checkout_references SET holder_account_id = NULL WHERE session_id = 'cs_rules_' || eid::text;
+    BEGIN
+      UPDATE public.checkout_references SET holder_account_id = current_setting('test.owner')::uuid
+        WHERE session_id = 'cs_rules_' || eid::text;
+      RAISE EXCEPTION 'A checkout reference was reassigned to another holder';
+    EXCEPTION WHEN insufficient_privilege THEN NULL;
+    END;
+    -- A platform-fallback row has no merchant account, and a Connect row must have one.
+    BEGIN
+      INSERT INTO public.checkout_references
+        (session_id, connected_account_id, event_id, tier_id, unit_amount, currency,
+         contribution_percent, application_fee_amount, model)
+      VALUES ('cs_rules_bad_' || eid::text, NULL, eid, tid, 2500, 'usd', 1, 0, 'direct');
+      RAISE EXCEPTION 'A direct-charge reference was accepted with no merchant account';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+  END;
+
+  RAISE NOTICE 'PASS: proposal approval/cap/format/self-authorship, session guard, event pinning, ticket lockout, roster administration, server-only secrets and ballots, co-host backfill, attendance voting defaults, checkout reference immutability, merge offers, merge-target deletion, and round actions';
 END $$;
+
+-- ---------------------------------------------------------------------------
+-- Community, moderation and subject rights (migrations 0033, 0034)
+-- ---------------------------------------------------------------------------
+--
+-- The moderation queue is a case file: reasons, free text and the reporter's identity. Spec §9
+-- puts it out of reach of every signed-in role, not merely behind a policy. Calendar feed
+-- tokens are credentials. And a paid ticket must survive its holder's deletion with its amount
+-- intact, which is a foreign-key rule, not a route's good intentions.
+RESET ROLE;
+SELECT set_config('request.jwt.claims', NULL, true);
+
+DO $$
+DECLARE
+  eid uuid := current_setting('test.event')::uuid;
+  n integer;
+BEGIN
+  -- Defaults a new row must have: nothing is hidden, and nobody has accepted anything, until
+  -- somebody decides so explicitly.
+  IF (SELECT bool_or(hidden_by_moderation) FROM public.sessions WHERE event_id = eid) THEN
+    RAISE EXCEPTION 'A session was hidden by moderation without anyone hiding it';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.event_members WHERE event_id = eid AND conduct_accepted_at IS NOT NULL) THEN
+    RAISE EXCEPTION 'A membership recorded a code-of-conduct acceptance nobody gave';
+  END IF;
+
+  -- A report must name the subject its kind promises.
+  BEGIN
+    INSERT INTO public.moderation_reports (event_id, subject_kind, reason) VALUES (eid, 'session', 'spam');
+    RAISE EXCEPTION 'A session report was accepted with no session';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+  BEGIN
+    INSERT INTO public.moderation_reports (event_id, subject_kind, subject_ref, reason) VALUES (eid, 'comment', 'x', 'nonsense');
+    RAISE EXCEPTION 'A report was accepted with a reason outside the enum';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+
+  -- One open case per person per subject: a second click is the same report.
+  INSERT INTO public.moderation_reports (event_id, reporter_account_id, subject_kind, subject_ref, reason)
+    VALUES (eid, current_setting('test.host')::uuid, 'comment', 'c-1', 'spam');
+  BEGIN
+    INSERT INTO public.moderation_reports (event_id, reporter_account_id, subject_kind, subject_ref, reason)
+      VALUES (eid, current_setting('test.host')::uuid, 'comment', 'c-1', 'harassment');
+    RAISE EXCEPTION 'The same person filed two open reports about the same thing';
+  EXCEPTION WHEN unique_violation THEN NULL;
+  END;
+
+  -- A code of conduct is a link, and only ever an http(s) one.
+  BEGIN
+    UPDATE public.events SET code_of_conduct_url = 'javascript:alert(1)' WHERE id = eid;
+    RAISE EXCEPTION 'A non-http code-of-conduct link was accepted';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+
+  -- Money facts keep no holder: deleting the person detaches the ticket, it does not delete it.
+  SELECT count(*) INTO n FROM information_schema.columns
+   WHERE table_schema = 'public' AND table_name = 'tickets' AND column_name = 'user_id' AND is_nullable = 'YES';
+  IF n <> 1 THEN RAISE EXCEPTION 'tickets.user_id must be nullable so a paid ticket can outlive its holder'; END IF;
+  SELECT count(*) INTO n FROM pg_constraint
+   WHERE contype = 'f' AND conrelid = 'public.tickets'::regclass AND conname = 'tickets_user_id_fkey' AND confdeltype = 'n';
+  IF n <> 1 THEN RAISE EXCEPTION 'tickets.user_id must be ON DELETE SET NULL, not CASCADE'; END IF;
+
+  -- Migration 0035. Nothing that names a person may BLOCK their deletion, and nothing that
+  -- belongs to a gathering may be taken away WITH them. NO ACTION does the first; CASCADE on
+  -- `at_credentials.created_by` would do the second.
+  SELECT count(*) INTO n FROM pg_constraint
+   WHERE contype = 'f' AND conrelid = 'public.events'::regclass AND conname = 'events_created_by_fkey' AND confdeltype = 'n';
+  IF n <> 1 THEN RAISE EXCEPTION 'events.created_by must be ON DELETE SET NULL: a gathering outlives its founder'; END IF;
+  SELECT count(*) INTO n FROM pg_constraint
+   WHERE contype = 'f' AND conrelid = 'public.tracks'::regclass AND conname = 'tracks_lead_user_id_fkey' AND confdeltype = 'n';
+  IF n <> 1 THEN RAISE EXCEPTION 'tracks.lead_user_id must be ON DELETE SET NULL: a track outlives its lead'; END IF;
+  SELECT count(*) INTO n FROM pg_constraint
+   WHERE contype = 'f' AND conrelid = 'public.at_credentials'::regclass AND conname = 'at_credentials_created_by_fkey' AND confdeltype = 'n';
+  IF n <> 1 THEN RAISE EXCEPTION 'at_credentials.created_by must be ON DELETE SET NULL: forgetting the organizer must not delete the gathering credential'; END IF;
+
+  -- Nothing else may still BLOCK a deletion: no foreign key into accounts or profiles may be
+  -- NO ACTION or RESTRICT, or "delete my account" fails for whoever happens to own such a row.
+  SELECT count(*) INTO n FROM pg_constraint
+   WHERE contype = 'f'
+     AND confrelid IN ('public.accounts'::regclass, 'public.profiles'::regclass)
+     AND confdeltype IN ('a', 'r');
+  IF n <> 0 THEN
+    RAISE EXCEPTION 'a foreign key into accounts/profiles still blocks account deletion (%)',
+      (SELECT string_agg(conrelid::regclass::text || '.' || conname, ', ') FROM pg_constraint
+        WHERE contype = 'f' AND confrelid IN ('public.accounts'::regclass, 'public.profiles'::regclass)
+          AND confdeltype IN ('a', 'r'));
+  END IF;
+END $$;
+
+-- Server-only, by privilege and not merely by the absence of a policy (migration 0009's rule).
+SELECT set_config('request.jwt.claims', json_build_object('sub', current_setting('test.owner'), 'role', 'authenticated')::text, true);
+SET LOCAL ROLE authenticated;
+DO $$
+DECLARE n integer;
+BEGIN
+  BEGIN
+    SELECT count(*) INTO n FROM public.moderation_reports;
+    RAISE EXCEPTION 'A signed-in account could read the moderation queue';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    INSERT INTO public.moderation_reports (event_id, subject_kind, subject_ref, reason)
+      VALUES (current_setting('test.event')::uuid, 'comment', 'forged', 'spam');
+    RAISE EXCEPTION 'A signed-in account could write into the moderation queue';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    SELECT count(*) INTO n FROM public.calendar_feed_tokens;
+    RAISE EXCEPTION 'A signed-in account could read calendar feed credentials';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'PASS: moderation reports and calendar feed tokens are server-only; conduct acceptance, hiding and money-keeps-no-holder hold at the database boundary';
+END $$;
+RESET ROLE;
 
 ROLLBACK;

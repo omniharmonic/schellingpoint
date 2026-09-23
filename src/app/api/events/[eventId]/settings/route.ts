@@ -4,16 +4,14 @@ import { sql, dbErrorResponse } from '@/lib/db'
 import { assertSameOrigin, requireViewer } from '@/lib/auth/viewer'
 import { canRolePerform } from '@/lib/permissions'
 import { canDelete, isValidTransition } from '@/lib/events/lifecycle'
-import { formatInEventTimezone, parseTimeInTimezone } from '@/lib/events/timezone'
+import { parseTimeInTimezone } from '@/lib/events/timezone'
 import { readPolicyThresholds, validatePolicyThresholds } from '@/lib/events/policy'
 import { deleteGatheringIdentity, GatheringIdentityError } from '@/lib/events/identity'
 import { evictGatheringActor, mintGatheringActor } from '@/lib/atproto/actors'
 import { forgetGatheringHost } from '@/lib/events/hosts'
 import { publishGatheringRecords, publishPolicyRecord, type NetworkWrite } from '@/lib/events/network'
 import { isHiddenEvent, type EventRecord } from '@/lib/events'
-import { notify } from '@/lib/notifications'
-import { openRound } from '@/lib/voting/rounds'
-import { openAttendanceRound } from '@/lib/voting/attendance'
+import { queueTransitionFeedPost, transitionSideEffects } from '@/lib/events/transition'
 import { isVotingError } from '@/lib/voting/errors'
 import type { EventRoleName, EventStatus, EventTheme } from '@/types/event'
 
@@ -171,6 +169,11 @@ const ALLOWED_KEYS = new Set([
   'feed_posts', 'feed_digest_threshold',
   // Attendance voting (design §11): opt-in, with its own fresh credit budget. Off by default.
   'attendance_voting_enabled', 'attendance_credits',
+  // Automatic phase transitions on the configured dates (MT §12.1), driven by /api/jobs/lifecycle.
+  'auto_lifecycle',
+  // Community (MT §12.19, §12.14): the gathering's own code of conduct and whether joining
+  // requires accepting it; whether check-in gates attendance voting.
+  'code_of_conduct_url', 'require_conduct_acceptance', 'checkin_gates_voting',
 ])
 
 /**
@@ -289,6 +292,24 @@ function buildUpdate(body: Body, current: EventRecord): EventUpdate {
     else update.policy_thresholds = result.value
   }
 
+  if ('code_of_conduct_url' in body) {
+    const raw = body.code_of_conduct_url
+    if (raw === null || raw === '') update.code_of_conduct_url = null
+    else if (typeof raw !== 'string' || raw.length > 500 || !/^https?:\/\//i.test(raw.trim())) {
+      fail('The code of conduct must be a link starting with http:// or https://.', 'code_of_conduct_url')
+    } else update.code_of_conduct_url = raw.trim()
+  }
+  if ('require_conduct_acceptance' in body) {
+    if (typeof body.require_conduct_acceptance !== 'boolean') fail('Code-of-conduct acceptance must be on or off.', 'require_conduct_acceptance')
+    const url = 'code_of_conduct_url' in update ? update.code_of_conduct_url : current.code_of_conduct_url
+    if (body.require_conduct_acceptance && !url) fail('Add the link to your code of conduct before you require people to accept it.', 'code_of_conduct_url')
+    update.require_conduct_acceptance = body.require_conduct_acceptance
+  }
+  if ('checkin_gates_voting' in body) {
+    if (typeof body.checkin_gates_voting !== 'boolean') fail('The check-in rule must be on or off.', 'checkin_gates_voting')
+    update.checkin_gates_voting = body.checkin_gates_voting
+  }
+
   if ('feed_posts' in body) {
     if (typeof body.feed_posts !== 'boolean') fail('Feed posting must be on or off.', 'feed_posts')
     update.feed_posts = body.feed_posts
@@ -301,6 +322,10 @@ function buildUpdate(body: Body, current: EventRecord): EventUpdate {
   if ('attendance_voting_enabled' in body) {
     if (typeof body.attendance_voting_enabled !== 'boolean') fail('Attendance voting must be on or off.', 'attendance_voting_enabled')
     update.attendance_voting_enabled = body.attendance_voting_enabled
+  }
+  if ('auto_lifecycle' in body) {
+    if (typeof body.auto_lifecycle !== 'boolean') fail('Automatic phase changes must be on or off.', 'auto_lifecycle')
+    update.auto_lifecycle = body.auto_lifecycle
   }
   if ('attendance_credits' in body) {
     const credits = body.attendance_credits
@@ -336,11 +361,6 @@ async function loadForViewer(eventId: string, accountId: string): Promise<{ even
   if (!event) return null
   const [member] = await sql<{ role: EventRoleName }[]>`select role from event_members where event_id = ${eventId} and user_id = ${accountId}`
   return { event, role: member?.role ?? null }
-}
-
-async function members(t: postgres.TransactionSql, eventId: string): Promise<string[]> {
-  const rows = await t<{ user_id: string }[]>`select user_id from event_members where event_id = ${eventId}`
-  return rows.map((r) => r.user_id)
 }
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ eventId: string }> }) {
@@ -385,11 +405,9 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ ev
     }
   }
 
-  const enteringVoting = statusChanged && nextStatus === 'voting_open'
-  const leavingVoting = statusChanged && current.status === 'voting_open'
   // Attendance voting (design §11) opens when the gathering goes live, or when an organizer
-  // switches it on while already live. `openAttendanceRound` opens nothing when it is off.
-  const openingAttendance = nextStatus === 'live' && (statusChanged || update.attendance_voting_enabled === true)
+  // switches it on while already live.
+  const attendanceToggledOn = nextStatus === 'live' && update.attendance_voting_enabled === true
 
   let saved: EventRecord | undefined
   let notified = 0
@@ -408,46 +426,13 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ ev
       `
       if (!row) return undefined
 
-      if (enteringVoting) {
-        await openRound(current.id, {}, t)
-        const votingEndsAt = row.voting_closes_at ? formatInEventTimezone(new Date(row.voting_closes_at), row.timezone, 'full') : null
-        notified = await notify(t, {
-          eventId: row.id,
-          userIds: await members(t, row.id),
-          type: 'voting_opened',
-          title: `Voting is open for ${row.name}`,
-          body: votingEndsAt
-            ? `Spend your credits on the sessions you want to see. Voting closes ${votingEndsAt}.`
-            : 'Spend your credits on the sessions you want to see.',
-          actionUrl: `/e/${row.slug}/sessions`,
-          data: { voting_ends_at: votingEndsAt },
-        })
-      } else if (leavingVoting) {
-        notified = await notify(t, {
-          eventId: row.id,
-          userIds: await members(t, row.id),
-          type: 'voting_closed',
-          title: `Voting has closed for ${row.name}`,
-          body: 'Thanks for shaping the program. The organizers are putting the schedule together.',
-          actionUrl: `/e/${row.slug}`,
-          data: {},
-        })
-      }
-      if (openingAttendance) {
-        const attendanceRound = await openAttendanceRound(t, row.id)
-        // Members hear about it once, when the gathering goes live (re-enabling is idempotent).
-        if (attendanceRound && attendanceRound.status === 'open' && statusChanged) {
-          notified += await notify(t, {
-            eventId: row.id,
-            userIds: await members(t, row.id),
-            type: 'voting_opened',
-            title: `Attendance voting is open for ${row.name}`,
-            body: `You have ${attendanceRound.credits} fresh credits. Vote for a session while you are in it, from My schedule or the session page.`,
-            actionUrl: `/e/${row.slug}/my-schedule`,
-            data: { round: 'attendance', closes_at: attendanceRound.closesAt },
-          })
-        }
-      }
+      // Rounds, announcements and the attendance round: the same code the lifecycle job runs.
+      notified = await transitionSideEffects(t, {
+        row,
+        from: current.status as EventStatus,
+        to: nextStatus,
+        attendanceToggledOn,
+      })
       return row
     })
   } catch (e) {
@@ -466,15 +451,9 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ ev
   const network: NetworkWrite[] = []
   // Feed (design §7.3): lifecycle transitions claim their one post each; `feed.ts` re-checks the
   // gates (`feed_posts`, actor, public, not draft) and a job delivers after this response.
-  if (statusChanged && (nextStatus === 'proposals_open' || nextStatus === 'voting_open')) {
-    const kind = nextStatus === 'proposals_open' ? 'proposals-open' : 'voting-open'
-    try {
-      const feed = await import('@/lib/atproto/feed')
-      const claimed = await feed.enqueueGatheringPost({ eventId: saved.id, kind, callerUserId: viewer.accountId })
-      if (claimed.queued) after(() => feed.kickFeedDelivery(saved!.id))
-    } catch (e) {
-      console.warn('[settings] feed post could not be queued:', e instanceof Error ? e.name : 'error')
-    }
+  if (statusChanged && (await queueTransitionFeedPost(saved.id, nextStatus, viewer.accountId))) {
+    const savedId = saved.id
+    after(() => import('@/lib/atproto/feed').then((f) => f.kickFeedDelivery(savedId)).catch(() => undefined))
   }
   if (saved.actor_did) {
     const alreadyPublished = Boolean(saved.atproto_published_at)

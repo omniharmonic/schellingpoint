@@ -16,8 +16,14 @@ is public, as a record), RSVP-gated details, organizer notes, or street addresse
 coarsened to locality). The only DIDs in responses are the gathering's own and those of proposers whose
 proposal record is in their own repository.
 
-The previous shared-key partner API (`x-api-key`) was removed: it exposed private profile fields.
-`/api/v1/profiles` and `/api/v1/profiles/:id` answer `410 Gone`.
+The previous shared-key partner API (`x-api-key`) is gone. `/api/v1/profiles` and
+`/api/v1/profiles/:id` answer `410 Gone`; `/api/v1/sessions` and `/api/v1/sessions/:id` no longer
+read a key at all — they serve the published sessions below, from the same code path as
+`/api/v1/schedule`, so a partner integration drops the header and keeps reading. What changed for a
+key holder: only sessions the gathering has PUBLISHED are served (a pending or rejected proposal
+never was public and is not served now), and a host appears as `{ did, handle }` — the DID of an
+author who wrote their own proposal — instead of a display name, bio and affiliation.
+`API_KEY_BONFIRESAI` is no longer read; remove it from your environment.
 
 ## Conventions
 
@@ -77,6 +83,13 @@ The published schedule grouped by day.
 
 `host` is present only when the proposal record is in the host's own repository. Sessions proposed on
 someone's behalf or imported have `host: null`.
+
+### `GET /api/v1/sessions?event=<slug>[&day=YYYY-MM-DD][&track=<uuid>]` and `GET /api/v1/sessions/:id[?event=<slug>]`
+
+Published sessions as `PublicSession` (the same objects the schedule embeds), newest slot first:
+`{ "data": [ PublicSession ], "count": n }`, and a single `{ "data": PublicSession }` by id. A
+session appears once the gathering has written its calendar event; a cancelled one stays, with
+`cancelled: true`. `day` filters by the gathering's calendar day, `track` by a published track.
 
 ### `GET /api/v1/tracks?event=<slug>` and `GET /api/v1/tracks/:id?event=<slug>`
 

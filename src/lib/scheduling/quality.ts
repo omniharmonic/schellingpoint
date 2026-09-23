@@ -13,6 +13,7 @@
  */
 import { KEEP_APART_THRESHOLD } from './clusters'
 import {
+  concurrentHostConflicts,
   concurrentOverlaps,
   constraintViolations,
   demandOf,
@@ -42,6 +43,11 @@ export interface QualityReport {
   keepApartConflicts: number
   /** Concurrent comparable pairs at or above the near-miss line, by session id (for the builder's cells). */
   conflicts: Array<{ a: string; b: string; overlapPercent: number; kind: 'keepApart' | 'nearMiss' }>
+  /**
+   * Concurrent pairs that share a host or an accepted co-host, by session id (for the
+   * builder's cells). Counts only: never who.
+   */
+  hostConflicts: Array<{ a: string; b: string; people: number }>
   checks: { noKeepApartConflicts: boolean; constraintsMet: boolean }
   cost: CostBreakdown
   placed: number
@@ -84,6 +90,16 @@ export function qualityScore(assignments: AssignmentMap, ctx: ObjectiveContext):
   }
   for (const [slotId, ids] of slotUse) {
     if (ids.length > 1) violations.push(`${ids.map((id) => titleOf(id, ctx)).join(' and ')} are both in the same slot (${slotLabel(slotId, ctx)})`)
+  }
+
+  // One person, two rooms: a host or accepted co-host of two sessions placed concurrently.
+  // Listed as a violation (so the constraints check fails and the organizer sees it) but
+  // priced at ×1, not ×1000 — see COST_WEIGHTS.hostConflict.
+  const hostConflicts = concurrentHostConflicts(assignments, ctx)
+  for (const { a, b, people } of hostConflicts) {
+    violations.push(
+      `${titleOf(a, ctx)} and ${titleOf(b, ctx)} run at the same time and share ${people === 1 ? 'a host' : `${people} hosts`}`,
+    )
   }
 
   // Audience conflicts.
@@ -147,6 +163,7 @@ export function qualityScore(assignments: AssignmentMap, ctx: ObjectiveContext):
     warnings,
     keepApartConflicts,
     conflicts,
+    hostConflicts,
     checks: { noKeepApartConflicts: keepApartConflicts === 0, constraintsMet: violations.length === 0 },
     cost,
     placed: assignments.size,

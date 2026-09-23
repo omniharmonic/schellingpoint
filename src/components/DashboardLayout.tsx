@@ -17,6 +17,7 @@ import {
   Menu,
   X,
   MapPin,
+  MessageCircleQuestion,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
@@ -27,7 +28,7 @@ import { WorkspaceUserMenu } from '@/components/WorkspaceUserMenu'
 import { useAuth } from '@/hooks/useAuth'
 import { cn } from '@/lib/utils'
 import { useVoting, VotingProvider } from '@/hooks/useVoting'
-import { useEvent, useEventRole } from '@/contexts/EventContext'
+import { useEvent, useEventHasKnowledge, useEventRole } from '@/contexts/EventContext'
 
 interface DashboardLayoutProps {
   children: React.ReactNode
@@ -37,7 +38,11 @@ interface DashboardLayoutProps {
 const SIDEBAR_WIDTH = 'w-[240px] lg:w-[260px]'
 const SIDEBAR_OFFSET = 'md:ml-[240px] lg:ml-[260px]'
 
-export function getNavItems(eventSlug: string) {
+/**
+ * The workspace sidebar. `hasKnowledge` (server-computed, `EventProvider`) adds "Ask", which is
+ * offered only to a viewer who can actually read a transcript of this gathering (design §10.2).
+ */
+export function getNavItems(eventSlug: string, opts: { hasKnowledge?: boolean } = {}) {
   return [
     { href: `/e/${eventSlug}/dashboard`, label: 'Home', icon: BarChart3 },
     { href: `/e/${eventSlug}/sessions`, label: 'Sessions', icon: Presentation },
@@ -46,6 +51,7 @@ export function getNavItems(eventSlug: string) {
     { href: `/e/${eventSlug}/my-schedule`, label: 'My schedule', icon: Heart },
     { href: `/e/${eventSlug}/my-votes`, label: 'My votes', icon: ClipboardList },
     { href: `/e/${eventSlug}/participants`, label: 'People', icon: Users },
+    ...(opts.hasKnowledge ? [{ href: `/e/${eventSlug}/ask`, label: 'Ask', icon: MessageCircleQuestion }] : []),
   ]
 }
 
@@ -127,7 +133,8 @@ function DashboardShell({ children }: DashboardLayoutProps) {
   const proposalsOpen = isParticipationOpen(event, 'propose')
   const { isAdmin, voteCredits } = useEventRole()
 
-  const navItems = React.useMemo(() => getNavItems(event.slug), [event.slug])
+  const hasKnowledge = useEventHasKnowledge()
+  const navItems = React.useMemo(() => getNavItems(event.slug, { hasKnowledge }), [event.slug, hasKnowledge])
   const [mobileNavOpen, setMobileNavOpen] = React.useState(false)
 
   const [showOnboarding, setShowOnboarding] = React.useState(false)

@@ -53,6 +53,53 @@ test('Bluesky import fills missing profile fields, preserves edits, and rejects 
   } finally { await account.cleanup(); await db.end() }
 })
 
+test('the profile record carries the person’s own avatar, and never an image hosted elsewhere', async () => {
+  test.skip(!pds, 'PDS_URL / PDS_INTERNAL_URL is not set')
+  const db = postgres(local, { max: 2, onnotice: () => {} })
+  const account = await createTestAccount('profile-avatar', { sql: db })
+  try {
+    expect((await patchProfile(account.cookie, { display_name: 'Avatar Person' })).status).toBe(200)
+
+    // An avatar we did not store ourselves is never fetched and never published (design §14 item 1).
+    await db`update profiles set avatar_url = 'https://cdn.bsky.app/img/avatar/plain/did:plc:x/bafy@jpeg' where id = ${account.id}`
+    expect((await patchIdentity(account.cookie, { publish_profile: true })).status).toBe(200)
+    const textOnly = await liveProfileRecord(account.did)
+    expect(textOnly!.value).not.toHaveProperty('avatar')
+
+    // Their own image (an upload, or the copy mirrored from their own Bluesky repo at import).
+    const { storeImage } = await withServerOnlyShim(() => require('../src/lib/storage/files') as typeof import('../src/lib/storage/files'))
+    const sharp = (await import('sharp')).default
+    const png = await sharp({ create: { width: 300, height: 300, channels: 3, background: { r: 200, g: 60, b: 60 } } }).png().toBuffer()
+    const stored = await withServerOnlyShim(() => storeImage(new Uint8Array(png), 'png'))
+    await db`update profiles set avatar_url = ${stored.url} where id = ${account.id}`
+    expect((await patchIdentity(account.cookie, { publish_profile: true })).status).toBe(200)
+
+    const withAvatar = await liveProfileRecord(account.did)
+    const avatar = withAvatar!.value.avatar as { $type: string; ref: { $link: string }; mimeType: string; size: number } | undefined
+    expect(avatar, JSON.stringify(withAvatar!.value)).toBeTruthy()
+    expect(avatar!.mimeType).toBe('image/jpeg') // the lexicon accepts png/jpeg only
+    expect(avatar!.size).toBeLessThanOrEqual(1_000_000)
+    expect(withAvatar!.value).not.toHaveProperty('banner')
+
+    const { assertValidRecord, assertNoUnknownFields } = await withServerOnlyShim(
+      () => require('../src/lib/atproto/validate') as typeof import('../src/lib/atproto/validate'),
+    )
+    // The JSON blob form the PDS hands back still validates (validate.ts turns it into a BlobRef).
+    expect(() => assertValidRecord(PROFILE_NSID, withAvatar!.value)).not.toThrow()
+    expect(() => assertNoUnknownFields(PROFILE_NSID, withAvatar!.value)).not.toThrow()
+
+    // The blob was uploaded to THEIR repo, once, and is cached for the next rewrite.
+    const cached = await db`select cid, mime_type, purpose from at_blobs where did = ${account.did}`
+    expect(cached).toHaveLength(1)
+    expect(cached[0]!.cid).toBe(avatar!.ref.$link)
+    expect(cached[0]!.purpose).toBe('person-avatar')
+    expect((await patchIdentity(account.cookie, { publish_profile: true })).status).toBe(200)
+    expect(await db`select cid from at_blobs where did = ${account.did}`).toHaveLength(1)
+
+    await db`delete from at_blobs where did = ${account.did}`
+  } finally { await account.cleanup(); await db.end() }
+})
+
 test('a synced field follows the network; a re-sync overrides local edits and rebuilds synced_fields', async () => {
   const db = postgres(local, { max: 2, onnotice: () => {} })
   const account = await createTestAccount('profile-sync', { sql: db })
@@ -203,7 +250,8 @@ test('a custodial person can publish their profile record to their own repo, kee
     const record = await liveProfileRecord(account.did)
     expect(record).not.toBeNull()
     expect(record!.value).toMatchObject({ $type: PROFILE_NSID, displayName: 'Record Person', description: 'Bio one' })
-    expect(Object.keys(record!.value).sort()).toEqual(['$type', 'createdAt', 'description', 'displayName']) // no avatar/banner blob
+    // This account has no avatar in our upload store, so the record is text only; never a banner.
+    expect(Object.keys(record!.value).sort()).toEqual(['$type', 'createdAt', 'description', 'displayName'])
     const { assertValidRecord, assertNoUnknownFields } = await withServerOnlyShim(
       () => require('../src/lib/atproto/validate') as typeof import('../src/lib/atproto/validate'),
     )

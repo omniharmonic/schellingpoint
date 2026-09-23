@@ -40,6 +40,8 @@ import {
   type PutAsGatheringInput,
   type ReadYourWrites,
   type RoleSource,
+  type UploadBlobAsGatheringInput,
+  type UploadedBlobRef,
   type WriteAsGatheringResult,
 } from './actor'
 import { forgetOwnRepo } from './identity'
@@ -320,6 +322,22 @@ export class CredentialGatheringSession implements GatheringSession {
     }, { transientRetries: 1 })
   }
 
+  /**
+   * `com.atproto.repo.uploadBlob` with the gathering's credential. Priced like a create: the PDS
+   * charges a blob upload against the same per-repo budget, and `paceRepoWrite` keeps one write
+   * at a time per repo. The PDS answers the JSON blob ref the record will carry verbatim.
+   */
+  async uploadBlob(input: { bytes: Uint8Array; mimeType: string }): Promise<UploadedBlobRef> {
+    return this.run(PDS_WRITE_POINTS.create, async (agent) => {
+      const res = await agent.com.atproto.repo.uploadBlob(input.bytes, { encoding: input.mimeType })
+      const blob = res.data.blob as unknown as { ref?: { $link?: string; toString(): string }; mimeType?: string; size?: number }
+      // The SDK hands back a `BlobRef` (a CID instance in `ref`); records carry the JSON form.
+      const link = typeof blob?.ref?.$link === 'string' ? blob.ref.$link : blob?.ref?.toString()
+      if (!link) throw new Error('uploadBlob returned no blob ref')
+      return { $type: 'blob' as const, ref: { $link: link }, mimeType: blob.mimeType ?? input.mimeType, size: Number(blob.size ?? input.bytes.byteLength) }
+    })
+  }
+
   async deleteRecord(input: { collection: string; rkey: string; swapRecord?: string }) {
     await this.run(PDS_WRITE_POINTS.delete, async (agent) => {
       await agent.com.atproto.repo.deleteRecord({
@@ -426,6 +444,11 @@ export async function putRecordAsGathering(input: PutAsGatheringInput): Promise<
 /** Create independent records as the gathering of `eventId` in as few commits as possible. */
 export async function applyCreatesAsGathering(eventId: string, inputs: CreateAsGatheringInput[], opts?: { maxOps?: number }): Promise<WriteAsGatheringResult[]> {
   return (await actorForEvent(eventId)).applyCreatesAsGathering(inputs, opts)
+}
+
+/** Upload a blob as the gathering of `eventId` (audited; see `uploadBlobAsGathering` on the port). */
+export async function uploadBlobAsGathering(eventId: string, input: UploadBlobAsGatheringInput): Promise<{ blob: UploadedBlobRef; auditId: string }> {
+  return (await actorForEvent(eventId)).uploadBlobAsGathering(input)
 }
 
 export async function deleteRecordAsGathering(input: DeleteAsGatheringInput): Promise<{ auditId: string }> {

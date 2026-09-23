@@ -21,7 +21,8 @@ import 'server-only'
  *   BUILDER    `buildPostRecord` is pure: ≤ 300 graphemes (the title is cut with "…" before the
  *              link), `langs: ['en']`, a link facet, consented mention facets only — any other
  *              mention `RichText` detects is stripped and its text rewritten as "the host" — and an
- *              `app.bsky.embed.external` card (no thumb: we hold no blob for it).
+ *              `app.bsky.embed.external` card whose thumb, when the gathering has a logo, is the
+ *              blob already in its own repo (design §7.3; `blobs.ts` uploads it once).
  *   NEVER      `host_name` / listed-as names, exact addresses (the gathering's `location_name`
  *              only), vote counts, attendee-only details.
  */
@@ -35,6 +36,7 @@ import { enqueueFeedJob, runDuePublishJobs } from './publish-jobs'
 import { isRateLimitBudgetExceeded } from './rate-limit'
 import { assertNoForeignDid } from './records'
 import { tid } from './rkey'
+import type { RecordBlob } from './types'
 
 export const POST_MAX_GRAPHEMES = 300
 export const HOST_FALLBACK = 'the host'
@@ -84,6 +86,8 @@ export interface BuildPostInput {
   consented: ReadonlySet<string>
   url: string
   card: { title: string; description: string }
+  /** The gathering's own logo blob, already in its repo. Omitted → a card with no image. */
+  thumb?: RecordBlob | null
   createdAt: Date | string
 }
 
@@ -220,7 +224,12 @@ export function buildPostRecord(input: BuildPostInput): BuiltPost {
     createdAt,
     embed: {
       $type: 'app.bsky.embed.external',
-      external: { uri: input.url, title: input.card.title.slice(0, 200), description: input.card.description.slice(0, 500) },
+      external: {
+        uri: input.url,
+        title: input.card.title.slice(0, 200),
+        description: input.card.description.slice(0, 500),
+        ...(input.thumb ? { thumb: input.thumb } : {}),
+      },
     },
   }
   // A foreign DID may appear only as a consented mention facet (design §7.2).
@@ -311,7 +320,10 @@ export async function enqueueSessionPosts(input: { eventId: string; kind: Sessio
   const inserted = await sql<{ id: string }[]>`
     insert into feed_posts (event_id, kind, subject_id, subject_key, requested_by)
     select s.event_id, ${input.kind}, s.id, s.id::text, ${input.callerUserId}
-    from sessions s where s.event_id = ${input.eventId} and s.id = any(${ids}::uuid[])
+    from sessions s
+    where s.event_id = ${input.eventId} and s.id = any(${ids}::uuid[])
+      -- The gathering does not announce a session it has hidden (migration 0033).
+      and not coalesce(s.hidden_by_moderation, false)
     on conflict (event_id, kind, subject_key) do nothing
     returning id
   `
@@ -393,6 +405,9 @@ async function loadSession(eventId: string, sessionId: string): Promise<SessionR
     left join venues v on v.id = s.venue_id
     left join accounts a on a.id = s.host_id
     where s.id = ${sessionId} and s.event_id = ${eventId}
+      -- Re-checked at delivery, not only at enqueue: a session can be hidden in the minutes
+      -- between a post being queued and the queue being drained.
+      and not coalesce(s.hidden_by_moderation, false)
   `
   return row ?? null
 }
@@ -478,11 +493,13 @@ export async function deliverQueuedPosts(input: { eventId: string; callerUserId:
     return out
   }
   const port = await actorForEvent(event.id)
+  // One blob for the whole pass: the gathering's logo, uploaded once and cached in `at_blobs`.
+  const thumb = await gatheringThumb(event, input.callerUserId)
   for (const [i, row] of rows.entries()) {
     try {
       const draft = await compose(event, row)
       const consented = draft.sessionId ? await consentedMentionDids(event.id, draft.sessionId) : new Set<string>()
-      const built = buildPostRecord({ ...draft, consented, createdAt: new Date() })
+      const built = buildPostRecord({ ...draft, consented, thumb, createdAt: new Date() })
       const rkey = tid()
       const res = await port.putRecordAsGathering({
         callerUserId: input.callerUserId,
@@ -521,6 +538,24 @@ export async function deliverQueuedPosts(input: { eventId: string; callerUserId:
   const [{ n }] = await sql<{ n: number }[]>`select count(*)::int as n from feed_posts where event_id = ${input.eventId} and status = 'queued'`
   out.remaining += n
   return out
+}
+
+/**
+ * The gathering's logo as the link card's thumb (design §7.3). Best effort: no logo, a logo we
+ * did not store ourselves, or a refused upload gives a card without an image — never a failure.
+ */
+async function gatheringThumb(event: EventGate, callerUserId: string | null): Promise<RecordBlob | null> {
+  const [row] = await sql<{ logo_url: string | null }[]>`select logo_url from events where id = ${event.id}`
+  if (!row?.logo_url || !event.actor_did) return null
+  const { gatheringAvatarBlob } = await import('./blobs')
+  return gatheringAvatarBlob({
+    eventId: event.id,
+    actorDid: event.actor_did,
+    callerUserId,
+    url: row.logo_url,
+    reason: `feed: upload "${event.name}"'s logo for the post link card`,
+    purpose: 'feed-thumb',
+  })
 }
 
 /* ─────────────────────────────── organiser API ─────────────────────────────── */
@@ -601,8 +636,10 @@ export async function retryFeedPost(input: { eventId: string; postId: string; ca
 
 /**
  * DESTRUCTIVE (two organisers, design §7.4): delete a post from the gathering's repo. The port
- * action `delete-post` needs the policy's approvals; the ledger row is kept as `deleted`.
- * No UI yet beyond the ledger — organisers reach it through the approvals machinery.
+ * action `delete-post` needs the policy's approvals; the ledger row is kept as `deleted`, so a
+ * retraction stays visible to organisers. Reached from the Network page's Feed card ("Retract"),
+ * which goes through `approvals.ts` — the same two-organiser flow as moving or cancelling a
+ * published session — and never directly.
  */
 export async function deleteFeedPost(input: { eventId: string; postId: string; callerUserId: string; reason: string; approvals: Approval[] }): Promise<{ auditId: string } | null> {
   const [row] = await sql<{ id: string; rkey: string | null }[]>`

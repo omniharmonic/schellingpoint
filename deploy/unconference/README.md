@@ -11,7 +11,7 @@ SSH-only firewall).
 | `app` | `unconference-app` (this repo, `Dockerfile`) | Next.js AppView + web |
 | `migrate` | same image | one-shot `db/migrations` runner, before `app` |
 | `indexer` | same image | Jetstream consumer |
-| `scheduler` | `curlimages/curl` | job loop: close rounds + drain publish/feed jobs (1 min), dispatch notifications and knowledge jobs (5 min), reconcile ATProto (hourly), retention (daily) |
+| `scheduler` | `curlimages/curl` | job loop: close rounds + drain publish/feed jobs (1 min), the gathering clock (`/api/jobs/lifecycle`: automatic phase changes, reminders, organizer alerts), notification dispatch and knowledge jobs (5 min), reconcile ATProto (hourly), retention (daily) |
 | `postgres` | `postgres:16-alpine` | the AppView database |
 | `pds` | `ghcr.io/bluesky-social/pds:0.4` | our PDS: custodial and gathering accounts |
 | `backup` | `backup.Dockerfile` | nightly encrypted Postgres + PDS backup to R2 |
@@ -90,15 +90,32 @@ age -d -i ~/.config/unconference/backup-age.key pds-blocks.tar.gz.age | tar -xz 
 
 ## Payments activation
 
-**Activation hold:** the deployed implementation uses destination charges, which charge Stripe's
-processing fees to the platform. A 1% contribution can therefore produce a loss. Before enabling
-live sales, complete and verify the organizer-paid processing model in
-[`docs/STRIPE_ACTIVATION.md`](../../docs/STRIPE_ACTIVATION.md). The steps below describe the current
-integration, not a completed payment launch.
+**Not activated:** no Stripe key exists on this box or anywhere else, so paid checkout answers
+503 and free tickets work as usual. The *model* is now the right one — organizers are the
+merchant of record and are charged Stripe's processing fees directly, with unconference taking
+only the contribution as an application fee — and it is covered by tests, but Stripe has never
+answered any of it. Read [`docs/STRIPE_ACTIVATION.md`](../../docs/STRIPE_ACTIVATION.md) before
+touching anything here; it lists exactly what is implemented and what still needs a human.
 
-Configure `STRIPE_SECRET_KEY` and
-`STRIPE_WEBHOOK_SECRET` securely in the server environment, then recreate the app. Keep test and
-live keys/endpoints separate. Do not place secrets in chat, source control or browser JavaScript.
+Configure the server environment and recreate the app:
+
+- `STRIPE_SECRET_KEY` — a **restricted** key, not a CLI session credential. It decides the
+  deployment's mode: a `sk_live_`/`rk_live_` key makes this a live deployment and any webhook
+  delivery whose `livemode` disagrees is refused. Permissions this implementation needs, write
+  unless stated: Checkout Sessions, PaymentIntents (read), Charges (read), Refunds,
+  Application fees (read), Connected accounts, Account links, Account login links, Webhook
+  endpoints (read).
+- `STRIPE_WEBHOOK_SECRET` — the signing secret of the destination below.
+- `STRIPE_WEBHOOK_SECRET_CONNECT` — optional, when the Connect destination signs with its own
+  secret. Deliveries are checked against every configured secret.
+- `STRIPE_ACCOUNTS_API=v1` — optional escape hatch that forces the v1 `controller` account
+  path when Accounts v2 is not enabled for the platform. Leave unset to prefer v2.
+- `STRIPE_ALLOW_PLATFORM_CHARGES=true` — optional, charges the platform account when a
+  gathering has no merchant connected. Off by default and should stay off.
+
+Keep sandbox and live keys, destinations and secrets strictly separate, and never put a secret
+in chat, source control or browser JavaScript. Nothing logs a secret, signature or payload.
+
 The webhook destination is `https://unconference.events/api/webhooks/stripe`, listening for:
 
 - `checkout.session.completed`
@@ -106,18 +123,40 @@ The webhook destination is `https://unconference.events/api/webhooks/stripe`, li
 - `checkout.session.async_payment_failed`
 - `checkout.session.expired`
 - `charge.refunded`
+- `account.updated` (Connect; keeps merchant capabilities current and pauses paid sales when a
+  merchant loses one)
 
-Before live sales, verify a sandbox organizer completes Connect onboarding and has both charges
-and payouts enabled. Use the app's Connect flow; settings refuse pasted account IDs. Test a $25
-ticket with a 3% contribution: the application fee is $0.75, without a fixed platform surcharge.
-Confirm the signed webhook creates one entitlement and notification, retries do not duplicate
-fulfillment, and a full refund revokes participation even if completion is replayed. Verify the
-revenue page against Stripe. Partial refunds and processing fees remain Stripe-side accounting.
+Deliveries arrive on the organizer's connected account. The app never grants admission from a
+delivery's metadata: it resolves the session against its own `checkout_references` row and
+requires that the reference's account matches both the delivered account and the gathering's
+current one. Each delivery is also claimed by its Stripe event id (`stripe_events`) under a
+lock held for the whole handler, so redeliveries — even simultaneous ones — do nothing, and
+every refund carries a Stripe idempotency key.
+
+A paid delivery the app refuses is recorded with its reason and listed on the revenue page
+("payments that could not be matched to a checkout"): somebody was charged and got no ticket,
+so it must not live only in a log. Where the payment is provably ours it is refunded
+automatically in the merchant's context; the rest need checking in the Stripe dashboard.
+
+Before live sales, run the sandbox walk-through in `docs/STRIPE_ACTIVATION.md`:
+`STRIPE_SECRET_KEY=sk_test_… node scripts/stripe-sandbox-verify.mjs`. A $25 ticket at a 3%
+contribution must produce a $0.75 application fee, no `transfer_data`, and a Stripe processing
+fee deducted from the **organizer's** balance — with no fixed platform surcharge. Confirm the
+signed webhook creates one entitlement and one notification, that retries and redeliveries do
+not duplicate fulfillment, and that a full refund revokes participation even if the completion
+is replayed. Compare the revenue page against Stripe: it reports the platform contribution as
+the application fees actually collected, and the organizer's net as gross minus that
+contribution, explicitly before Stripe processing fees.
+
+Organizers refund from the gathering's Settings → Tickets page ("Paid sales"). Refunds are
+issued in their own account's context; a full refund returns the contribution with it and
+cancels the ticket, a partial refund does neither. Stripe processing fees are never returned.
 
 The contribution is snapshotted when checkout opens; changing the event's rate affects new
-checkouts. Disconnecting payouts stops paid sales while preserving ticket admission restrictions.
-Free passes can operate without Stripe configuration. Missing secrets or incomplete payout
-onboarding must never be presented as a successful live payment verification.
+checkouts. Disconnecting payouts stops paid sales while preserving ticket admission
+restrictions. Free passes work without any Stripe configuration. Missing secrets, incomplete
+onboarding or a paused merchant must never be presented as a successful live payment
+verification.
 
 ## Feed, map and knowledge (optional services)
 

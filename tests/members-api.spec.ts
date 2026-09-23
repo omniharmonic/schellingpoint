@@ -210,4 +210,45 @@ test.describe('members and invitations (package D)', () => {
     expect(n).toBe(0)
     expect((await api(`/api/v1/events/${slug}/members`, { cookie: joinerA.cookie })).status).toBe(404)
   })
+
+  /**
+   * Leaving (spec §8) is the door that was missing: a member could join and never get out.
+   * It is deliberately the same code path as an organizer removal, so the roster cannot end up
+   * in a state one door can reach and the other cannot — and the last owner is refused by both.
+   */
+  test('a member can leave a private gathering, and the last owner cannot', async () => {
+    // joinerB is still a member from the invitation tests; give them something to leave behind.
+    const [member] = await sql<{ role: string }[]>`
+      select role from event_members where event_id = ${eventId} and user_id = ${joinerB.id}
+    `
+    expect(member, 'joinerB should be a member by now').toBeTruthy()
+
+    const left = await api(`/api/v1/events/${slug}/me`, { method: 'DELETE', cookie: joinerB.cookie })
+    expect(left.status, left.text).toBe(200)
+    expect(left.body.left).toBe(true)
+
+    const [{ n }] = await sql<{ n: number }[]>`
+      select count(*)::int as n from event_members where event_id = ${eventId} and user_id = ${joinerB.id}
+    `
+    expect(n).toBe(0)
+    // A private gathering closes behind them: existence is not disclosed to non-members.
+    expect((await api(`/api/v1/events/${slug}/members`, { cookie: joinerB.cookie })).status).toBe(404)
+    // ... and they cannot let themselves back in, because it is invitation-only.
+    const rejoin = await api(`/api/v1/events/${slug}/me`, { method: 'POST', cookie: joinerB.cookie, json: {} })
+    expect(rejoin.status).toBe(404)
+
+    // Exactly one owner is left by this point in the suite; that person may not leave.
+    const [sole] = await sql<{ user_id: string }[]>`
+      select user_id from event_members where event_id = ${eventId} and role = 'owner'
+    `
+    expect(sole).toBeTruthy()
+    const soleCookie = [owner, admin, joinerA, joinerB].find((a) => a.id === sole!.user_id)?.cookie
+    expect(soleCookie, 'the remaining owner should be one of this suite’s accounts').toBeTruthy()
+    const refused = await api(`/api/v1/events/${slug}/me`, { method: 'DELETE', cookie: soleCookie })
+    expect(refused.status).toBe(409)
+    expect(refused.body.code).toBe('LastOwner')
+
+    const standing = await api(`/api/v1/events/${slug}/me`, { cookie: soleCookie })
+    expect(standing.body.canLeave).toBe(false)
+  })
 })

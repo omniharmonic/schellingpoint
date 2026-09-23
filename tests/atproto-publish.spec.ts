@@ -153,6 +153,7 @@ test.describe('publish pipeline and registry', () => {
   const RUN = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`
   const tempEvents: string[] = []
   const tempDids: string[] = []
+  const tempAccounts: string[] = []
   const gatherings: TestGathering[] = []
 
   test.beforeAll(() => {
@@ -184,6 +185,9 @@ test.describe('publish pipeline and registry', () => {
       if (tempEvents.length) {
         await raw`delete from at_audit where event_id = any(${tempEvents}::uuid[])`
         await raw`delete from events where id = any(${tempEvents}::uuid[])`
+      }
+      if (tempAccounts.length) {
+        await raw`delete from accounts where id = any(${tempAccounts}::uuid[])`
       }
       await raw.end({ timeout: 5 })
     }
@@ -277,8 +281,15 @@ test.describe('publish pipeline and registry', () => {
     `
     await raw`update events set actor_did = ${revokedDid} where id = ${revokedEvent}`
 
-    // The healthy gathering: a real DID minted on the local PDS.
-    const minted = await actors.mintGatheringActor(healthyEvent, randomUUID())
+    // The healthy gathering: a real DID minted on the local PDS. The minting organizer has to be
+    // a real account — `at_credentials.created_by` references `accounts(id)` (migration 0035).
+    const [minter] = await raw<{ id: string }[]>`
+      insert into accounts (did, handle, email, kind)
+      values (${`did:plc:fminter${RUN}`}, ${`f-minter-${RUN}.test`}, ${`f-minter-${RUN}@example.test`}, 'custodial')
+      returning id
+    `
+    tempAccounts.push(minter!.id)
+    const minted = await actors.mintGatheringActor(healthyEvent, minter!.id)
     tempDids.push(minted.did)
 
     const write = (eventId: string, rkey: string) =>

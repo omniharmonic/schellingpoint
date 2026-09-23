@@ -105,6 +105,9 @@ async function loadSessionsFromDb(eventId: string, sessionIds: string[]): Promis
     from sessions s
     left join tracks t on t.id = s.track_id and t.event_id = s.event_id
     where s.event_id = ${eventId} and s.id in ${sql(sessionIds)}
+      -- A hidden session contributes no title to a public record (migration 0033). Its entry
+      -- simply drops out of the tally, exactly as a deleted session's does.
+      and not coalesce(s.hidden_by_moderation, false)
   `
 }
 

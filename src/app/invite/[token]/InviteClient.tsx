@@ -54,7 +54,9 @@ export function InviteClient({ token, invite }: InviteClientProps) {
   const router = useRouter()
   const { user, isLoading: authLoading } = useAuth()
   const [isAccepting, setIsAccepting] = React.useState(false)
+  const [isDeclining, setIsDeclining] = React.useState(false)
   const [accepted, setAccepted] = React.useState(false)
+  const [declined, setDeclined] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
   const [publishNote, setPublishNote] = React.useState<string | null>(null)
 
@@ -90,6 +92,7 @@ export function InviteClient({ token, invite }: InviteClientProps) {
   if (invite.status !== 'pending') {
     const statusConfig = {
       accepted: { icon: CheckCircle, color: 'text-success', bg: 'bg-success/10', message: 'This invitation has already been accepted.' },
+      declined: { icon: XCircle, color: 'text-muted-foreground', bg: 'bg-muted', message: 'This invitation was declined. Ask the proposer for a new one if you changed your mind.' },
       expired: { icon: Clock, color: 'text-signal-amber', bg: 'bg-signal-amber/10', message: 'This invitation has expired. Ask the host for a new one.' },
       revoked: { icon: XCircle, color: 'text-destructive', bg: 'bg-destructive/10', message: 'This invitation has been revoked.' },
     }
@@ -110,6 +113,30 @@ export function InviteClient({ token, invite }: InviteClientProps) {
         <CardContent className="text-center">
           <Button asChild>
             <Link href={sessionUrl}>View session</Link>
+          </Button>
+        </CardContent>
+      </InviteShell>
+    )
+  }
+
+  // Declined state — the proposer is told, so they can ask someone else.
+  if (declined) {
+    return (
+      <InviteShell>
+        <CardHeader className="text-center">
+          <div className="mb-4 flex justify-center">
+            <div className="rounded-full bg-muted p-4">
+              <XCircle className="h-12 w-12 text-muted-foreground" aria-hidden="true" />
+            </div>
+          </div>
+          <CardTitle className="text-2xl">Invitation declined</CardTitle>
+          <CardDescription>
+            Thanks for answering — the proposer has been told, so they can ask someone else.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="text-center">
+          <Button asChild variant="outline">
+            <Link href="/">Go home</Link>
           </Button>
         </CardContent>
       </InviteShell>
@@ -159,6 +186,19 @@ export function InviteClient({ token, invite }: InviteClientProps) {
       setError(err instanceof Error ? err.message : 'Something went wrong. Please try again.')
     } finally {
       setIsAccepting(false)
+    }
+  }
+
+  const handleDecline = async () => {
+    setIsDeclining(true)
+    setError(null)
+    try {
+      await apiFetch(`/api/invite/${token}/decline`, { method: 'POST' })
+      setDeclined(true)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Something went wrong. Please try again.')
+    } finally {
+      setIsDeclining(false)
     }
   }
 
@@ -213,14 +253,22 @@ export function InviteClient({ token, invite }: InviteClientProps) {
             <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" aria-hidden="true" />
           </div>
         ) : user ? (
-          <Button className="w-full" size="lg" onClick={handleAccept} loading={isAccepting}>
-            Accept invitation
-          </Button>
+          <div className="space-y-2">
+            <Button className="w-full" size="lg" onClick={handleAccept} loading={isAccepting} disabled={isDeclining}>
+              Accept invitation
+            </Button>
+            <Button variant="ghost" className="w-full text-muted-foreground" onClick={handleDecline} loading={isDeclining} disabled={isAccepting}>
+              No thanks, decline
+            </Button>
+          </div>
         ) : (
           <div className="space-y-3 text-center">
             <p className="text-sm text-muted-foreground">Sign in or create an account to accept this invitation</p>
             <Button asChild className="w-full" size="lg">
               <Link href={`/login?returnTo=${encodeURIComponent(`/invite/${token}`)}`}>Sign in to accept</Link>
+            </Button>
+            <Button variant="ghost" className="w-full text-muted-foreground" onClick={handleDecline} loading={isDeclining}>
+              No thanks, decline
             </Button>
           </div>
         )}

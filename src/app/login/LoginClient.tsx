@@ -292,7 +292,9 @@ function LoginContent({ atConfigured }: { atConfigured: boolean }) {
           <p className="text-xs text-center text-muted-foreground mt-4">
             No password to remember.
             <br />
-            <span className="text-foreground/60">New here? Your identity is created when you sign in.</span>
+            {/* `text-foreground/60` inside muted text fell under 4.5:1; the muted token is the
+                tested one, so the second line just inherits it. */}
+            <span>New here? Your identity is created when you sign in.</span>
           </p>
         </CardContent>
       </Card>

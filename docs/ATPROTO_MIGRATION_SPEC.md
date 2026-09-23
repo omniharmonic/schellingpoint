@@ -370,6 +370,35 @@ Note what is absent: no rank, no percentage, no "top session", no per-voter anyt
 
 Resolution: the scheduler runs **inside the trust boundary, on ballot tokens rather than DIDs, after the key is destroyed**. `sp_vote` rows carry no author, so the overlap computation needs one extra column — `ballot_token` on `sp_vote`, written at close in the same randomized batch. That token links a person's votes *to each other* without linking them to the person. Jaccard over tokens is exactly as useful and names nobody. The overlap matrix itself is never published and never leaves the AppView; only the resulting schedule does. This is the single place where the port keeps a linkage the feedback design destroys, and it is worth stating why: feedback rows must be mutually unlinkable because one person's three comments could be triangulated; vote rows must be mutually linkable because the whole scheduling value is in the correlation. Tokens give the correlation without the identity. Add to the privacy audit: `sp_vote` must have no `did` column, and `sp_vote_round.ballot_key` must be NULL for every round past `closes_at`.
 
+### 5.4a Mergers and the vote bonus (deviation from PRD §4.4)
+
+PRD §4.4 lets two proposers merge their sessions and transfers the votes as
+`new_session_votes = (A + B) × 1.1`, "the 10% bonus incentivizes collaboration". **The bonus is
+not implemented, deliberately.** A bonus is only meaningful if the two vote sets can be told
+apart from the people behind them; after the close in §5.3 step 4 the ballot key is gone, and
+all we hold is a token per person per round. Multiplying a combined total by 1.1 would inflate
+a number nobody can audit, in a tally whose whole claim is that it is the honest arithmetic of
+what was cast.
+
+What happens instead, app-side only:
+
+- An accepted merger sets `sessions.merged_into` on the **source**. Nothing is written into
+  anyone's repo: R9 holds for a merger exactly as it holds for an organizer's edit, so the
+  source proposal stays as its author wrote it and only the author may withdraw it. The
+  `community.lexicon.calendar.event` is written for the target alone, so the network sees one
+  session.
+- The source stops taking new votes (`is_votable = false`) but the votes already allocated to
+  it still travel: at close, entries are written for both ids, and the target's
+  `vote_round_results` row counts entries for either id **deduplicated by `ballot_token`**,
+  keeping the larger of the two vote counts when one token backed both. One person who wanted
+  both sessions is one voter, not two.
+- The merged source gets no result row of its own, so it cannot appear in the published tally,
+  and `schedulingInputs` folds its tokens into the target's set on the same rule — the
+  scheduler compares one audience, not two.
+
+Co-hosts are not moved either: a co-host's `cohost` record names a particular session and is
+theirs. The target's proposer may invite them; nobody re-points their record for them.
+
 ### 5.5 Sybil resistance without a public identity
 
 Today, sybil resistance is "you need a `profiles` row", i.e. an email. On ATProto anyone can mint a DID. Three layers, all app-side:

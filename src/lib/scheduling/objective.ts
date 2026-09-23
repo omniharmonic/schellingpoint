@@ -5,6 +5,7 @@
  *        + Σ max(0, demand − capacity)                     demand = expected attendance, else votes
  *        + constraint violations × 1000                     host blackout, pinned room, missing
  *                                                           feature, room format, broken placement
+ *        + concurrent host/co-host clashes × 1              one person cannot be in two rooms
  *        + variance of per-time-key total votes × 0.1       balance high-demand sessions across time
  *
  * "Concurrent" is real interval overlap between two slots, not just an identical time key.
@@ -25,6 +26,13 @@ export type AssignmentMap = ReadonlyMap<string, Placement>
 export const COST_WEIGHTS = Object.freeze({
   keepApart: 2,
   violation: 1000,
+  /**
+   * A person hosting or co-hosting two sessions placed at the same time (MT §12.18). Weighted
+   * ×1, not ×1000: unlike a pinned room or a host blackout it is a real-world clash the
+   * organizer may still choose to accept (a co-host who only drops in, say), so it is reported
+   * as a violation and priced as a nudge.
+   */
+  hostConflict: 1,
   imbalance: 0.1,
 })
 
@@ -38,6 +46,12 @@ export interface ObjectiveContext {
   matrix: OverlapMatrix
   /** Comparable pairs by `pairKey(a, b)`. */
   overlap: ReadonlyMap<string, OverlapPair>
+  /**
+   * Per session, the people who must be in the room: its host plus every accepted co-host
+   * (who wrote their own `cohost` record). Account ids, used only to compare two sessions
+   * inside this process — they never reach a response.
+   */
+  hosts: ReadonlyMap<string, ReadonlySet<string>>
   /** Sessions already placed by hand (`time_slot_id` set): the search never moves them. */
   fixed: ReadonlyMap<string, Placement>
   /** Slots that may hold a session: not a break, with a room that exists. */
@@ -91,6 +105,11 @@ export function buildObjectiveContext(
     if (slot && slot.venue_id) fixed.set(s.id, { slotId: slot.id, venueId: slot.venue_id })
   }
   const matrix = overlapMatrix(ballots, options.k)
+  const hosts = new Map<string, ReadonlySet<string>>()
+  for (const s of sessions) {
+    const people = (s.host_ids ?? []).filter((id): id is string => typeof id === 'string' && id.length > 0)
+    if (people.length > 0) hosts.set(s.id, new Set(people))
+  }
   return {
     sessions: new Map(sessions.map((s) => [s.id, s])),
     slots: slotById,
@@ -100,6 +119,7 @@ export function buildObjectiveContext(
     timezone: options.timezone,
     matrix,
     overlap: overlapIndex(matrix),
+    hosts,
     fixed,
     candidateSlots,
     timeKeys: [...new Set(candidateSlots.map(timeKeyOf))].sort(),
@@ -154,16 +174,13 @@ export interface ConcurrentPair {
   pair: OverlapPair
 }
 
-/**
- * Comparable session pairs that run at the same time under `assignments`. Each pair once,
- * in (a, b) id order.
- */
-export function concurrentOverlaps(assignments: AssignmentMap, ctx: ObjectiveContext): ConcurrentPair[] {
+/** Every pair of sessions that runs at the same time under `assignments`, once, in id order. */
+export function concurrentSessionPairs(assignments: AssignmentMap, ctx: ObjectiveContext): Array<{ a: string; b: string }> {
   const sessionAtSlot = new Map<string, string[]>()
   for (const [sessionId, p] of assignments) {
     sessionAtSlot.set(p.slotId, [...(sessionAtSlot.get(p.slotId) ?? []), sessionId])
   }
-  const out: ConcurrentPair[] = []
+  const out: Array<{ a: string; b: string }> = []
   const seen = new Set<string>()
   const ids = [...assignments.keys()].sort(byId)
   for (const a of ids) {
@@ -174,11 +191,48 @@ export function concurrentOverlaps(assignments: AssignmentMap, ctx: ObjectiveCon
       const key = pairKey(a, b)
       if (seen.has(key)) continue
       seen.add(key)
-      const pair = ctx.overlap.get(key)
-      if (pair) out.push(a < b ? { a, b, pair } : { a: b, b: a, pair })
+      out.push(a < b ? { a, b } : { a: b, b: a })
     }
   }
   return out.sort((x, y) => byId(x.a, y.a) || byId(x.b, y.b))
+}
+
+/**
+ * Comparable session pairs that run at the same time under `assignments`. Each pair once,
+ * in (a, b) id order.
+ */
+export function concurrentOverlaps(assignments: AssignmentMap, ctx: ObjectiveContext): ConcurrentPair[] {
+  const out: ConcurrentPair[] = []
+  for (const { a, b } of concurrentSessionPairs(assignments, ctx)) {
+    const pair = ctx.overlap.get(pairKey(a, b))
+    if (pair) out.push({ a, b, pair })
+  }
+  return out
+}
+
+export interface HostConflict {
+  a: string
+  b: string
+  /** How many people host or co-host both sessions. Never who. */
+  people: number
+}
+
+/**
+ * Concurrent pairs that share a host or an accepted co-host (MT §12.18). One person cannot
+ * be in two rooms; the builder warns and the objective charges ×1 per clash.
+ */
+export function concurrentHostConflicts(assignments: AssignmentMap, ctx: ObjectiveContext): HostConflict[] {
+  const out: HostConflict[] = []
+  for (const { a, b } of concurrentSessionPairs(assignments, ctx)) {
+    const mine = ctx.hosts.get(a)
+    const theirs = ctx.hosts.get(b)
+    if (!mine || !theirs || mine.size === 0 || theirs.size === 0) continue
+    const [small, large] = mine.size <= theirs.size ? [mine, theirs] : [theirs, mine]
+    let people = 0
+    for (const id of small) if (large.has(id)) people++
+    if (people > 0) out.push({ a, b, people })
+  }
+  return out
 }
 
 export interface CostBreakdown {
@@ -188,6 +242,9 @@ export interface CostBreakdown {
   violations: number
   imbalance: number
   violationCount: number
+  /** Concurrent pairs sharing a host or co-host, priced at `COST_WEIGHTS.hostConflict`. */
+  hostConflict: number
+  hostConflictCount: number
 }
 
 export function placementCost(assignments: AssignmentMap, ctx: ObjectiveContext): CostBreakdown {
@@ -222,7 +279,20 @@ export function placementCost(assignments: AssignmentMap, ctx: ObjectiveContext)
     imbalance = totals.reduce((s, v) => s + (v - mean) ** 2, 0) / totals.length
   }
 
+  // 5. One person, two rooms.
+  const hostClashes = concurrentHostConflicts(assignments, ctx)
+  const hostConflict = hostClashes.length * COST_WEIGHTS.hostConflict
+
   const violations = violationCount * COST_WEIGHTS.violation
   const balance = imbalance * COST_WEIGHTS.imbalance
-  return { total: conflict + capacity + violations + balance, conflict, capacity, violations, imbalance: balance, violationCount }
+  return {
+    total: conflict + capacity + violations + hostConflict + balance,
+    conflict,
+    capacity,
+    violations,
+    imbalance: balance,
+    violationCount,
+    hostConflict,
+    hostConflictCount: hostClashes.length,
+  }
 }

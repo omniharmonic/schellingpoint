@@ -9,7 +9,7 @@
  * `server-only` shim throws outside a Next.js server bundle. Never import it
  * from a client component — the `window` guard below makes that loud.
  */
-import { Lexicons, type LexiconDoc } from '@atproto/lexicon'
+import { BlobRef, Lexicons, type LexiconDoc } from '@atproto/lexicon'
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
@@ -64,12 +64,67 @@ export class RecordValidationError extends Error {
   }
 }
 
+/**
+ * A blob as it appears in JSON — the shape a record carries over the wire, in `at_records`, and
+ * in every record this codebase builds. `{ $type: 'blob', ref: { $link: cid }, mimeType, size }`.
+ */
+export interface JsonBlob {
+  $type: 'blob'
+  ref: { $link: string }
+  mimeType: string
+  size: number
+}
+
+export function isJsonBlob(value: unknown): value is JsonBlob {
+  if (!value || typeof value !== 'object') return false
+  const v = value as Record<string, unknown>
+  const ref = v.ref as Record<string, unknown> | undefined
+  return (
+    v.$type === 'blob' &&
+    typeof v.mimeType === 'string' &&
+    typeof v.size === 'number' &&
+    !!ref &&
+    typeof ref === 'object' &&
+    typeof ref.$link === 'string'
+  )
+}
+
+/**
+ * `@atproto/lexicon`'s blob validator accepts ONLY a `BlobRef` instance (`validators/blob.ts`:
+ * `value instanceof BlobRef`), while every blob we hold is the JSON form above — the PDS returns
+ * it that way from `getRecord`/`listRecords`, the indexer stores it that way, and the record
+ * builders write it that way. Convert on the way into validation so a record carrying an avatar
+ * or a link-card thumb validates instead of failing "should be a blob ref".
+ *
+ * Pure: the input is never mutated, and a record with no blob in it comes back as-is.
+ */
+export function toLexValue<T>(value: T): T {
+  if (Array.isArray(value)) return value.map((v) => toLexValue(v)) as unknown as T
+  if (value && typeof value === 'object') {
+    if (value instanceof BlobRef) return value
+    if (isJsonBlob(value)) {
+      try {
+        // The untyped form is the one that takes the CID as a STRING (`BlobRef.fromJsonRef` parses
+        // it); the typed form needs a `CID` instance, which JSON never carries. Only validation
+        // reads the result, so the size the typed form would keep is not needed here.
+        return BlobRef.fromJsonRef({ cid: value.ref.$link, mimeType: value.mimeType }) as unknown as T
+      } catch {
+        return value // a malformed CID: leave it, so validation reports it rather than throwing here
+      }
+    }
+    const out: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = toLexValue(v)
+    return out as T
+  }
+  return value
+}
+
 /** Throws `RecordValidationError` with a readable message when `record` does not conform to `nsid`. */
 export function assertValidRecord(nsid: string, record: unknown): void {
   const withType =
     record && typeof record === 'object' && !('$type' in record) ? { ...(record as object), $type: nsid } : record
   try {
-    lexicons.assertValidRecord(nsid, withType)
+    lexicons.assertValidRecord(nsid, toLexValue(withType))
   } catch (e) {
     throw new RecordValidationError(nsid, e instanceof Error ? e.message : String(e))
   }

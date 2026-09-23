@@ -10,15 +10,16 @@ import 'server-only'
  * invariant 10). The app keeps an `approval_requests` row and one `approval_request_approvals`
  * row per organiser; the gathering actor port re-checks the approvals when the action is applied.
  *
- *   requestSessionMove / requestSessionCancel / requestListingRemoval
+ *   requestSessionMove / requestSessionCancel / requestListingRemoval / requestFeedPostDeletion
  *     └─ caller must be owner/admin
  *     └─ not published yet? → nothing destructive: applied immediately (no approvals)
  *     └─ find-or-create the open request, then approve it as the caller:
  *          write the caller's approval record → insert the approval row
  *          → first approval: notify the other organisers (`approval_requested`)
  *          → approvals >= threshold: apply (new slot with `supersedes` + calendar event
- *            `#rescheduled`, or `#cancelled` + slot `cancelled`, or listing `removed`) and notify
- *            the host and co-hosts (`session_rescheduled` / `session_cancelled`)
+ *            `#rescheduled`, or `#cancelled` + slot `cancelled`, or listing `removed`, or the
+ *            feed post deleted from the gathering's repo) and notify the host and co-hosts
+ *            (`session_rescheduled` / `session_cancelled`)
  *
  * A proposal is never deleted: it belongs to the proposer. An OAuth-door organiser who has not
  * confirmed public linkage (`profiles.publish_proposals`) is asked to (`confirmPublicLinkage`),
@@ -47,7 +48,7 @@ import { deterministicRkey } from './rkey'
 import type { ApprovalRecord } from './types'
 import { getRecord, isInvalidSwap, putRecord, deleteRecord } from './write'
 
-export type ApprovalAction = 'move' | 'cancel' | 'remove-listing'
+export type ApprovalAction = 'move' | 'cancel' | 'remove-listing' | 'delete-post'
 export type ApprovalStatus = 'pending' | 'applying' | 'applied' | 'withdrawn' | 'failed'
 
 export interface DestructiveRequestResult {
@@ -108,6 +109,7 @@ interface RequestRow {
   event_id: string
   session_id: string | null
   listing_id: string | null
+  feed_post_id: string | null
   action: ApprovalAction
   status: ApprovalStatus
   requested_by: string | null
@@ -158,7 +160,7 @@ async function loadSession(eventId: string, sessionId: string): Promise<SessionR
 
 async function loadRequest(eventId: string, requestId: string): Promise<RequestRow> {
   const [r] = await sql<RequestRow[]>`
-    select id, event_id, session_id, listing_id, action, status, requested_by, reason, target, threshold, subject_uri, proposal_uri, error, created_at
+    select id, event_id, session_id, listing_id, feed_post_id, action, status, requested_by, reason, target, threshold, subject_uri, proposal_uri, error, created_at
     from approval_requests where id = ${requestId} and event_id = ${eventId}
   `
   if (!r) throw new ApprovalError('not_found', 'Approval request not found', 404)
@@ -213,6 +215,7 @@ const ACTION_OF: Record<ApprovalAction, ApprovalRecord['action']> = {
   move: 'other',
   cancel: 'other',
   'remove-listing': 'remove-listing',
+  'delete-post': 'other',
 }
 
 /**
@@ -221,7 +224,14 @@ const ACTION_OF: Record<ApprovalAction, ApprovalRecord['action']> = {
  */
 async function writeApprovalRecord(request: RequestRow, event: EventRow, accountId: string): Promise<{ uri: string; cid: string }> {
   const identity = await publishingIdentity(accountId, { requireLinkage: false })
-  const reasonPrefix = request.action === 'move' ? 'Move a published session' : request.action === 'cancel' ? 'Cancel a published session' : 'Remove a listing'
+  const reasonPrefix =
+    request.action === 'move'
+      ? 'Move a published session'
+      : request.action === 'cancel'
+        ? 'Cancel a published session'
+        : request.action === 'delete-post'
+          ? 'Retract a post from the gathering’s feed'
+          : 'Remove a listing'
   const record = buildApprovalRecord({
     proposal: request.proposal_uri,
     action: ACTION_OF[request.action],
@@ -259,6 +269,7 @@ async function findOrCreateRequest(input: {
   event: EventRow
   sessionId: string | null
   listingId: string | null
+  feedPostId?: string | null
   action: ApprovalAction
   callerUserId: string
   reason: string
@@ -268,12 +279,13 @@ async function findOrCreateRequest(input: {
   threshold: number
 }): Promise<{ request: RequestRow; created: boolean }> {
   return sql.begin(async (t) => {
-    await t`select pg_advisory_xact_lock(hashtext(${`approval:${input.event.id}:${input.sessionId ?? input.listingId}:${input.action}`}))`
+    const subjectId = input.sessionId ?? input.listingId ?? input.feedPostId ?? null
+    await t`select pg_advisory_xact_lock(hashtext(${`approval:${input.event.id}:${subjectId}:${input.action}`}))`
     const open = await t<RequestRow[]>`
-      select id, event_id, session_id, listing_id, action, status, requested_by, reason, target, threshold, subject_uri, proposal_uri, error, created_at
+      select id, event_id, session_id, listing_id, feed_post_id, action, status, requested_by, reason, target, threshold, subject_uri, proposal_uri, error, created_at
       from approval_requests
       where event_id = ${input.event.id} and action = ${input.action} and status in ('pending', 'applying')
-        and ${input.sessionId ? t`session_id = ${input.sessionId}` : t`listing_id = ${input.listingId}`}
+        and ${input.sessionId ? t`session_id = ${input.sessionId}` : input.listingId ? t`listing_id = ${input.listingId}` : t`feed_post_id = ${input.feedPostId ?? null}`}
     `
     if (open[0]) {
       if (open[0].proposal_uri !== input.proposalUri) {
@@ -282,12 +294,12 @@ async function findOrCreateRequest(input: {
       return { request: open[0], created: false }
     }
     const [request] = await t<RequestRow[]>`
-      insert into approval_requests (event_id, session_id, listing_id, action, requested_by, reason, target, threshold, subject_uri, proposal_uri)
+      insert into approval_requests (event_id, session_id, listing_id, feed_post_id, action, requested_by, reason, target, threshold, subject_uri, proposal_uri)
       values (
-        ${input.event.id}, ${input.sessionId}, ${input.listingId}, ${input.action}, ${input.callerUserId}, ${input.reason},
+        ${input.event.id}, ${input.sessionId}, ${input.listingId}, ${input.feedPostId ?? null}, ${input.action}, ${input.callerUserId}, ${input.reason},
         ${t.json(input.target as never)}, ${input.threshold}, ${input.subjectUri}, ${input.proposalUri}
       )
-      returning id, event_id, session_id, listing_id, action, status, requested_by, reason, target, threshold, subject_uri, proposal_uri, error, created_at
+      returning id, event_id, session_id, listing_id, feed_post_id, action, status, requested_by, reason, target, threshold, subject_uri, proposal_uri, error, created_at
     `
     return { request: request!, created: true }
   })
@@ -320,12 +332,21 @@ async function approveInternal(
         const others = await organizersExcept(event.id, callerUserId)
         const subject = request.session_id
           ? (await t<{ title: string }[]>`select title from sessions where id = ${request.session_id}`)[0]?.title ?? 'a session'
-          : 'a listing'
+          : request.feed_post_id
+            ? 'a feed post'
+            : 'a listing'
         await notifySafely(t, {
           eventId: event.id,
           userIds: others,
           type: 'approval_requested',
-          title: request.action === 'move' ? `Approve moving “${subject}”` : request.action === 'cancel' ? `Approve cancelling “${subject}”` : 'Approve removing a listing',
+          title:
+            request.action === 'move'
+              ? `Approve moving “${subject}”`
+              : request.action === 'cancel'
+                ? `Approve cancelling “${subject}”`
+                : request.action === 'delete-post'
+                  ? 'Approve retracting a feed post'
+                  : 'Approve removing a listing',
           body: `An organiser asked for this change to the published schedule. It needs ${request.threshold} organiser approvals. Reason: ${request.reason}`.slice(0, 1000),
           actionUrl: `/e/${event.slug}/admin/atproto#approvals`,
           data: { requestId: request.id, action: request.action },
@@ -359,8 +380,20 @@ async function applyRequest(
   }
 
   let results: PublishResult[] = []
+  let deletedPost = false
   try {
-    if (request.action === 'move') {
+    if (request.action === 'delete-post') {
+      const { deleteFeedPost } = await import('./feed')
+      const done = await deleteFeedPost({
+        eventId: event.id,
+        postId: request.feed_post_id!,
+        callerUserId,
+        reason: `Retract a post of ${event.name}: ${request.reason}`,
+        approvals,
+      })
+      if (!done) throw new Error('that post is no longer on the network')
+      deletedPost = true
+    } else if (request.action === 'move') {
       const target = request.target.timeSlotId ? { timeSlotId: request.target.timeSlotId, venueId: request.target.venueId ?? null } : undefined
       results = (await moveSession({ eventId: event.id, callerUserId, sessionId: request.session_id!, approvals, target }, deps)).results
     } else if (request.action === 'cancel') {
@@ -376,7 +409,7 @@ async function applyRequest(
 
   const destructiveKinds = request.action === 'remove-listing' ? ['listing'] : ['session-event', 'slot']
   const failure = results.find((r) => r.error && destructiveKinds.includes(r.kind))
-  const wrote = results.some((r) => !r.error && !r.skipped && destructiveKinds.includes(r.kind))
+  const wrote = deletedPost || results.some((r) => !r.error && !r.skipped && destructiveKinds.includes(r.kind))
   if (failure || (!wrote && !results.some((r) => r.skipped === 'unchanged'))) {
     const message = failure?.error ?? results.find((r) => r.error)?.error ?? 'nothing was written'
     await sql`update approval_requests set status = 'pending', error = ${message.slice(0, 1000)}, updated_at = now() where id = ${request.id}`
@@ -528,6 +561,45 @@ export async function requestListingRemoval(
   return approveInternal(request, event, input.callerUserId, { created, confirmPublicLinkage: input.confirmPublicLinkage, deps })
 }
 
+/**
+ * Retract a post from the gathering's feed. Always destructive: the post is already out, people
+ * may have seen or shared it, and deleting it is exactly the kind of change spec §6 puts behind
+ * `destructiveActionStewards` approvals. The ledger row is kept (`status = 'deleted'`) so the
+ * retraction itself is visible to organisers.
+ */
+export async function requestFeedPostDeletion(
+  input: { eventId: string; postId: string; callerUserId: string; reason: string; confirmPublicLinkage?: boolean },
+  deps?: PublishDeps,
+): Promise<DestructiveRequestResult> {
+  const reason = cleanReason(input.reason)
+  const event = await loadEvent(input.eventId)
+  await requireOrganizer(event.id, input.callerUserId)
+  const [post] = await sql<{ id: string; uri: string | null; status: string }[]>`
+    select id, uri, status from feed_posts where id = ${input.postId} and event_id = ${event.id}
+  `
+  if (!post) throw new ApprovalError('not_found', 'No such post in this gathering', 404)
+  if (post.status === 'deleted') return { status: 'applied', approvalsNeeded: 0, results: [] }
+  if (post.status !== 'posted' || !post.uri) {
+    // Never written to the repo: there is nothing destructive to approve.
+    throw new ApprovalError('invalid_target', 'That post is not on the network, so there is nothing to retract', 409)
+  }
+  const threshold = await thresholdFor(event)
+  const { request, created } = await findOrCreateRequest({
+    event,
+    sessionId: null,
+    listingId: null,
+    feedPostId: post.id,
+    action: 'delete-post',
+    callerUserId: input.callerUserId,
+    reason,
+    target: {},
+    subjectUri: post.uri,
+    proposalUri: post.uri,
+    threshold,
+  })
+  return approveInternal(request, event, input.callerUserId, { created, confirmPublicLinkage: input.confirmPublicLinkage, deps })
+}
+
 /** A further organiser approves an open request (or retries applying one that failed to write). */
 export async function approveRequest(
   input: { eventId: string; requestId: string; callerUserId: string; confirmPublicLinkage?: boolean },
@@ -576,6 +648,7 @@ export interface ApprovalRequestView {
   sessionId: string | null
   sessionTitle: string | null
   listingId: string | null
+  feedPostId: string | null
   target: { timeSlotId?: string; venueId?: string | null; startsAt?: string | null; endsAt?: string | null }
   requestedBy: { accountId: string; handle: string | null } | null
   approvals: Array<{ accountId: string; handle: string | null; recordUri: string; createdAt: string }>
@@ -587,7 +660,7 @@ export interface ApprovalRequestView {
 export async function listApprovalRequests(eventId: string, opts: { limit?: number } = {}): Promise<ApprovalRequestView[]> {
   const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200)
   const rows = await sql<Array<RequestRow & { session_title: string | null; requester_handle: string | null; starts_at: string | null; ends_at: string | null }>>`
-    select r.id, r.event_id, r.session_id, r.listing_id, r.action, r.status, r.requested_by, r.reason, r.target, r.threshold,
+    select r.id, r.event_id, r.session_id, r.listing_id, r.feed_post_id, r.action, r.status, r.requested_by, r.reason, r.target, r.threshold,
            r.subject_uri, r.proposal_uri, r.error, r.created_at,
            s.title as session_title, a.handle as requester_handle, ts.start_time as starts_at, ts.end_time as ends_at
     from approval_requests r
@@ -614,6 +687,7 @@ export async function listApprovalRequests(eventId: string, opts: { limit?: numb
     sessionId: r.session_id,
     sessionTitle: r.session_title,
     listingId: r.listing_id,
+    feedPostId: r.feed_post_id,
     target: { ...r.target, startsAt: r.starts_at, endsAt: r.ends_at },
     requestedBy: r.requested_by ? { accountId: r.requested_by, handle: r.requester_handle } : null,
     approvals: approvals

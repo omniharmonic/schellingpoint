@@ -163,7 +163,7 @@ export function pgErrorCode(e: unknown): string | null {
   return null
 }
 
-function pgMessage(e: unknown): string {
+export function pgMessage(e: unknown): string {
   return e instanceof Error && e.message ? e.message : 'Request rejected'
 }
 

@@ -32,6 +32,7 @@ import { DashboardLayout } from '@/components/DashboardLayout'
 import { PageHeader } from '@/components/PageHeader'
 import { useAuth } from '@/hooks/useAuth'
 import { useEvent, useEventRole, JoinGatheringButton } from '@/contexts/EventContext'
+import { ReportButton } from '@/components/ReportButton'
 import { apiFetch, ApiError } from '@/lib/api/client'
 import { plural, truncate } from '@/lib/format'
 import { cn } from '@/lib/utils'
@@ -538,6 +539,7 @@ function ParticipantCard({ participant, shared, onClick }: { participant: Partic
 }
 
 function ProfileDialog({ participant, onClose }: { participant: Participant | null; onClose: () => void }) {
+  const event = useEvent()
   const roleLabel = participant ? ROLE_LABELS[participant.role] : undefined
   const messaging = participant?.telegram ? messagingLink(participant.telegram) : null
 
@@ -644,6 +646,18 @@ function ProfileDialog({ participant, onClose }: { participant: Participant | nu
                   <EyeOff className="h-3.5 w-3.5" aria-hidden="true" />
                   This is you. Edit your profile from Account in the sidebar menu.
                 </p>
+              )}
+              {!participant.is_self && (
+                <div className="border-t pt-4">
+                  {/* Reports go to this gathering's organizers by account id — never a DID. */}
+                  <ReportButton
+                    eventSlug={event.slug}
+                    subjectKind="profile"
+                    accountId={participant.id}
+                    subjectLabel={nameOf(participant)}
+                    className="text-muted-foreground"
+                  />
+                </div>
               )}
               {!participant.is_self && !participant.bio && !participant.building && !participant.looking_for && !participant.interests?.length && (
                 <p className="text-sm text-muted-foreground flex items-center gap-2">

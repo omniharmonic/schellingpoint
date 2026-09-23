@@ -1,6 +1,7 @@
 import type { Metadata } from 'next'
 import { EventAccessGate } from '@/components/EventAccessGate'
 import { getEventAccess, networkOf } from '@/lib/events'
+import { hasReadableTranscripts } from '@/lib/knowledge/store'
 import { isAdminRole } from '@/lib/permissions'
 import { EventProvider } from '@/contexts/EventContext'
 
@@ -20,6 +21,8 @@ export default async function EventLayout({ params, children }: EventLayoutProps
   const organizer = membership ? isAdminRole(membership.role) : false
   // Before publication the gathering's identity is organizer business; afterwards it is public.
   const visibleNetwork = network.publishedAt || organizer ? network : null
+  // "Ask" appears in the sidebar only when this viewer can actually read something (design §10.2).
+  const hasKnowledge = membership ? await hasReadableTranscripts(row.id, membership.role) : false
 
   return (
     <EventProvider
@@ -28,6 +31,7 @@ export default async function EventLayout({ params, children }: EventLayoutProps
       initialRole={membership?.role ?? null}
       initialVoteCredits={membership?.voteCredits ?? null}
       network={visibleNetwork}
+      hasKnowledge={hasKnowledge}
     >
       {children}
     </EventProvider>

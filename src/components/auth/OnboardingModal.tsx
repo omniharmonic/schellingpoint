@@ -441,7 +441,7 @@ export function OnboardingModal({ email, initialProfile, onComplete, suggestedTo
   }
 
   return (
-    <Dialog.Root open><Dialog.Portal><Dialog.Overlay className="fixed inset-0 z-50 bg-foreground/20 backdrop-blur-sm"/><Dialog.Content aria-describedby="onboarding-description" onEscapeKeyDown={e => e.preventDefault()} onPointerDownOutside={e => e.preventDefault()} className="fixed inset-0 z-50 flex items-end sm:items-center justify-center overflow-y-auto outline-none">
+    <Dialog.Root open><Dialog.Portal><Dialog.Overlay className="fixed inset-0 z-50 bg-foreground/20 backdrop-blur-sm"/><Dialog.Content onEscapeKeyDown={e => e.preventDefault()} onPointerDownOutside={e => e.preventDefault()} className="fixed inset-0 z-50 flex items-end sm:items-center justify-center overflow-y-auto outline-none">
       <div className="w-full max-w-lg sm:mx-4 bg-card border rounded-t-xl sm:rounded-xl shadow-xl overflow-hidden max-h-[100dvh] sm:max-h-[90dvh] flex flex-col">
         {/* Header */}
         <div className="p-4 sm:p-6 border-b bg-secondary/60 flex-shrink-0">
@@ -455,7 +455,7 @@ export function OnboardingModal({ email, initialProfile, onComplete, suggestedTo
             </div>
             <Dialog.Title className="text-lg sm:text-xl font-semibold">{getStepTitle()}</Dialog.Title>
           </div>
-          <Dialog.Description id="onboarding-description" className="text-muted-foreground text-sm">
+          <Dialog.Description className="text-muted-foreground text-sm">
             {isIntroStep
               ? 'A quick overview of how unconference works'
               : 'Set up your profile so others can find and connect with you'

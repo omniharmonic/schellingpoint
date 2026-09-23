@@ -213,7 +213,13 @@ test.describe('events core API', () => {
     // The read the event context makes on every page.
     const me = await fetch(`${base}/api/v1/events/${slug}/me`, { headers: { cookie } })
     expect(me.status).toBe(200)
-    expect(await me.json()).toEqual({ role: null, member: false, voteCredits: null, joinable: true, joinBlockedBy: null })
+    // The whole shape, so a new field cannot appear here unnoticed: the quota and the conduct
+    // block are read-only standing, and none of it makes the viewer a member.
+    expect(await me.json()).toEqual({
+      role: null, member: false, voteCredits: null, joinable: true, joinBlockedBy: null,
+      canLeave: false, codeOfConductUrl: null, conductAcceptanceRequired: false, conductAcceptedAt: null,
+      proposals: { used: 0, limit: 5, remaining: 5, atLimit: false },
+    })
     expect(await memberships()).toBe(0)
 
     // A GET is never a join, whatever the method override games.

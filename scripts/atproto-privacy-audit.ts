@@ -86,8 +86,17 @@ interface Rec {
   source: 'index' | 'live'
 }
 
-/** Tables with an `event_id` whose NULL rows are global by design, not a scoping leak. */
-const GLOBAL_BY_DESIGN = new Set(['notifications', 'notification_preferences', 'at_audit'])
+/**
+ * Tables with an `event_id` whose NULL rows are global by design, not a scoping leak.
+ *
+ * `stripe_events` is the webhook delivery ledger: a delivery is claimed by its Stripe event id
+ * *before* its payload is resolved, and many deliveries belong to no single gathering at all
+ * (`account.updated` can cover several, an unhandled type covers none, and a payment naming a
+ * session we never opened cannot be attributed). The gathering is written whenever the payload
+ * does resolve to exactly one, so a NULL here means "not attributable", not "unscoped". The
+ * row itself holds no money and no person: an opaque Stripe id, a type and two timestamps.
+ */
+const GLOBAL_BY_DESIGN = new Set(['notifications', 'notification_preferences', 'at_audit', 'stripe_events'])
 const ACCOUNT_COLUMNS = ['account_id', 'user_id', 'did', 'voter_id', 'voter_did', 'account', 'profile_id', 'host_id', 'email']
 
 function where(r: Rec): string {
@@ -99,6 +108,14 @@ function* strings(node: unknown, path = ''): Generator<[string, string]> {
   if (typeof node === 'string') yield [path, node]
   else if (Array.isArray(node)) for (let i = 0; i < node.length; i++) yield* strings(node[i], `${path}[${i}]`)
   else if (node && typeof node === 'object') for (const [k, v] of Object.entries(node)) yield* strings(v, path ? `${path}.${k}` : k)
+}
+
+/** A blob as JSON: `{ $type: 'blob', ref: { $link }, mimeType, size }`. */
+function isBlobValue(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false
+  const v = value as Record<string, unknown>
+  const ref = v.ref as Record<string, unknown> | undefined
+  return v.$type === 'blob' && typeof v.mimeType === 'string' && typeof v.size === 'number' && !!ref && typeof ref.$link === 'string'
 }
 
 function norm(value: string): string {
@@ -411,6 +428,7 @@ async function main(): Promise<void> {
       `
       counts['custodial accounts checked'] = custodial.length
       let present = 0
+      let avatars = 0
       for (const a of custodial) {
         const url = new URL(`${pds}/xrpc/com.atproto.repo.getRecord`)
         url.searchParams.set('repo', a.did)
@@ -424,7 +442,14 @@ async function main(): Promise<void> {
         present++
         // Once custody ended the record is theirs alone (we can neither rewrite nor delete it).
         if (!a.publish_profile && !a.owned) findings.push({ check: 'profile-optin', where: where(rec), detail: 'custodial profile record exists without publish_profile' })
-        if ('avatar' in body.value || 'banner' in body.value) findings.push({ check: 'profile-optin', where: where(rec), detail: 'custodial profile record carries a blob' })
+        // An avatar is allowed behind the same opt-in as the record itself (design §14 item 1):
+        // it is the person's own image, uploaded to their own repo. A banner never is.
+        if ('banner' in body.value) findings.push({ check: 'profile-optin', where: where(rec), detail: 'custodial profile record carries a banner blob' })
+        if ('avatar' in body.value) {
+          if (!a.publish_profile && !a.owned) findings.push({ check: 'profile-optin', where: where(rec), detail: 'custodial profile record carries an avatar without publish_profile' })
+          if (!isBlobValue(body.value.avatar)) findings.push({ check: 'profile-optin', where: where(rec), detail: 'custodial profile record carries an avatar that is not a blob ref' })
+          avatars++
+        }
         try {
           assertValidRecord(NSID.actorProfile, { ...body.value, $type: NSID.actorProfile })
           assertNoUnknownFields(NSID.actorProfile, { ...body.value, $type: NSID.actorProfile })
@@ -434,6 +459,7 @@ async function main(): Promise<void> {
         }
       }
       counts['custodial profile records'] = present
+      counts['custodial profiles with an avatar'] = avatars
     }
 
     /* ───────────── tallies ───────────── */

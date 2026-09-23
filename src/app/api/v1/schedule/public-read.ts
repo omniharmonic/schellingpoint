@@ -153,7 +153,7 @@ interface SessionRow {
 /** Sessions whose calendar event the gathering actor has written. */
 export async function publishedSessions(
   eventId: string,
-  opts: { actorDid?: string | null; trackId?: string | null; day?: string | null } = {},
+  opts: { actorDid?: string | null; trackId?: string | null; day?: string | null; sessionId?: string | null } = {},
 ): Promise<PublicSession[]> {
   const actorDid = opts.actorDid ?? null
   const rows = await sql<SessionRow[]>`
@@ -180,8 +180,12 @@ export async function publishedSessions(
     where s.event_id = ${eventId}
       and s.calendar_event_uri is not null
       and (s.status = 'scheduled' or s.cancelled_at is not null)
+      -- Hidden by moderation: out of this app's listings. The record itself stays in the
+      -- author's repo and on the network — we curate our own projection, never their repo.
+      and not coalesce(s.hidden_by_moderation, false)
       ${opts.trackId ? sql`and s.track_id = ${opts.trackId} and tr.id is not null` : sql``}
       ${opts.day ? sql`and ts.day_date = ${opts.day}` : sql``}
+      ${opts.sessionId ? sql`and s.id = ${opts.sessionId}` : sql``}
     order by coalesce(ts.start_time, s.self_hosted_start_time) nulls last, s.title
   `
   return rows.map((r) => ({

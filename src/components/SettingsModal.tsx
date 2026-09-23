@@ -21,6 +21,9 @@ import {
   Bot,
   Copy,
   Check,
+  CalendarClock,
+  Download,
+  Trash2,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -848,6 +851,8 @@ export function AccountPanel({ gathering, onDirtyChange, onCancel, active = true
         {profile && <EnsSection profile={profile} onProfile={setProfile} />}
 
         <AssistantConnections active={active} />
+
+        <SubjectRights active={active} />
       </div>
 
       {/* ── Notifications ── */}
@@ -870,6 +875,8 @@ export function AccountPanel({ gathering, onDirtyChange, onCancel, active = true
             from your account menu, or the bell in its sidebar.
           </p>
         )}
+
+        <CalendarSubscriptions active={active} />
       </div>
     </div>
   )
@@ -1373,6 +1380,266 @@ function EnsSection({ profile, onProfile }: { profile: OwnProfile; onProfile: (p
         </label>
       </div>
 
+      <StatusLine message={message} />
+    </section>
+  )
+}
+
+/* ────────────────────────── Account → Identity: subject rights ────────────────────────── */
+
+interface DeletionPreview {
+  handle: string | null
+  did: string
+  kind: 'custodial' | 'oauth'
+  blockingGatherings: Array<{ slug: string; name: string }>
+  pds: 'deactivated' | 'not-ours' | 'owned-by-you' | 'failed' | 'none'
+  pdsSentence: string
+}
+
+/**
+ * "Download my data" and "Delete my account" (MT §12.6, spec §9).
+ *
+ * The copy here is the point of the feature as much as the buttons are. Two things a person
+ * deserves to be told before they act, not after:
+ *
+ *   · the export does not contain their votes, and cannot, because the link between a person
+ *     and their ballot is destroyed when a round closes;
+ *   · deleting the account deactivates their repository on our PDS rather than deleting it,
+ *     because a DID's history in the PLC directory is permanent by design — it is public,
+ *     append-only and mirrored, and no button anywhere can withdraw it.
+ */
+function SubjectRights({ active }: { active: boolean }) {
+  const id = React.useId()
+  const [preview, setPreview] = React.useState<DeletionPreview | null>(null)
+  const [confirming, setConfirming] = React.useState(false)
+  const [typed, setTyped] = React.useState('')
+  const [busy, setBusy] = React.useState(false)
+  const [message, setMessage] = React.useState<{ type: 'success' | 'error'; text: string } | null>(null)
+  const [done, setDone] = React.useState<string | null>(null)
+
+  React.useEffect(() => {
+    if (!active) return
+    let cancelled = false
+    apiFetch<DeletionPreview>('/api/me/delete')
+      .then((p) => { if (!cancelled) setPreview(p) })
+      .catch(() => undefined)
+    return () => { cancelled = true }
+  }, [active])
+
+  const expected = preview?.handle || preview?.did || ''
+  const matches = typed.trim().replace(/^@/, '').toLowerCase() === expected.toLowerCase() && expected.length > 0
+
+  const remove = async () => {
+    setBusy(true)
+    setMessage(null)
+    try {
+      const result = await apiFetch<{ deleted: boolean; pdsSentence: string }>('/api/me/delete', { method: 'POST', json: { confirm: typed.trim() } })
+      setDone(result.pdsSentence)
+    } catch (e) {
+      setMessage({ type: 'error', text: e instanceof ApiError ? e.message : 'Your account could not be deleted. Try again.' })
+    } finally {
+      setBusy(false)
+      setConfirming(false)
+    }
+  }
+
+  if (done) {
+    return (
+      <section className="space-y-3 border-t pt-6" aria-labelledby={`${id}-gone`}>
+        <h3 id={`${id}-gone`} className="text-sm font-medium">Your account is deleted</h3>
+        <p className="text-xs text-muted-foreground">{done}</p>
+        <Button type="button" onClick={() => { window.location.href = '/' }}>Done</Button>
+      </section>
+    )
+  }
+
+  return (
+    <section className="space-y-6 border-t pt-6" aria-labelledby={`${id}-heading`}>
+      <h3 id={`${id}-heading`} className="text-sm font-medium">Your data</h3>
+
+      <div className="space-y-2">
+        <Button asChild variant="outline">
+          <a href="/api/me/export" download>
+            <Download className="h-4 w-4 mr-2" aria-hidden="true" />
+            Download my data
+          </a>
+        </Button>
+        <p className="text-xs text-muted-foreground">
+          One JSON file with everything this app holds about you: your profile, the gatherings you belong to,
+          your proposals, RSVPs, saved sessions, tickets, transcripts you uploaded, notifications and the
+          assistants you have connected. Your <em>votes are not in it</em>, and cannot be: when a voting round
+          closes its key is destroyed and every entry becomes unlinkable, so there is no longer anything that
+          says which were yours. Records you wrote to your own repository are already yours — the file tells
+          you how to export the whole repository as a CAR.
+        </p>
+      </div>
+
+      <WarningBox title="Delete my account" data-testid="delete-account">
+        <p className="text-xs text-muted-foreground">
+          This removes your profile, memberships, RSVPs, saved sessions, notifications and connected
+          assistants, and ends every session you have signed in from. Sessions you proposed stay on the
+          schedules they are on — they are your own records, and the gatherings have no authority over them.
+          Paid tickets keep their amount and lose your name, so a gathering’s books do not change because you
+          left. This cannot be undone.
+        </p>
+        {preview ? <p className="mt-2 text-xs text-muted-foreground">{preview.pdsSentence}</p> : null}
+
+        {preview && preview.blockingGatherings.length > 0 ? (
+          <p className="mt-3 text-xs text-destructive" role="alert">
+            You are the only owner of {preview.blockingGatherings.map((g) => g.name).join(', ')}. Make someone
+            else an owner there first, then come back.
+          </p>
+        ) : confirming ? (
+          <div className="mt-3 space-y-3">
+            <label htmlFor={`${id}-confirm`} className="block text-xs">
+              Type <span className="font-mono">{expected}</span> to confirm.
+            </label>
+            <Input id={`${id}-confirm`} value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" />
+            <ConfirmInline
+              message="Delete this account? Everything above happens now, and it cannot be undone."
+              confirmLabel="Delete my account"
+              destructive
+              loading={busy}
+              onConfirm={() => { if (matches) void remove() }}
+              onCancel={() => { setConfirming(false); setTyped('') }}
+            />
+            {!matches && typed ? <p className="text-xs text-destructive" role="alert">That is not your handle.</p> : null}
+          </div>
+        ) : (
+          <Button type="button" variant="destructive" className="mt-3" onClick={() => setConfirming(true)} disabled={!preview}>
+            <Trash2 className="h-4 w-4 mr-2" aria-hidden="true" />
+            Delete my account
+          </Button>
+        )}
+        <StatusLine message={message} />
+      </WarningBox>
+    </section>
+  )
+}
+
+/* ──────────────────── Account → Notifications: calendar subscriptions ──────────────────── */
+
+interface CalendarFeed {
+  id: string
+  created_at: string
+  last_used_at: string | null
+}
+
+/**
+ * A subscribable calendar URL for the sessions this person has saved (MT §12.8).
+ *
+ * The URL carries its own credential, because a calendar client holds no cookie — so it is
+ * shown once, it is read-only, and it is revocable from here, which is why it lives next to
+ * the other things that reach a person without them opening the app.
+ */
+function CalendarSubscriptions({ active }: { active: boolean }) {
+  const id = React.useId()
+  const { toast } = useToast()
+  const [feeds, setFeeds] = React.useState<CalendarFeed[] | null>(null)
+  const [limit, setLimit] = React.useState(3)
+  const [fresh, setFresh] = React.useState<{ url: string; webcalUrl: string } | null>(null)
+  const [busy, setBusy] = React.useState(false)
+  const [message, setMessage] = React.useState<{ type: 'success' | 'error'; text: string } | null>(null)
+
+  const load = React.useCallback(async () => {
+    try {
+      const data = await apiFetch<{ feeds: CalendarFeed[]; limit: number }>('/api/me/calendar-feed')
+      setFeeds(data.feeds)
+      setLimit(data.limit)
+    } catch {
+      setFeeds([])
+    }
+  }, [])
+
+  React.useEffect(() => { if (active) void load() }, [active, load])
+
+  const create = async () => {
+    setBusy(true)
+    setMessage(null)
+    try {
+      const data = await apiFetch<{ url: string; webcalUrl: string }>('/api/me/calendar-feed', { method: 'POST', json: {} })
+      setFresh({ url: data.url, webcalUrl: data.webcalUrl })
+      await load()
+    } catch (e) {
+      setMessage({ type: 'error', text: e instanceof ApiError ? e.message : 'The subscription could not be created.' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const revoke = async (feedId: string) => {
+    setBusy(true)
+    try {
+      await apiFetch(`/api/me/calendar-feed?id=${encodeURIComponent(feedId)}`, { method: 'DELETE' })
+      setFresh(null)
+      setMessage({ type: 'success', text: 'That subscription stops working now.' })
+      await load()
+    } catch (e) {
+      setMessage({ type: 'error', text: e instanceof ApiError ? e.message : 'It could not be revoked.' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const copy = async (value: string) => {
+    try {
+      await navigator.clipboard.writeText(value)
+      toast({ title: 'Copied', description: 'Paste it into your calendar app.' })
+    } catch {
+      setMessage({ type: 'error', text: 'Copying failed. Select the link and copy it by hand.' })
+    }
+  }
+
+  return (
+    <section className="space-y-4 border-t pt-4" aria-labelledby={`${id}-heading`}>
+      <h3 id={`${id}-heading`} className="text-sm font-medium flex items-center gap-2">
+        <CalendarClock className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+        Subscribe to your schedule
+      </h3>
+      <p className="text-xs text-muted-foreground">
+        A calendar address for the sessions you have saved, across every gathering you belong to, with a
+        reminder 15 minutes before each one. Your calendar re-checks it on its own, so schedule changes
+        arrive without you doing anything. The address is a key: anyone who has it can read your saved
+        sessions, so share it with nobody and revoke it here if it gets out.
+      </p>
+
+      {fresh ? (
+        <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-2">
+          <p className="text-xs font-medium">Copy this now — it is shown once.</p>
+          <code className="block break-all text-xs font-mono">{fresh.url}</code>
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" size="sm" variant="outline" onClick={() => void copy(fresh.url)}>
+              <Copy className="h-4 w-4 mr-2" aria-hidden="true" />Copy the address
+            </Button>
+            <Button asChild size="sm" variant="outline"><a href={fresh.webcalUrl}>Open in my calendar app</a></Button>
+          </div>
+        </div>
+      ) : null}
+
+      {feeds === null ? (
+        <p className="text-xs text-muted-foreground">Loading…</p>
+      ) : feeds.length === 0 ? (
+        <p className="text-xs text-muted-foreground">No calendar is subscribed yet.</p>
+      ) : (
+        <ul className="space-y-2">
+          {feeds.map((feed) => (
+            <li key={feed.id} className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2">
+              <span className="min-w-0 text-xs text-muted-foreground">
+                Created {new Date(feed.created_at).toLocaleDateString()}
+                {feed.last_used_at ? ` · last fetched ${new Date(feed.last_used_at).toLocaleString()}` : ' · never fetched'}
+              </span>
+              <Button type="button" size="sm" variant="ghost" className="text-destructive" loading={busy} onClick={() => void revoke(feed.id)}>
+                Revoke
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <Button type="button" variant="outline" loading={busy} disabled={(feeds?.length ?? 0) >= limit} onClick={() => void create()}>
+        <CalendarClock className="h-4 w-4 mr-2" aria-hidden="true" />
+        Create a subscription address
+      </Button>
       <StatusLine message={message} />
     </section>
   )

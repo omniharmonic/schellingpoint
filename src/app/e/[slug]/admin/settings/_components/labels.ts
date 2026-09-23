@@ -14,6 +14,7 @@ export const SETTINGS_SECTIONS = [
   { id: 'branding', label: 'Branding' },
   { id: 'feed-network', label: 'Feed & network' },
   { id: 'lifecycle', label: 'Lifecycle' },
+  { id: 'clone', label: 'Copy' },
 ] as const
 
 /** Social links: storage keeps the four legacy keys plus `links` (preamble contract). */

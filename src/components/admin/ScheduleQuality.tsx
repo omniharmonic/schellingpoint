@@ -21,6 +21,14 @@ export interface QualityConflict {
   kind: 'keepApart' | 'nearMiss'
 }
 
+/** Two concurrent sessions with a host or accepted co-host in common (MT §12.18). */
+export interface QualityHostConflict {
+  a: string
+  b: string
+  /** How many people host both. Never who. */
+  people: number
+}
+
 /** Mirrors `QualityReport` in src/lib/scheduling/quality.ts (server-only). */
 export interface QualityReport {
   score: number
@@ -32,6 +40,7 @@ export interface QualityReport {
   warnings: string[]
   keepApartConflicts: number
   conflicts: QualityConflict[]
+  hostConflicts: QualityHostConflict[]
   checks: { noKeepApartConflicts: boolean; constraintsMet: boolean }
   placed: number
 }
@@ -149,6 +158,8 @@ export interface DraftQualityState {
   error: string | null
   /** Session ids in a concurrent keep-apart pair → the partner titles are looked up by the caller. */
   keepApartBySession: Map<string, QualityConflict[]>
+  /** Session ids whose host or co-host is also in another session at the same time. */
+  hostConflictBySession: Map<string, QualityHostConflict[]>
 }
 
 /**
@@ -208,5 +219,14 @@ export function useDraftQuality(base: string, assignments: DraftAssignment[], en
     return map
   }, [quality])
 
-  return { quality, loading, unavailable, error, keepApartBySession }
+  const hostConflictBySession = React.useMemo(() => {
+    const map = new Map<string, QualityHostConflict[]>()
+    for (const c of quality?.hostConflicts ?? []) {
+      map.set(c.a, [...(map.get(c.a) ?? []), c])
+      map.set(c.b, [...(map.get(c.b) ?? []), c])
+    }
+    return map
+  }, [quality])
+
+  return { quality, loading, unavailable, error, keepApartBySession, hostConflictBySession }
 }

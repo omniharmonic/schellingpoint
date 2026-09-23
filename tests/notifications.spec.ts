@@ -202,7 +202,7 @@ test.describe('notifications and tickets (package E)', () => {
     }
   })
 
-  test('retention deletes 91-day-old notifications and nulls 31-day-old inviters', async () => {
+  test('retention deletes 91-day-old notifications and nulls 31-day-old inviters, forgets closed-case reporters and sweeps revoked calendar tokens', async () => {
     await rolledBack(async (t) => {
       const a = await insertAccount(t)
       // A gathering of this transaction's own (rolled back with it), never a seeded one.
@@ -223,9 +223,48 @@ test.describe('notifications and tickets (package E)', () => {
         insert into event_invitations (event_id, created_by, accepted_at)
         values (${event.id}, ${a.id}, now() - interval '29 days') returning id
       `
+      // A case closed 91 days ago forgets its reporter; one closed 89 days ago, and one still
+      // open, keep theirs.
+      const reports = await t<{ id: string; status: string }[]>`
+        insert into moderation_reports (event_id, reporter_account_id, subject_kind, subject_account_id, reason, status, resolved_at)
+        values (${event.id}, ${a.id}, 'profile', ${a.id}, 'spam', 'actioned', now() - interval '91 days'),
+               (${event.id}, ${a.id}, 'profile', ${a.id}, 'hate', 'dismissed', now() - interval '89 days'),
+               (${event.id}, ${a.id}, 'profile', ${a.id}, 'other', 'open', null)
+        returning id, status
+      `
+      const [oldCase, freshCase, openCase] = reports
+
+      // A subscription credential revoked 31 days ago is swept; one revoked yesterday and a live
+      // one are kept.
+      const tokens = await t<{ id: string }[]>`
+        insert into calendar_feed_tokens (account_id, token_hash, revoked_at)
+        values (${a.id}, ${`retention-old-${randomUUID()}`}, now() - interval '31 days'),
+               (${a.id}, ${`retention-fresh-${randomUUID()}`}, now() - interval '1 day'),
+               (${a.id}, ${`retention-live-${randomUUID()}`}, null)
+        returning id
+      `
+      const [oldToken, freshToken, liveToken] = tokens
+
       const report = await retention.runRetention(t)
       expect(report.notifications_90d).toBeGreaterThanOrEqual(1)
       expect(report.event_invitations_inviter_30d).toBeGreaterThanOrEqual(1)
+      expect(report.moderation_reports_reporter_90d).toBeGreaterThanOrEqual(1)
+      expect(report.calendar_feed_tokens_revoked_30d).toBeGreaterThanOrEqual(1)
+
+      // The case file survives the person: reason, status and action stay, the reporter goes.
+      const cases = await t<{ id: string; reporter_account_id: string | null; reason: string; status: string }[]>`
+        select id, reporter_account_id, reason, status from moderation_reports
+        where id in ${t([oldCase.id, freshCase.id, openCase.id])}
+      `
+      const byCase = Object.fromEntries(cases.map((r) => [r.id, r]))
+      expect(byCase[oldCase.id]).toMatchObject({ reporter_account_id: null, reason: 'spam', status: 'actioned' })
+      expect(byCase[freshCase.id].reporter_account_id).toBe(a.id)
+      expect(byCase[openCase.id].reporter_account_id).toBe(a.id)
+
+      const tokensLeft = await t<{ id: string }[]>`
+        select id from calendar_feed_tokens where id in ${t([oldToken.id, freshToken.id, liveToken.id])}
+      `
+      expect(new Set(tokensLeft.map((r) => r.id))).toEqual(new Set([freshToken.id, liveToken.id]))
 
       const left = await t<{ title: string }[]>`select title from notifications where user_id = ${a.id}`
       expect(left.map((r) => r.title)).toEqual(['recent'])
@@ -252,9 +291,10 @@ test.describe('notifications and tickets (package E)', () => {
     expect(res.status).toBe(200)
     const body = await res.json()
     expect(Object.keys(body.report).sort()).toEqual([
-      'at_oauth_state_1h', 'at_sessions_expired', 'auth_email_tokens_expired', 'cohost_invites_inviter_30d',
-      'event_invitations_inviter_30d', 'notifications_90d', 'ticket_checkins_to_counts_90d', 'ticket_holds_expired',
-      'ticket_payment_ids_archived',
+      'at_oauth_state_1h', 'at_sessions_expired', 'auth_email_tokens_expired', 'calendar_feed_tokens_revoked_30d',
+      'checkout_references_holder_90d', 'cohost_invites_inviter_30d', 'event_invitations_inviter_30d',
+      'moderation_reports_reporter_90d', 'notifications_90d', 'stripe_events_30d',
+      'ticket_checkins_to_counts_90d', 'ticket_holds_expired', 'ticket_payment_ids_archived',
     ])
     expect(Object.values(body.report).every((v) => typeof v === 'number')).toBe(true)
   })
@@ -437,7 +477,7 @@ test.describe('notifications and tickets (package E)', () => {
       expect((await statusOf(holdA.ticketId))?.status).toBe('cancelled')
     })
 
-    test('settlement: a swept hold is recreated from metadata when a seat is free', async () => {
+    test('settlement: a swept hold is recreated from the checkout reference when a seat is free', async () => {
       const tierId = await tier(2500, 2)
       const a = await account()
       const hold = (await checkout(tierId, a, fakeGateway().gateway)) as { ticketId: string; sessionId: string }

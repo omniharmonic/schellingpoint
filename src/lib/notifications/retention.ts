@@ -15,6 +15,10 @@ export type RetentionRule =
   | 'ticket_checkins_to_counts_90d'
   | 'ticket_payment_ids_archived'
   | 'ticket_holds_expired'
+  | 'checkout_references_holder_90d'
+  | 'moderation_reports_reporter_90d'
+  | 'calendar_feed_tokens_revoked_30d'
+  | 'stripe_events_30d'
   | 'auth_email_tokens_expired'
   | 'at_sessions_expired'
   | 'at_oauth_state_1h'
@@ -58,8 +62,38 @@ const RULES: ReadonlyArray<[RetentionRule, (db: Sql) => Promise<{ count: number 
       from events e
       where e.id = t.event_id and e.status = 'archived' and t.payment_intent_id is not null`,
   ],
-  // Lapsed checkout holds occupy no capacity; a late payment is settled from Stripe metadata.
+  // Lapsed checkout holds occupy no capacity; a late payment is settled from the checkout
+  // reference, which survives the sweep (its ticket_id simply becomes null).
   ['ticket_holds_expired', (db) => db`delete from tickets where status = 'pending' and hold_expires_at < now()`],
+  // Money facts are not deleted; the person is forgotten. 90 days after a checkout reached a
+  // terminal state (settled, expired or refunded — or was simply abandoned) the holder is
+  // removed from its reference, leaving an unlinkable amount/fee/currency row.
+  [
+    'checkout_references_holder_90d',
+    (db) => db`
+      update checkout_references set holder_account_id = null
+      where holder_account_id is not null
+        and coalesce(settled_at, refunded_at, expired_at, created_at) < now() - interval '90 days'`,
+  ],
+  // A closed case keeps what was decided and forgets who asked. 90 days after the organizers
+  // resolved it the reporter is dropped from the case file (the column is nullable for exactly
+  // this, migration 0033); the reason, note and action stay as an unlinkable record.
+  [
+    'moderation_reports_reporter_90d',
+    (db) => db`
+      update moderation_reports set reporter_account_id = null
+      where reporter_account_id is not null
+        and status in ('dismissed', 'actioned')
+        and resolved_at < now() - interval '90 days'`,
+  ],
+  // A revoked calendar subscription credential is dead the moment it is revoked; the row is
+  // kept a month so a member can see that the link they cancelled really is gone, then deleted.
+  [
+    'calendar_feed_tokens_revoked_30d',
+    (db) => db`delete from calendar_feed_tokens where revoked_at < now() - interval '30 days'`,
+  ],
+  // The webhook idempotency ledger only has to outlive Stripe's own retry window.
+  ['stripe_events_30d', (db) => db`delete from stripe_events where received_at < now() - interval '30 days'`],
   // An expired token goes, with its ip_hash, once it is also out of the one-hour rate-limit window
   // (sign-in links: 15 min TTL; reveal links: 24 h), so a run never resets a limit early.
   [

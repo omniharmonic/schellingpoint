@@ -46,9 +46,55 @@ function bad(status: number, error: string, field?: string, code?: string): Resp
   return Response.json({ error, ...(field ? { field } : {}), ...(code ? { code } : {}) }, { status, headers: NO_STORE })
 }
 
+/**
+ * The gathering's recurring series and what has been materialized from each (checklist 31). The
+ * Network page's "Recurring" card reads this; occurrences are listed from `at_occurrences`, the
+ * app-side mirror of the `freeschool.draft.occurrence` records the gathering wrote.
+ */
+async function seriesFor(eventId: string) {
+  const rows = await sql<{
+    id: string
+    rrule: string
+    freq: string
+    interval: number
+    by_day: string[]
+    count: number | null
+    until: string | null
+    materialize_ahead_days: number
+    record_uri: string | null
+    created_at: string
+    occurrences: number
+    next_starts_at: string | null
+    last_starts_at: string | null
+  }[]>`
+    select s.id, s.rrule, s.freq, s."interval", s.by_day, s.count, s.until, s.materialize_ahead_days,
+           s.record_uri, s.created_at,
+           (select count(*)::int from at_occurrences o where o.series_id = s.id) as occurrences,
+           (select min(o.original_starts_at) from at_occurrences o where o.series_id = s.id and o.original_starts_at > now()) as next_starts_at,
+           (select max(o.original_starts_at) from at_occurrences o where o.series_id = s.id) as last_starts_at
+    from at_series s where s.event_id = ${eventId}
+    order by s.created_at desc
+  `
+  return rows.map((r) => ({
+    id: r.id,
+    rrule: r.rrule,
+    freq: r.freq,
+    interval: r.interval,
+    byDay: r.by_day ?? [],
+    count: r.count,
+    until: r.until,
+    materializeAheadDays: r.materialize_ahead_days,
+    published: !!r.record_uri,
+    createdAt: r.created_at,
+    occurrences: r.occurrences,
+    nextStartsAt: r.next_starts_at,
+    lastStartsAt: r.last_starts_at,
+  }))
+}
+
 async function statusFor(eventId: string) {
   const health = await gatheringActorHealth(eventId)
-  const [[event], [counts], audit, flagged, peers, listings, [pending]] = await Promise.all([
+  const [[event], [counts], audit, flagged, peers, listings, [pending], series] = await Promise.all([
     sql<{ gathering_uri: string | null; atproto_published_at: string | null; policy_thresholds: unknown; atproto_tags: string[] | null; status: string }[]>`
       select gathering_uri, atproto_published_at, policy_thresholds, atproto_tags, status from events where id = ${eventId}
     `,
@@ -73,6 +119,7 @@ async function statusFor(eventId: string) {
       where event_id = ${eventId} order by updated_at desc limit 100
     `,
     sql<{ n: number }[]>`select count(*)::int as n from approval_requests where event_id = ${eventId} and status in ('pending', 'applying')`,
+    seriesFor(eventId),
   ])
   const handle = health.actorHandle
   return {
@@ -97,6 +144,7 @@ async function statusFor(eventId: string) {
     flagged,
     peers,
     listings,
+    series,
     recentAudit: audit,
     links: health.actorDid ? { pdsls: `https://pdsls.dev/at/${health.actorDid}` } : null,
   }

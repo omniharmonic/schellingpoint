@@ -2,13 +2,15 @@
 
 import * as React from 'react'
 import Link from 'next/link'
-import { AtSign, Bell, ChevronRight, UserRound } from 'lucide-react'
+import { AtSign, Bell, ChevronRight, DoorOpen, ScrollText, UserRound } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Switch } from '@/components/ui/switch'
+import { Button } from '@/components/ui/button'
+import { ConfirmInline } from '@/components/ui/confirm-inline'
 import { DashboardLayout } from '@/components/DashboardLayout'
 import { PageHeader } from '@/components/PageHeader'
-import { useEvent } from '@/contexts/EventContext'
+import { useEvent, useEventRole } from '@/contexts/EventContext'
 import { useAuth } from '@/hooks/useAuth'
 import { apiFetch, ApiError } from '@/lib/api/client'
 
@@ -81,6 +83,83 @@ function FeedMentionsCard({ slug, eventName, handle }: { slug: string; eventName
 }
 
 /**
+ * "Leave this gathering" (spec §8 "Leaving and ending").
+ *
+ * The other half of Join, which until now was a one-way door. The confirm spells out what
+ * actually happens, because the two surprising parts are worth saying out loud: RSVPs are
+ * cancelled (the seat goes back to the room), and proposals stay, because a proposal is the
+ * proposer's own record in their own repo and this gathering has no authority over it.
+ *
+ * The last owner is not offered the door at all — a gathering with no owner cannot be
+ * administered, and the fix is to hand it over first.
+ */
+function LeaveGatheringCard({ eventName }: { eventName: string }) {
+  const { isMember, canLeave, leave, isLeaving, isOwner } = useEventRole()
+  const [confirming, setConfirming] = React.useState(false)
+  const [message, setMessage] = React.useState<string | null>(null)
+
+  if (!isMember) return null
+
+  const onLeave = async () => {
+    setMessage(null)
+    const result = await leave()
+    setConfirming(false)
+    if (!result.ok) setMessage(result.message)
+  }
+
+  return <Card>
+    <CardContent className="flex items-start gap-4 p-4 sm:p-6">
+      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-destructive/10 text-destructive"><DoorOpen className="h-5 w-5" aria-hidden="true" /></span>
+      <div className="min-w-0 flex-1 space-y-2">
+        <p className="font-medium">Leave this gathering</p>
+        <p className="text-sm text-muted-foreground">
+          You stop being a member of {eventName}: you leave the roster, your RSVPs are cancelled and the seats go back to the rooms, and any co-host invitations you sent that nobody has accepted are withdrawn. Sessions you proposed stay where they are — they are your records, written in your own repository, and this gathering cannot take them down. You can join again later if it is open to you.
+        </p>
+        {canLeave === false ? (
+          <p className="text-sm text-muted-foreground">
+            {isOwner
+              ? 'You are the only owner of this gathering. Make someone else an owner from Members, then you can leave.'
+              : 'You cannot leave this gathering right now.'}
+          </p>
+        ) : confirming ? (
+          <ConfirmInline
+            message={`Leave ${eventName}? Your RSVPs are cancelled. Your proposals stay.`}
+            confirmLabel="Leave"
+            destructive
+            loading={isLeaving}
+            onConfirm={() => void onLeave()}
+            onCancel={() => setConfirming(false)}
+          />
+        ) : (
+          <Button type="button" variant="outline" className="text-destructive" onClick={() => setConfirming(true)} disabled={canLeave === null}>
+            Leave this gathering
+          </Button>
+        )}
+        {message ? <p className="text-sm text-destructive" role="alert">{message}</p> : null}
+      </div>
+    </CardContent>
+  </Card>
+}
+
+/** The gathering's own code of conduct, and when this member accepted it (MT §12.19). */
+function CodeOfConductCard() {
+  const { codeOfConductUrl, conductAcceptedAt } = useEventRole()
+  if (!codeOfConductUrl) return null
+  return <Card>
+    <CardContent className="flex items-start gap-4 p-4 sm:p-6">
+      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary"><ScrollText className="h-5 w-5" aria-hidden="true" /></span>
+      <div className="min-w-0 flex-1 space-y-1">
+        <p className="font-medium">Code of conduct</p>
+        <p className="text-sm text-muted-foreground">
+          <a href={codeOfConductUrl} target="_blank" rel="noopener noreferrer" className="underline">Read this gathering’s code of conduct</a>
+          {conductAcceptedAt ? ` · you accepted it on ${new Date(conductAcceptedAt).toLocaleDateString()}.` : '.'}
+        </p>
+      </div>
+    </CardContent>
+  </Card>
+}
+
+/**
  * `/e/[slug]/settings`: the participant's settings for this gathering (spec §3 "Account").
  */
 export default function ParticipantSettingsPage() {
@@ -117,6 +196,8 @@ export default function ParticipantSettingsPage() {
           </Link>
         </Card>
         {user?.handle ? <FeedMentionsCard slug={event.slug} eventName={event.name} handle={user.handle} /> : null}
+        <CodeOfConductCard />
+        <LeaveGatheringCard eventName={event.name} />
       </div>
     </div>
   </DashboardLayout>

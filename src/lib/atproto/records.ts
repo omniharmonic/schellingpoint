@@ -57,7 +57,7 @@ import type {
   VenueRecord,
   VotingMechanism,
 } from './types'
-import type { GeoLocation } from './types'
+import type { GeoLocation, RecordBlob } from './types'
 import { isLatLng, roundCoarse } from '@/lib/geo/coarse'
 
 /* ────────────────────────────── helpers ────────────────────────────── */
@@ -159,13 +159,16 @@ export interface GatheringProfileInput {
   name: string
   tagline?: string | null
   description?: string | null
+  /** The gathering's own logo, already uploaded to its own repo (`blobs.ts`). */
+  avatar?: RecordBlob | null
   createdAt?: string | Date | null
 }
 
 /**
- * The gathering account's `app.bsky.actor.profile` at `self`: the gathering's name and its
- * tagline (else the first 256 graphemes of its description). Text only — no avatar or banner
- * blob, no labels, no pinned post — and never a DID or a person's name (spec §5.4).
+ * The gathering account's `app.bsky.actor.profile` at `self`: the gathering's name, its tagline
+ * (else the first 256 graphemes of its description) and, when the organisers uploaded a logo and
+ * it was uploaded to this repo as a blob, that logo as the avatar. No banner, no labels, no
+ * pinned post — and never a DID or a person's name (spec §5.4).
  */
 export function buildGatheringProfileRecord(input: GatheringProfileInput): ActorProfileRecord {
   const blurb = text(input.tagline) ?? text(input.description)
@@ -173,6 +176,7 @@ export function buildGatheringProfileRecord(input: GatheringProfileInput): Actor
     $type: NSID.actorProfile,
     displayName: clampGraphemes(input.name.trim(), 64, 640).trim() || undefined,
     description: blurb ? clampGraphemes(blurb, 256, 2560).trim() || undefined : undefined,
+    avatar: input.avatar ?? undefined,
     createdAt: input.createdAt ? toIso(input.createdAt) : undefined,
   })
 }
@@ -180,15 +184,17 @@ export function buildGatheringProfileRecord(input: GatheringProfileInput): Actor
 export interface PersonProfileInput {
   displayName?: string | null
   bio?: string | null
+  /** The person's own avatar, already uploaded to their own repo (`blobs.ts`). */
+  avatar?: RecordBlob | null
   createdAt?: string | Date | null
 }
 
 /**
  * A custodial PERSON's `app.bsky.actor.profile` at `self` in their OWN repo (release design §5.5,
- * opt-in): display name and bio, clamped to the lexicon's limits. Text only — no avatar blob (the
- * PDS would need the person's own upload, and a mirrored copy of a third-party image is not ours
- * to publish; the gathering profile skips it for the same reason), no banner, labels or pinned
- * post. Never the gathering's name or any DID.
+ * opt-in): display name and bio, clamped to the lexicon's limits, and their avatar when they have
+ * one in our own upload store and it was uploaded as a blob to their own repo (`blobs.ts`). We
+ * never re-publish an image hosted elsewhere on their behalf. No banner, labels or pinned post.
+ * Never the gathering's name or any DID.
  */
 export function buildPersonProfileRecord(input: PersonProfileInput): ActorProfileRecord {
   const name = text(input.displayName)
@@ -197,6 +203,7 @@ export function buildPersonProfileRecord(input: PersonProfileInput): ActorProfil
     $type: NSID.actorProfile,
     displayName: name ? clampGraphemes(name, 64, 640).trim() || undefined : undefined,
     description: bio ? clampGraphemes(bio, 256, 2560).trim() || undefined : undefined,
+    avatar: input.avatar ?? undefined,
     createdAt: input.createdAt ? toIso(input.createdAt) : undefined,
   })
 }

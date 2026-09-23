@@ -27,6 +27,8 @@ export function ParticipationSection({ event }: { event: Event }) {
   const [topicInput, setTopicInput] = React.useState('')
   const [transcriptsEnabled, setTranscriptsEnabled] = React.useState(event.transcriptsEnabled ?? true)
   const [transcriptsVisibility, setTranscriptsVisibility] = React.useState<'members' | 'organizers'>(event.transcriptsVisibility ?? 'members')
+  const [conductUrl, setConductUrl] = React.useState(event.codeOfConductUrl ?? '')
+  const [requireConduct, setRequireConduct] = React.useState(event.requireConductAcceptance)
   const fieldError = (field: string) => (state.status === 'error' && state.field === field ? state.message : null)
 
   // Deadlines are wall-clock strings in the event timezone; re-render them if the timezone changes.
@@ -56,6 +58,7 @@ export function ParticipationSection({ event }: { event: Event }) {
     max_proposals_per_user: maxProposals, require_proposal_approval: requireApproval,
     suggested_topics: topics,
     transcripts_enabled: transcriptsEnabled, transcripts_visibility: transcriptsVisibility,
+    code_of_conduct_url: conductUrl.trim() || null, require_conduct_acceptance: requireConduct,
   }
   const dirty = !sameValue(
     { ...patch, allowed_formats: sorted(formats), allowed_durations: sorted(durations) },
@@ -66,6 +69,7 @@ export function ParticipationSection({ event }: { event: Event }) {
       max_proposals_per_user: event.maxProposalsPerUser, require_proposal_approval: event.requireProposalApproval,
       suggested_topics: event.suggestedTopics,
       transcripts_enabled: event.transcriptsEnabled ?? true, transcripts_visibility: event.transcriptsVisibility ?? 'members',
+      code_of_conduct_url: event.codeOfConductUrl ?? null, require_conduct_acceptance: event.requireConductAcceptance,
     },
   )
 
@@ -132,6 +136,18 @@ export function ParticipationSection({ event }: { event: Event }) {
         <Button type="button" variant="outline" onClick={addTopic} disabled={!topicInput.trim()}><Plus className="mr-1 h-4 w-4" aria-hidden="true" />Add</Button>
       </div>
     </Field>
+    <div className="space-y-4">
+      <Field label="Code of conduct (optional)" htmlFor="code-of-conduct-url" error={fieldError('code_of_conduct_url')}
+        hint="A link to your own page. It is shown wherever someone is about to join, and on the gathering's code-of-conduct page.">
+        <Input id="code-of-conduct-url" type="url" inputMode="url" value={conductUrl} onChange={e => setConductUrl(e.target.value)}
+          placeholder="https://example.org/code-of-conduct" maxLength={500} error={!!fieldError('code_of_conduct_url')} />
+      </Field>
+      <Toggle id="require-conduct" checked={requireConduct} onChange={setRequireConduct}
+        label="Ask people to accept it when they join"
+        description="Joining then needs a tick in a box, and the moment they accepted is kept on their membership. Add the link first." />
+      {fieldError('require_conduct_acceptance') ? <p className="text-xs text-destructive" role="alert">{fieldError('require_conduct_acceptance')}</p> : null}
+    </div>
+
     <div className="space-y-4">
       <Toggle id="transcripts-enabled" checked={transcriptsEnabled} onChange={setTranscriptsEnabled} label="Session transcripts" description="Hosts, co-hosts and organizers can attach a transcript to a session (text, Markdown, WebVTT or SRT, 5 MB). Whoever attaches one confirms that everyone in the room was told the session was being recorded or transcribed. Transcripts are never published." />
       {transcriptsEnabled ? <div className="ml-14">

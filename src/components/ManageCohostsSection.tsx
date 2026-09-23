@@ -1,9 +1,11 @@
 'use client'
 
 import * as React from 'react'
-import { User, X, Copy, Plus, LogOut, Link2 } from 'lucide-react'
+import { User, X, Copy, Plus, LogOut, Link2, Mail } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { ConfirmInline } from '@/components/ui/confirm-inline'
 import { useToast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api/client'
@@ -15,6 +17,8 @@ interface Invite {
   status: string
   expires_at: string
   created_at: string
+  /** When the link was emailed; the address itself is never stored. */
+  emailed_at?: string | null
 }
 
 interface ManageCohostsSectionProps {
@@ -31,6 +35,8 @@ type Confirming = { kind: 'step-down' } | { kind: 'remove'; id: string; name: st
 
 const WHAT_A_COHOST_IS = 'Co-hosts appear alongside you on the session and can manage its resources and chat group link. They join by accepting an invite link themselves; nobody is added on your say-so.'
 
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+
 function cohostName(cohost: SessionView['cohosts'][number]): string {
   return cohost.display_name || (cohost.handle ? `@${cohost.handle}` : 'Co-host')
 }
@@ -45,6 +51,7 @@ export function ManageCohostsSection({ sessionId, cohosts, isHost, isOrganizer, 
   const { toast } = useToast()
   const [invites, setInvites] = React.useState<Invite[]>([])
   const [isCreatingInvite, setIsCreatingInvite] = React.useState(false)
+  const [inviteEmail, setInviteEmail] = React.useState('')
   const [busyId, setBusyId] = React.useState<string | null>(null)
   const [confirming, setConfirming] = React.useState<Confirming | null>(null)
   const [error, setError] = React.useState<string | null>(null)
@@ -80,12 +87,28 @@ export function ManageCohostsSection({ sessionId, cohosts, isHost, isOrganizer, 
   }
 
   const handleCreateInvite = async () => {
+    const email = inviteEmail.trim()
+    if (email && !EMAIL.test(email)) {
+      setError('That does not look like an email address. Leave it empty to get a link you can send yourself.')
+      return
+    }
     setIsCreatingInvite(true)
     setError(null)
     try {
-      await apiFetch(`/api/sessions/${sessionId}/invites`, { method: 'POST' })
+      const created = await apiFetch<{ emailed?: boolean; deliveryNote?: string | null }>(
+        `/api/sessions/${sessionId}/invites`,
+        { method: 'POST', json: email ? { email } : {} },
+      )
       await fetchInvites()
-      toast({ title: 'Invite link created', description: 'Copy it and send it to your co-host.', variant: 'success' })
+      setInviteEmail('')
+      toast({
+        title: created.emailed ? 'Invitation sent' : 'Invite link created',
+        description: created.deliveryNote
+          || (created.emailed
+            ? `We emailed the link to ${email}. Nothing happens until they accept it.`
+            : 'Copy it and send it to your co-host.'),
+        variant: 'success',
+      })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'The invite link could not be created. Please try again.')
     } finally {
@@ -218,7 +241,7 @@ export function ManageCohostsSection({ sessionId, cohosts, isHost, isOrganizer, 
                       <Link2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
                       <div className="min-w-0 text-xs text-muted-foreground">
                         <p className="truncate">Created {new Date(invite.created_at).toLocaleDateString()} · expires {new Date(invite.expires_at).toLocaleDateString()}</p>
-                        <p className="truncate">Anyone with the link can accept it once.</p>
+                        <p className="truncate">{invite.emailed_at ? 'Emailed. Anyone with the link can accept it once.' : 'Anyone with the link can accept it once.'}</p>
                       </div>
                     </div>
                     <div className="flex shrink-0 gap-1">
@@ -259,10 +282,29 @@ export function ManageCohostsSection({ sessionId, cohosts, isHost, isOrganizer, 
           </div>
         )}
 
-        <Button className="w-full" onClick={handleCreateInvite} loading={isCreatingInvite}>
-          {!isCreatingInvite && <Plus className="mr-2 h-4 w-4" aria-hidden />}
-          Create an invite link
-        </Button>
+        <div className="space-y-2 rounded-lg border border-dashed p-3">
+          <Label htmlFor="cohost-invite-email" className="text-xs font-medium text-muted-foreground">
+            Invite by email <span className="font-normal">(optional)</span>
+          </Label>
+          <Input
+            id="cohost-invite-email"
+            type="email"
+            inputMode="email"
+            autoComplete="off"
+            placeholder="them@example.com"
+            value={inviteEmail}
+            onChange={(e) => setInviteEmail(e.target.value)}
+            disabled={isCreatingInvite}
+          />
+          <p className="text-xs text-muted-foreground">
+            We send them the link and nothing else. Leave it empty to get a link you can share yourself.
+            Either way, they are a co-host only once they accept.
+          </p>
+          <Button className="w-full" onClick={handleCreateInvite} loading={isCreatingInvite}>
+            {!isCreatingInvite && (inviteEmail.trim() ? <Mail className="mr-2 h-4 w-4" aria-hidden /> : <Plus className="mr-2 h-4 w-4" aria-hidden />)}
+            {inviteEmail.trim() ? 'Send the invitation' : 'Create an invite link'}
+          </Button>
+        </div>
       </CardContent>
     </Card>
   )

@@ -110,6 +110,35 @@ export async function deleteAccount(did: string): Promise<void> {
   await post('com.atproto.admin.deleteAccount', { did }, { admin: true })
 }
 
+/**
+ * `com.atproto.server.deactivateAccount`, called with the account holder's OWN credential.
+ *
+ * This is what "delete my account" does to the PDS side of a custodial identity, and it is
+ * deliberately not `deleteAccount`. A DID's PLC history is append-only and public by design:
+ * the document, its rotation keys and every update are already mirrored by the directory and
+ * by anyone who indexed them. Deleting the repository would not unpublish any of that; it
+ * would only destroy the person's own copy of their records while the permanent part stayed
+ * exactly where it is. Deactivation takes the repository out of circulation — the PDS stops
+ * serving it and tells the relay — and leaves the person able to reactivate or migrate it
+ * later, which is the only outcome here that is actually reversible by them.
+ */
+export async function deactivateAccountAs(identifier: string, password: string): Promise<void> {
+  const session = await post<{ accessJwt: string }>('com.atproto.server.createSession', { identifier, password })
+  let res: Response
+  try {
+    res = await fetch(`${base()}/xrpc/com.atproto.server.deactivateAccount`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${session.accessJwt}` },
+      body: JSON.stringify({}),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+      cache: 'no-store',
+    })
+  } catch (e) {
+    throw new PdsError(`PDS deactivateAccount unreachable: ${e instanceof Error ? e.name : 'error'}`, 503, 'PdsUnreachable')
+  }
+  await parse(res, 'com.atproto.server.deactivateAccount')
+}
+
 export interface AdminAccountSummary {
   did: string
   handle: string

@@ -835,6 +835,7 @@ export default function AdminSchedulePage() {
                         const mismatch = session.duration !== null && session.duration !== duration
                         const overCapacity = Boolean(venue.capacity && session.expected_attendance && session.expected_attendance > venue.capacity)
                         const keepApart = draftQuality.keepApartBySession.get(session.id) ?? []
+                        const hostClash = draftQuality.hostConflictBySession.get(session.id) ?? []
                         const pinnedElsewhere = Boolean(session.pinned_venue_id && session.pinned_venue_id !== venue.id)
                         return (
                           <div
@@ -844,7 +845,8 @@ export default function AdminSchedulePage() {
                             data-testid="scheduled-cell"
                             data-session-id={session.id}
                             data-keep-apart={keepApart.length > 0 ? 'true' : undefined}
-                            className={cn('min-h-24 rounded-xl border-l-4 border p-3 relative group overflow-hidden', session.proposal_withdrawn_at || keepApart.length > 0 || pinnedElsewhere ? 'bg-destructive/5 border-destructive/40' : mismatch || overCapacity || session.proposal_drift_at ? 'bg-signal-amber/10 border-signal-amber/40' : 'bg-secondary border-primary/60')}
+                            data-host-conflict={hostClash.length > 0 ? 'true' : undefined}
+                            className={cn('min-h-24 rounded-xl border-l-4 border p-3 relative group overflow-hidden', session.proposal_withdrawn_at || keepApart.length > 0 || hostClash.length > 0 || pinnedElsewhere ? 'bg-destructive/5 border-destructive/40' : mismatch || overCapacity || session.proposal_drift_at ? 'bg-signal-amber/10 border-signal-amber/40' : 'bg-secondary border-primary/60')}
                           >
                             <button
                               onClick={() => void removeFromSlot(session)}
@@ -874,6 +876,15 @@ export default function AdminSchedulePage() {
                                 <p key={other} className="text-[11px] text-destructive mt-0.5 flex items-start gap-1" role="alert">
                                   <AlertTriangle className="h-3 w-3 mt-px shrink-0" aria-hidden="true" />
                                   <span className="line-clamp-2">Keep apart · {c.overlapPercent}% shared with “{titleOf(other)}”</span>
+                                </p>
+                              )
+                            })}
+                            {hostClash.map((c) => {
+                              const other = c.a === session.id ? c.b : c.a
+                              return (
+                                <p key={`host-${other}`} className="text-[11px] text-destructive mt-0.5 flex items-start gap-1" role="alert">
+                                  <AlertTriangle className="h-3 w-3 mt-px shrink-0" aria-hidden="true" />
+                                  <span className="line-clamp-2">Same host · also in “{titleOf(other)}” at this time</span>
                                 </p>
                               )
                             })}

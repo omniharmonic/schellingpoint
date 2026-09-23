@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { test, expect } from '@playwright/test'
 import postgres from 'postgres'
 import { createTestAccount, createTestGathering, withServerOnlyShim, TEST_BASE_URL } from './helpers/gathering'
+import { fakeCheckoutGateway, paidSession, stripeEvent } from './helpers/payments'
 
 for (const value of [process.env.DATABASE_MIGRATION_URL, process.env.PDS_INTERNAL_URL || process.env.PDS_URL, TEST_BASE_URL]) {
   if (!value || !['localhost', '127.0.0.1', '[::1]'].includes(new URL(value).hostname)) {
@@ -170,6 +171,77 @@ test.describe('ticket admission audit', () => {
       await expect(db`update ticket_tiers set price_cents = 1000 where id = ${tier.id}`).rejects.toMatchObject({ code: '23514' })
       await expect(db`insert into ticket_tiers (event_id, name, price_cents, currency) values (${event.id}, 'Wrong currency', 1000, 'eur')`).rejects.toMatchObject({ code: '23514' })
     } finally { await event.cleanup(); await account.cleanup(); await db.end() }
+  })
+
+  test('a paid checkout is a direct charge: the contribution is the whole platform cut', async () => {
+    const db = postgres(process.env.DATABASE_MIGRATION_URL!, { max: 2, onnotice: () => {} })
+    const account = await createTestAccount('direct-audit', { sql: db })
+    const event = await createTestGathering(db, { tag: 'direct-audit', ticketingEnabled: true })
+    try {
+      const tickets = await withServerOnlyShim(() => require('../src/lib/tickets') as typeof import('../src/lib/tickets'))
+      const stripe = await withServerOnlyShim(() => require('../src/lib/payments/stripe') as typeof import('../src/lib/payments/stripe'))
+      const merchantAccount = 'acct_test_direct_audit'
+      await db`update events set stripe_account_id = ${merchantAccount}, platform_fee_percent = 1 where id = ${event.id}`
+      const [tier] = await db`insert into ticket_tiers (event_id, name, price_cents) values (${event.id}, 'Admission', 2500) returning id`
+
+      const fake = fakeCheckoutGateway()
+      const checkout = await tickets.startPaidCheckout({
+        event: { id: event.id, slug: event.slug, name: 'Audit', stripe_account_id: merchantAccount },
+        tierId: tier.id, holder: { accountId: account.id, email: null }, origin: TEST_BASE_URL,
+      }, fake.gateway)
+      if (!checkout.ok) throw new Error(checkout.error)
+
+      // $25 at 1% → 25 cents to the platform, charged on the organizer's own account.
+      expect(fake.created[0]).toMatchObject({ account: merchantAccount, priceCents: 2500, platformFeeCents: 25 })
+      const params = stripe.buildCheckoutSessionParams({
+        ticketId: checkout.ticketId, tierId: tier.id, holderId: account.id, expiresAt: new Date(Date.now() + 60_000),
+        tierName: 'Admission', priceCents: 2500, platformFeeCents: 25, currency: 'usd', eventId: event.id,
+        eventName: 'Audit', stripeAccountId: merchantAccount, successUrl: 'https://x.test/a', cancelUrl: 'https://x.test/b',
+      })
+      // No destination transfer: Stripe's processing fees are the organizer's, so a 1%
+      // contribution cannot become a platform loss.
+      expect(params.payment_intent_data).toMatchObject({ application_fee_amount: 25 })
+      expect(JSON.stringify(params)).not.toContain('transfer_data')
+
+      const [reference] = await db`select model, connected_account_id, application_fee_amount, unit_amount
+        from checkout_references where session_id = ${checkout.sessionId}`
+      expect(reference).toMatchObject({ model: 'direct', connected_account_id: merchantAccount, application_fee_amount: 25, unit_amount: 2500 })
+    } finally { await event.cleanup(); await account.cleanup(); await db.end() }
+  })
+
+  test('admission is never granted from webhook metadata alone', async () => {
+    const db = postgres(process.env.DATABASE_MIGRATION_URL!, { max: 2, onnotice: () => {} })
+    const account = await createTestAccount('metadata-audit', { sql: db })
+    const event = await createTestGathering(db, { tag: 'metadata-audit', ticketingEnabled: true })
+    const deliveries: string[] = []
+    try {
+      const tickets = await withServerOnlyShim(() => require('../src/lib/tickets') as typeof import('../src/lib/tickets'))
+      const webhook = await withServerOnlyShim(() => require('../src/lib/payments/webhook') as typeof import('../src/lib/payments/webhook'))
+      const merchantAccount = 'acct_test_metadata_audit'
+      await db`update events set stripe_account_id = ${merchantAccount} where id = ${event.id}`
+      const [tier] = await db`insert into ticket_tiers (event_id, name, price_cents) values (${event.id}, 'Admission', 2500) returning id`
+      const hold = await tickets.reserveTicketHold({ eventId: event.id, tierId: tier.id, accountId: account.id })
+      if (!hold.ok) throw new Error(hold.error)
+
+      // A connected merchant can put anything in metadata on their own account. Without a
+      // reference of ours, a perfectly-formed delivery naming a real ticket does nothing.
+      const forged = {
+        ...paidSession({ sessionId: 'cs_forged_by_merchant', amountTotal: 2500, paymentIntentId: 'pi_forged' }),
+        metadata: { ticket_id: hold.ticketId, event_id: event.id, tier_id: tier.id, holder_id: account.id },
+      }
+      const delivery = stripeEvent('checkout.session.completed', forged, { account: merchantAccount })
+      deliveries.push(delivery.id)
+      const refused = await webhook.handleStripeEvent(delivery)
+      expect(refused.outcome).toBe('rejected')
+      // `not_ours`: with no reference of ours the payment is not provably this application's,
+      // so it is recorded for the organizer and never refunded from here.
+      expect(refused.detail).toBe('NO_REFERENCE (not_ours)')
+      expect((await db`select status from tickets where id = ${hold.ticketId}`)[0].status).toBe('pending')
+      expect(await db`select 1 from event_members where event_id = ${event.id} and user_id = ${account.id}`).toHaveLength(0)
+    } finally {
+      if (deliveries.length) await db`delete from stripe_events where id in ${db(deliveries)}`
+      await event.cleanup(); await account.cleanup(); await db.end()
+    }
   })
 
 })

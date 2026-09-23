@@ -13,6 +13,7 @@ import { AlertCircle, AlertTriangle, ExternalLink, Loader2, Unplug } from 'lucid
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import { Select } from '@/components/ui/select'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
@@ -62,8 +63,36 @@ interface Status {
   flagged: Array<{ id: string; title: string; kind: 'cid-drift' | 'withdrawn' | 'author-inactive' | 'location-changed'; since: string; proposalUri: string | null }>
   peers: Array<{ peer_did: string; label: string | null; cross_listing_enabled: boolean; created_at: string }>
   listings: Array<{ id: string; session_id: string | null; subject_uri: string; record_uri: string | null; origin: 'own' | 'peer'; status: 'listed' | 'removed'; tags: string[]; updated_at: string }>
+  series: SeriesRow[]
   recentAudit: AuditRow[]
   links: { pdsls: string } | null
+}
+
+interface SeriesRow {
+  id: string
+  rrule: string
+  freq: 'daily' | 'weekly' | 'monthly' | 'yearly'
+  interval: number
+  byDay: string[]
+  count: number | null
+  until: string | null
+  materializeAheadDays: number
+  published: boolean
+  createdAt: string
+  occurrences: number
+  nextStartsAt: string | null
+  lastStartsAt: string | null
+}
+
+const FREQ_LABEL: Record<SeriesRow['freq'], { one: string; many: string }> = {
+  daily: { one: 'Every day', many: 'days' },
+  weekly: { one: 'Every week', many: 'weeks' },
+  monthly: { one: 'Every month', many: 'months' },
+  yearly: { one: 'Every year', many: 'years' },
+}
+
+function cadenceOf(s: SeriesRow): string {
+  return s.interval > 1 ? `Every ${s.interval} ${FREQ_LABEL[s.freq].many}` : FREQ_LABEL[s.freq].one
 }
 
 interface PublishResult {
@@ -76,7 +105,7 @@ interface PublishResult {
 
 interface ApprovalRequest {
   id: string
-  action: 'move' | 'cancel' | 'remove-listing'
+  action: 'move' | 'cancel' | 'remove-listing' | 'delete-post'
   status: string
   reason: string
   threshold: number
@@ -139,7 +168,7 @@ const FEED_STATUS_LABEL: Record<FeedPostRow['status'], { label: string; badge: '
   queued: { label: 'Queued', badge: 'amber' },
   failed: { label: 'Failed', badge: 'destructive' },
   digested: { label: 'In a digest', badge: 'muted' },
-  deleted: { label: 'Deleted', badge: 'secondary' },
+  deleted: { label: 'Retracted', badge: 'secondary' },
 }
 
 // Machine values → organizer words (audit §3: never show "ok" / "allow" raw).
@@ -153,7 +182,7 @@ const DECISION_LABEL: Record<AuditRow['decision'], { label: string; badge: 'seco
   allow: { label: 'Allowed', badge: 'secondary' },
   deny: { label: 'Denied', badge: 'destructive' },
 }
-const REQUEST_ACTION: Record<ApprovalRequest['action'], string> = { move: 'Move', cancel: 'Cancel', 'remove-listing': 'Remove listing' }
+const REQUEST_ACTION: Record<ApprovalRequest['action'], string> = { move: 'Move', cancel: 'Cancel', 'remove-listing': 'Remove listing', 'delete-post': 'Retract post' }
 const REQUEST_STATUS: Record<string, string> = { pending: 'Pending', applying: 'Applying', applied: 'Applied', withdrawn: 'Withdrawn', failed: 'Failed' }
 const FLAG_LABEL: Record<Status['flagged'][number]['kind'], { label: string; badge: 'amber' | 'destructive' | 'muted' }> = {
   'cid-drift': { label: 'Edited', badge: 'amber' },
@@ -210,7 +239,8 @@ export default function AdminAtprotoPage() {
   const [busy, setBusy] = React.useState<string | null>(null)
   const [results, setResults] = React.useState<{ what: What; published: number; skipped: number; failed: number; results: PublishResult[]; jobId?: string } | null>(null)
   const [confirmLinkage, setConfirmLinkage] = React.useState<null | (() => Promise<void>)>(null)
-  const [reasonFor, setReasonFor] = React.useState<{ kind: 'cancel' | 'unlist'; id: string } | null>(null)
+  const [reasonFor, setReasonFor] = React.useState<{ kind: 'cancel' | 'unlist' | 'retract'; id: string } | null>(null)
+  const [series, setSeries] = React.useState({ freq: 'monthly', interval: '1', count: '' })
 
   const [oauthHandle, setOauthHandle] = React.useState('')
   const [handle, setHandle] = React.useState('')
@@ -292,6 +322,14 @@ export default function AdminAtprotoPage() {
   const requestUnlist = (listingId: string, reason: string) => {
     setReasonFor(null)
     void act(`unlist:${listingId}`, (confirm) => apiFetch(approvalsBase, { method: 'POST', json: { action: 'request-listing-removal', listingId, reason, ...(confirm ? { confirmPublicLinkage: true } : {}) } }), 'Removal requested.')
+  }
+  /** Retracting a post people may already have seen needs the same organizer approvals as a move or a cancellation. */
+  const requestRetract = (postId: string, reason: string) => {
+    setReasonFor(null)
+    void act(`retract:${postId}`, async (confirm) => {
+      await apiFetch(approvalsBase, { method: 'POST', json: { action: 'request-post-deletion', postId, reason, ...(confirm ? { confirmPublicLinkage: true } : {}) } })
+      setFeed(await apiFetch<FeedStatus>(feedBase).catch(() => null))
+    }, 'Retraction requested.')
   }
 
   if (authLoading || roleLoading || !status) {
@@ -642,6 +680,84 @@ export default function AdminAtprotoPage() {
           </Card>
         ) : null}
 
+        {/* ───────────── recurring series (checklist 31) ───────────── */}
+        {canManage && status.linked ? (
+          <Card id="series">
+            <CardHeader>
+              <CardTitle>Recurring</CardTitle>
+              <CardDescription>
+                A gathering that happens again is one series: its published calendar event recurs, and each occurrence is written as its own
+                calendar event carrying this gathering’s routing tags. Publish the gathering first — the series is anchored on its calendar event.
+                Every occurrence stays this gathering’s to run; peers list them, never copy them.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4 text-sm">
+              <form
+                className="flex flex-wrap items-end gap-2"
+                onSubmit={(e) => {
+                  e.preventDefault()
+                  void act('series:create', async () => {
+                    const count = series.count.trim() ? Number(series.count) : undefined
+                    await post({
+                      action: 'create-series',
+                      series: { freq: series.freq, interval: Number(series.interval) || 1, ...(count ? { count } : {}) },
+                    })
+                    setSeries({ freq: 'monthly', interval: '1', count: '' })
+                  }, 'This gathering is now recurring.')
+                }}
+              >
+                <div className="space-y-1">
+                  <Label htmlFor="series-freq">Repeats</Label>
+                  <Select id="series-freq" wrapperClassName="w-40" value={series.freq} onChange={(e) => setSeries((v) => ({ ...v, freq: e.target.value }))}>
+                    <option value="daily">Daily</option>
+                    <option value="weekly">Weekly</option>
+                    <option value="monthly">Monthly</option>
+                    <option value="yearly">Yearly</option>
+                  </Select>
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="series-interval">Every</Label>
+                  <Input id="series-interval" className="w-24" type="number" min={1} max={52} value={series.interval} onChange={(e) => setSeries((v) => ({ ...v, interval: e.target.value }))} />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="series-count">How many times</Label>
+                  <Input id="series-count" className="w-32" type="number" min={2} max={500} placeholder="Open-ended" value={series.count} onChange={(e) => setSeries((v) => ({ ...v, count: e.target.value }))} />
+                </div>
+                <Button type="submit" variant="outline" loading={busy === 'series:create'} disabled={busy !== null && busy !== 'series:create'}>
+                  Make this recurring
+                </Button>
+              </form>
+              {status.series.length ? (
+                <ul className="space-y-2">
+                  {status.series.map((s) => (
+                    <li key={s.id} className="flex flex-wrap items-center gap-3 rounded-xl border p-3">
+                      <span className="font-medium">{cadenceOf(s)}</span>
+                      {s.count ? <span className="text-muted-foreground">{plural(s.count, 'occurrence')} in all</span> : null}
+                      <Badge variant={s.published ? 'success' : 'muted'}>{s.published ? 'Published' : 'Not written'}</Badge>
+                      <span className="text-muted-foreground">
+                        {s.occurrences ? `${plural(s.occurrences, 'occurrence')} written` : 'No occurrences written yet'}
+                        {s.nextStartsAt ? ` · next ${when(s.nextStartsAt)}` : ''}
+                      </span>
+                      <Button
+                        className="ml-auto"
+                        size="sm"
+                        variant="outline"
+                        loading={busy === `series:materialize:${s.id}`}
+                        disabled={busy !== null && busy !== `series:materialize:${s.id}`}
+                        onClick={() => act(`series:materialize:${s.id}`, () => post({ action: 'materialize-series', seriesId: s.id }), `Occurrences written for the next ${plural(s.materializeAheadDays, 'day')}.`)}
+                      >
+                        Write the next occurrences
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-muted-foreground">This gathering does not repeat. Making it recurring writes a series record and the occurrences inside the look-ahead window.</p>
+              )}
+            </CardContent>
+          </Card>
+        ) : null}
+
         {/* ───────────── feed (design §7) ───────────── */}
         {canManage && feed ? (
           <Card id="feed">
@@ -671,14 +787,29 @@ export default function AdminAtprotoPage() {
                       <p className="basis-full break-words">{p.text || <span className="text-muted-foreground">Text is written when the post goes out.</span>}</p>
                       {p.mentions.length ? <p className="basis-full text-xs text-muted-foreground">Mentions (with consent): {p.mentions.map((m) => `@${m.handle}`).join(', ')}</p> : null}
                       {p.error ? <p className="basis-full text-xs text-destructive">{p.error}</p> : null}
-                      <span className="flex basis-full gap-3">
+                      <span className="flex basis-full flex-wrap items-center gap-3">
                         {p.bskyUrl ? <a className="inline-flex items-center gap-1 text-xs underline" href={p.bskyUrl} target="_blank" rel="noopener noreferrer">View on Bluesky<ExternalLink className="h-3 w-3" aria-hidden="true" /></a> : null}
                         {p.status === 'failed' ? (
                           <Button size="sm" variant="ghost" loading={busy === `feed-retry:${p.id}`} disabled={busy !== null && busy !== `feed-retry:${p.id}`} onClick={() => act(`feed-retry:${p.id}`, () => apiFetch(feedBase, { method: 'POST', json: { action: 'retry', postId: p.id } }), 'Queued again.')}>
                             Retry
                           </Button>
                         ) : null}
+                        {p.status === 'posted' && reasonFor?.kind !== 'retract' ? (
+                          <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" disabled={busy !== null} onClick={() => setReasonFor({ kind: 'retract', id: p.id })}>
+                            Retract
+                          </Button>
+                        ) : null}
                       </span>
+                      {reasonFor?.kind === 'retract' && reasonFor.id === p.id ? (
+                        <ReasonForm
+                          id={`retract-reason-${p.id}`}
+                          prompt={`Why is this post being retracted? It needs ${plural(status.policy.destructiveActionStewards, 'organizer approval')}.`}
+                          confirmLabel="Request retraction"
+                          busy={busy === `retract:${p.id}`}
+                          onSubmit={(reason) => requestRetract(p.id, reason)}
+                          onCancel={() => setReasonFor(null)}
+                        />
+                      ) : null}
                     </li>
                   ))}
                 </ul>

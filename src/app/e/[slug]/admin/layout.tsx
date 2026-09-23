@@ -18,6 +18,7 @@ import {
   Menu,
   ScanLine,
   Settings,
+  ShieldAlert,
   Tags,
   Ticket,
   Users,
@@ -48,6 +49,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
       { label: 'Members', href: `${base}/members`, icon: Users, show: isAdmin },
       { label: 'Announcements & emails', href: `${base}/communications`, icon: Megaphone, show: can('sendCommunications') },
       { label: 'Check-in', href: `${base}/checkin`, icon: ScanLine, show: can('checkInAttendees') },
+      { label: 'Moderation', href: `${base}/moderation`, icon: ShieldAlert, show: isAdmin || role === 'moderator' },
     ] },
     { label: 'Gathering', items: [
       { label: 'Settings', href: `${base}/settings`, icon: Settings, show: can('editEventSettings') },

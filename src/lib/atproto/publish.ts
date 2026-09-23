@@ -57,7 +57,7 @@ import {
 import { deterministicRkey, SELF_RKEY } from './rkey'
 import { coarseSessionGeo, venueGeo } from './records'
 import { parseLatLng } from '@/lib/geo/coarse'
-import type { CalendarEventRecord, GatheringPhase, SlotRecord, StrongRef } from './types'
+import type { CalendarEventRecord, GatheringPhase, RecordBlob, SlotRecord, StrongRef } from './types'
 import type { FetchedRecord } from './write'
 
 export { GatheringNotLinkedError }
@@ -175,6 +175,8 @@ export interface EventRow {
   policy_uri: string | null
   atproto_tags: string[] | null
   policy_thresholds: unknown
+  /** The organisers' uploaded logo (`/uploads/…`): the gathering's avatar blob comes from it. */
+  logo_url?: string | null
   /** First successful gathering publish (the feed's `gathering-published` fires only once). */
   atproto_published_at?: string | null
 }
@@ -710,12 +712,16 @@ export async function publishGathering(input: PublishInput, deps?: PublishDeps):
 }
 
 /**
- * `app.bsky.actor.profile` at `self` for the gathering account: the gathering's name and its
- * tagline (else a 256-grapheme cut of the description). Text only; never a person's name or a DID.
- * CAS'd on the cid the read-your-writes index last saw (there is no app column for it).
+ * `app.bsky.actor.profile` at `self` for the gathering account: the gathering's name, its tagline
+ * (else a 256-grapheme cut of the description) and its logo as the avatar blob. Never a person's
+ * name or a DID. CAS'd on the cid the read-your-writes index last saw (there is no app column).
+ *
+ * The avatar is best-effort: no logo, a logo outside our own upload store, or a refused upload
+ * leaves the record text-only rather than failing the publish (`blobs.ts` answers null).
  */
 async function writeGatheringProfile(ctx: PublishContext, results: PublishResult[]): Promise<StrongRef | null> {
   const { event } = ctx
+  const avatar = await gatheringAvatar(ctx)
   return attempt(results, 'profile', event.id, () =>
     putWithCas(ctx, {
       action: 'publish-profile',
@@ -725,11 +731,28 @@ async function writeGatheringProfile(ctx: PublishContext, results: PublishResult
         name: event.name,
         tagline: event.tagline,
         description: event.description,
+        avatar,
         createdAt: event.created_at,
       }),
-      reason: `publish gathering "${event.name}": account profile`,
+      reason: `publish gathering "${event.name}": account profile${avatar ? ' with its logo' : ''}`,
     }),
   )
+}
+
+/**
+ * The gathering's logo as a blob in its own repo, uploaded once and cached (`at_blobs`). Skipped
+ * entirely for an injected writer (`persist: false`): a fake PDS has no blob store.
+ */
+async function gatheringAvatar(ctx: PublishContext): Promise<RecordBlob | null> {
+  if (!ctx.deps.persist || !ctx.event.logo_url) return null
+  const { gatheringAvatarBlob } = await import('./blobs')
+  return gatheringAvatarBlob({
+    eventId: ctx.event.id,
+    actorDid: ctx.actorDid,
+    callerUserId: ctx.callerUserId,
+    url: ctx.event.logo_url,
+    reason: `publish gathering "${ctx.event.name}": upload its logo as the account avatar`,
+  })
 }
 
 /** The gathering account's `app.bsky.actor.profile` alone (see `writeGatheringProfile`). */
@@ -948,6 +971,10 @@ export async function loadSessionBundles(
     : await ctx.sql<SessionRow[]>`
         select ${sessionSelect(ctx.sql)} from sessions
         where event_id = ${ctx.event.id} and status = 'scheduled' and time_slot_id is not null
+          -- A whole-schedule publish skips sessions hidden by moderation (0033). The by-id
+          -- branch above is deliberately NOT filtered: cancelling an already-published hidden
+          -- session is exactly what the approvals flow needs to be able to reach.
+          and not coalesce(hidden_by_moderation, false)
         order by created_at, id
       `
   if (!sessions.length) return []

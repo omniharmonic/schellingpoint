@@ -34,7 +34,10 @@ import { WarningBox } from '@/components/WarningBox'
 import { DashboardLayout } from '@/components/DashboardLayout'
 import { EditSessionModal } from '@/components/EditSessionModal'
 import { ManageCohostsSection } from '@/components/ManageCohostsSection'
+import { SessionMerge } from '@/components/SessionMerge'
 import { AddToCalendar } from '@/components/AddToCalendar'
+import { ReportButton } from '@/components/ReportButton'
+import { HostSessionAnalytics } from '@/components/HostSessionAnalytics'
 import { RSVPButton } from '@/components/RSVPButton'
 import { SessionFeedback } from '@/components/SessionFeedback'
 import { SessionResources } from '@/components/SessionResources'
@@ -575,8 +578,22 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
                     <p className="italic text-muted-foreground">No description yet.</p>
                   )}
                 </div>
+                {session.required_features.length > 0 && (
+                  <div className="mt-4 border-t pt-4" data-testid="session-required-features">
+                    <p className="text-xs font-medium text-muted-foreground">What the room needs</p>
+                    <div className="mt-1.5 flex flex-wrap gap-1.5">
+                      {session.required_features.map((feature) => (
+                        <Badge key={feature} variant="muted">{feature}</Badge>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </CardContent>
             </Card>
+
+            {(viewer.is_host || viewer.is_cohost || viewer.is_organizer) && (
+              <HostSessionAnalytics eventSlug={event.slug} sessionId={sessionId} />
+            )}
 
             {sessionHasStarted && <SessionFeedback sessionId={sessionId} eventSlug={event.slug} />}
           </div>
@@ -674,6 +691,16 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
                     />
                   </div>
                 )}
+                {!viewer.is_host && (
+                  <ReportButton
+                    eventSlug={event.slug}
+                    subjectKind="session"
+                    sessionId={sessionId}
+                    subjectLabel="this session"
+                    variant="outline"
+                    className="w-full justify-start text-muted-foreground"
+                  />
+                )}
                 {viewer.is_host && !showWithdrawConfirm && (
                   <Button
                     className="w-full justify-start text-destructive hover:bg-destructive/10 hover:text-destructive"
@@ -713,6 +740,17 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
               signedIn={!!user}
               userRsvpStatus={session.my_rsvp?.status ?? null}
             />
+
+            {(viewer.is_host || viewer.is_cohost || viewer.is_organizer || session.merged_into) && (
+              <SessionMerge
+                eventSlug={event.slug}
+                sessionId={sessionId}
+                sessionTitle={session.title}
+                isHost={viewer.is_host}
+                canRead={viewer.is_host || viewer.is_cohost || viewer.is_organizer}
+                mergedInto={session.merged_into}
+              />
+            )}
 
             {(viewer.is_host || viewer.is_cohost || viewer.is_organizer) && (
               <ManageCohostsSection

@@ -1,7 +1,7 @@
 'use client'
 
 import * as React from 'react'
-import { Calendar, ChevronDown, Download, ExternalLink } from 'lucide-react'
+import { Calendar, CalendarClock, ChevronDown, Download, ExternalLink, Rss } from 'lucide-react'
 import { Button, type ButtonProps } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -75,6 +75,11 @@ export function AddToCalendar({
     window.location.href = `/api/v1/events/${eventSlug}/sessions/${session.id}/calendar`
   }
 
+  const handleSubscribe = () => {
+    const url = `${origin}/api/v1/events/${eventSlug}/calendar?subscribe=true`
+    window.location.href = url.replace(/^https?:/, 'webcal:')
+  }
+
   const iconOnly = variant === 'icon'
 
   return (
@@ -114,6 +119,15 @@ export function AddToCalendar({
           <Download className="mr-2 h-4 w-4" aria-hidden />
           Download .ics
         </DropdownMenuItem>
+        {/*
+          A download is a snapshot; a subscription keeps up. The gathering feed is the published
+          schedule, so it needs no credential — the personal one (your saved sessions) lives
+          behind a revocable key in Account → Notifications.
+        */}
+        <DropdownMenuItem onClick={handleSubscribe}>
+          <Rss className="mr-2 h-4 w-4" aria-hidden />
+          Subscribe to this schedule
+        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   )
@@ -143,6 +157,31 @@ export function ExportScheduleButton({
     <Button variant={variant} size={size} className={className} onClick={handleDownload} title={`Download the ${eventName} schedule as .ics`}>
       <Download className="mr-2 h-4 w-4" aria-hidden />
       {favoritesOnly ? 'Export my schedule' : 'Export full schedule'}
+    </Button>
+  )
+}
+
+/**
+ * "Subscribe" for a whole gathering (MT §12.8): the published schedule as a living calendar
+ * rather than a snapshot, so a moved session moves in the subscriber's calendar too. `webcal:`
+ * is what calendar apps register for; the same URL over https serves the file for anything else.
+ */
+export function SubscribeToScheduleButton({
+  eventSlug,
+  eventName,
+  variant = 'outline',
+  size = 'default',
+  className,
+}: Omit<ExportScheduleButtonProps, 'favoritesOnly'>) {
+  const href = `/api/v1/events/${eventSlug}/calendar?subscribe=true`
+  const onSubscribe = () => {
+    const absolute = `${typeof window === 'undefined' ? '' : window.location.origin}${href}`
+    window.location.href = absolute.replace(/^https?:/, 'webcal:')
+  }
+  return (
+    <Button variant={variant} size={size} className={className} onClick={onSubscribe} title={`Subscribe to the ${eventName} schedule`}>
+      <CalendarClock className="mr-2 h-4 w-4" aria-hidden />
+      Subscribe to the schedule
     </Button>
   )
 }

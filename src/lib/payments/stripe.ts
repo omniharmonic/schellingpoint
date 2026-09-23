@@ -1,13 +1,33 @@
 import 'server-only'
 import Stripe from 'stripe'
+import {
+  NOT_CONNECTED_STATUS,
+  type CreateMerchantInput,
+  type CreateMerchantResult,
+  type MerchantGateway,
+  type MerchantReadiness,
+  type OnboardingLinkInput,
+} from './merchant'
+import type { CachedMerchantStatus } from './merchant-status'
+import type { RefundGateway } from './refunds'
 
 /**
  * Stripe is optional: without STRIPE_SECRET_KEY every payment route answers 503 and free
  * tickets keep working. Checkout metadata carries only opaque internal ids (ticket, event,
  * tier, holder account uuid) — never a DID or a name; the purchaser's email is passed only as
- * the receipt address.
+ * the receipt address. Metadata is a convenience for reading a payment in the Stripe
+ * dashboard and is never trusted on the way back in: settlement resolves
+ * `checkout_references` by session id (see db/migrations/0029).
+ *
+ * Charge model: **direct charges on the organizer's own account**. The Checkout Session is
+ * created in that account's API context (`{ stripeAccount }`), the platform's cut is
+ * `payment_intent_data.application_fee_amount`, and there is no `transfer_data` — Stripe
+ * collects its processing fees from the organizer, not from the platform. A 1% contribution
+ * is therefore 1% of revenue to the platform, never a loss.
  */
 export { formatPrice, calculatePlatformFee } from './format'
+export { NOT_CONNECTED_STATUS } from './merchant'
+export type { MerchantReadiness, MerchantGateway } from './merchant'
 
 const stripeSecretKey = process.env.STRIPE_SECRET_KEY
 
@@ -25,6 +45,21 @@ export function isStripeConfigured(): boolean {
   return stripe !== null
 }
 
+/** A key and a webhook secret: both are needed before a paid checkout may be opened. */
+export function isPaymentsActivated(): boolean {
+  return Boolean(stripe && process.env.STRIPE_WEBHOOK_SECRET)
+}
+
+/**
+ * Live or test, decided by the key itself. Webhook deliveries whose `livemode` disagrees are
+ * refused, so a sandbox destination pointed at a live deployment (or the reverse) can never
+ * settle a ticket. `null` when no key is configured.
+ */
+export function stripeKeyLivemode(): boolean | null {
+  if (!stripeSecretKey) return null
+  return /^(sk|rk)_live_/.test(stripeSecretKey)
+}
+
 /**
  * Whether checkout may fall back to charging the platform account when an
  * event has no connected Stripe account. Opt-in via env so organizers are
@@ -35,27 +70,19 @@ export function isPlatformChargeFallbackAllowed(): boolean {
 }
 
 /**
- * Create a Stripe Checkout session for one capacity hold. `expiresAt` is the hold's expiry, so
- * the session cannot be paid after the seat is released. The webhook finds the hold by
- * `metadata.ticket_id`; `tier_id` and `holder_id` let it settle a payment whose hold row was
- * already swept.
+ * The request options that put a call in the connected account's context. Everything about a
+ * direct charge — creating the session, retrieving it, expiring it, refunding it — happens
+ * here; a platform-scoped call cannot even see the session.
  */
-export async function createCheckoutSession({
-  ticketId,
-  tierId,
-  holderId,
-  expiresAt,
-  tierName,
-  priceCents,
-  platformFeeCents,
-  currency,
-  eventId,
-  eventName,
-  customerEmail,
-  stripeAccountId,
-  successUrl,
-  cancelUrl,
-}: {
+export function inAccount(connectedAccountId: string | null | undefined): Stripe.RequestOptions | undefined {
+  return connectedAccountId ? { stripeAccount: connectedAccountId } : undefined
+}
+
+// ---------------------------------------------------------------------------
+// Checkout (direct charges)
+// ---------------------------------------------------------------------------
+
+export interface CheckoutSessionInput {
   ticketId: string
   tierId: string
   holderId: string
@@ -70,79 +97,160 @@ export async function createCheckoutSession({
   stripeAccountId?: string | null
   successUrl: string
   cancelUrl: string
-}): Promise<Stripe.Checkout.Session> {
-  if (!stripe) {
-    throw new Error('Stripe is not configured')
+}
+
+/**
+ * The Checkout Session parameters for one capacity hold. Exported so the shape can be asserted
+ * without a Stripe key: with a connected account this must be a **direct charge** —
+ * `application_fee_amount` and *no* `transfer_data`. `transfer_data` is what makes a charge a
+ * destination charge, which bills Stripe's processing fees to the platform and can turn a 1%
+ * contribution into a loss; it must never appear here.
+ *
+ * `expiresAt` is the hold's expiry, so the session cannot be paid after the seat is released.
+ */
+export function buildCheckoutSessionParams(input: CheckoutSessionInput): Stripe.Checkout.SessionCreateParams {
+  const metadata = {
+    ticket_id: input.ticketId,
+    event_id: input.eventId,
+    tier_id: input.tierId,
+    holder_id: input.holderId,
+    platform_fee_cents: String(input.platformFeeCents),
   }
 
-  const metadata = { ticket_id: ticketId, event_id: eventId, tier_id: tierId, holder_id: holderId, platform_fee_cents: String(platformFeeCents) }
+  const paymentIntentData: Stripe.Checkout.SessionCreateParams.PaymentIntentData = { metadata }
+  if (input.stripeAccountId && input.platformFeeCents > 0) {
+    // Direct charge: the organizer's account is the merchant of record and pays Stripe's
+    // processing fees; the platform's cut is this fee and nothing else.
+    paymentIntentData.application_fee_amount = input.platformFeeCents
+  }
 
-  const sessionParams: Stripe.Checkout.SessionCreateParams = {
+  return {
     mode: 'payment',
     line_items: [
       {
         price_data: {
-          currency,
-          product_data: { name: tierName, description: `Ticket for ${eventName}` },
-          unit_amount: priceCents,
+          currency: input.currency,
+          product_data: { name: input.tierName, description: `Ticket for ${input.eventName}` },
+          unit_amount: input.priceCents,
         },
         quantity: 1,
       },
     ],
-    success_url: successUrl,
-    cancel_url: cancelUrl,
-    client_reference_id: ticketId,
-    ...(customerEmail ? { customer_email: customerEmail } : {}),
+    success_url: input.successUrl,
+    cancel_url: input.cancelUrl,
+    client_reference_id: input.ticketId,
+    ...(input.customerEmail ? { customer_email: input.customerEmail } : {}),
     metadata,
-    payment_intent_data: { metadata },
+    payment_intent_data: paymentIntentData,
     // Equal to the capacity hold's expiry (src/lib/tickets CHECKOUT_HOLD_SECONDS).
-    expires_at: Math.floor(expiresAt.getTime() / 1000),
+    expires_at: Math.floor(input.expiresAt.getTime() / 1000),
   }
+}
 
-  // The fee is snapshotted when the checkout hold is created.
-  if (stripeAccountId) {
-    sessionParams.payment_intent_data = {
-      ...sessionParams.payment_intent_data,
-      application_fee_amount: platformFeeCents,
-      transfer_data: { destination: stripeAccountId },
-    }
+/** Open the session in the organizer's account context (or the platform's, for the fallback). */
+export async function createCheckoutSession(input: CheckoutSessionInput): Promise<{ id: string; url: string | null }> {
+  if (!stripe) {
+    throw new Error('Stripe is not configured')
   }
-
-  return stripe.checkout.sessions.create(sessionParams)
+  const session = await stripe.checkout.sessions.create(
+    buildCheckoutSessionParams(input),
+    inAccount(input.stripeAccountId),
+  )
+  return { id: session.id, url: session.url }
 }
 
 /**
- * Close an open Checkout session so it can no longer be paid (a holder restarting checkout).
- * Returns the session's resulting status; `complete` means it was already paid.
+ * Close an open Checkout Session so it can no longer be paid (a holder restarting checkout).
+ * Retrieval and expiry happen in the session's *original* account context — a session created
+ * on a connected account is invisible to a platform-scoped call, so the account id recorded in
+ * `checkout_references` is passed back in here.
  */
-export async function expireCheckoutSession(sessionId: string): Promise<'expired' | 'complete' | 'open'> {
+export async function expireCheckoutSession(
+  sessionId: string,
+  connectedAccountId: string | null = null,
+): Promise<'expired' | 'complete' | 'open'> {
   if (!stripe) throw new Error('Stripe is not configured')
-  const session = await stripe.checkout.sessions.retrieve(sessionId)
+  const options = inAccount(connectedAccountId)
+  const session = await stripe.checkout.sessions.retrieve(sessionId, undefined, options)
   if (session.status === 'open') {
-    const closed = await stripe.checkout.sessions.expire(sessionId)
+    const closed = await stripe.checkout.sessions.expire(sessionId, undefined, options)
     return closed.status === 'expired' ? 'expired' : closed.status === 'complete' ? 'complete' : 'open'
   }
   return session.status === 'complete' ? 'complete' : 'expired'
 }
 
-/**
- * Retrieve a checkout session by ID
- */
-export async function getCheckoutSession(sessionId: string): Promise<Stripe.Checkout.Session | null> {
+/** Retrieve a checkout session in its original account context. */
+export async function getCheckoutSession(
+  sessionId: string,
+  connectedAccountId: string | null = null,
+): Promise<Stripe.Checkout.Session | null> {
   if (!stripe) return null
 
   try {
-    return await stripe.checkout.sessions.retrieve(sessionId, {
-      expand: ['payment_intent'],
-    })
+    return await stripe.checkout.sessions.retrieve(
+      sessionId,
+      { expand: ['payment_intent'] },
+      inAccount(connectedAccountId),
+    )
   } catch {
     return null
   }
 }
 
 /**
- * Verify Stripe webhook signature
+ * Refund a direct charge **in the account that took it**. A platform-scoped call cannot see
+ * the payment at all, so the connected account id is not optional decoration.
+ *
+ * `refund_application_fee` is always stated explicitly, never left to a default: a refund
+ * does not return the platform's contribution unless someone decided it should (see
+ * `src/lib/payments/refunds.ts`, where a full refund returns it and a partial one does not).
  */
+export async function refundPayment(input: {
+  paymentIntentId: string
+  connectedAccountId: string | null
+  amountCents?: number | null
+  refundApplicationFee?: boolean
+  /** Required in practice: a retried refund must return the same refund, not send money twice. */
+  idempotencyKey?: string
+}): Promise<Stripe.Refund> {
+  if (!stripe) throw new Error('Stripe is not configured')
+  return stripe.refunds.create(
+    {
+      payment_intent: input.paymentIntentId,
+      refund_application_fee: input.refundApplicationFee ?? false,
+      ...(input.amountCents ? { amount: input.amountCents } : {}),
+    },
+    { ...inAccount(input.connectedAccountId), ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}) },
+  )
+}
+
+/** The Stripe-backed refund gateway, or null when no key is configured. */
+export function stripeRefundGateway(): RefundGateway | null {
+  if (!stripe) return null
+  return {
+    async refund(input) {
+      const refund = await refundPayment(input)
+      // `amount` is this refund; the fee reversal Stripe reports on the charge is cumulative.
+      let applicationFeeRefundedTotalCents = 0
+      if (input.refundApplicationFee && refund.charge) {
+        try {
+          const charge = await stripe!.charges.retrieve(
+            typeof refund.charge === 'string' ? refund.charge : refund.charge.id,
+            { expand: ['application_fee'] },
+            inAccount(input.connectedAccountId),
+          )
+          const fee = charge.application_fee
+          if (fee && typeof fee !== 'string') applicationFeeRefundedTotalCents = fee.amount_refunded ?? 0
+        } catch {
+          // Reporting the reversal is best effort; the refund itself already happened.
+        }
+      }
+      return { id: refund.id, amountCents: refund.amount, applicationFeeRefundedTotalCents }
+    },
+  }
+}
+
+/** Verify Stripe webhook signature against one candidate secret. */
 export function constructWebhookEvent(
   payload: string | Buffer,
   signature: string,
@@ -156,97 +264,81 @@ export function constructWebhookEvent(
 }
 
 // ---------------------------------------------------------------------------
-// Stripe Connect (Express) helpers
-// API shapes verified against docs.stripe.com/connect/onboarding/quickstart,
-// docs.stripe.com/api/accounts/login_link and stripe-node v20 typings.
+// Merchant accounts
 // ---------------------------------------------------------------------------
+//
+// Accounts v2 (`POST /v2/core/accounts`) is the intended path: a merchant configuration with
+// `card_payments` requested, `dashboard: 'full'`, and defaults of
+// `fees_collector: 'stripe'` / `losses_collector: 'stripe'` — Stripe collects its fees from
+// the merchant and carries the loss liability, which is exactly the direct-charge model.
+// Hosted onboarding is `POST /v2/core/account_links` with
+// `use_case.type: 'account_onboarding'` and `configurations: ['merchant']`.
+//
+// v2 has to be enabled for the platform. When it is not, Stripe answers the create call with
+// an invalid-request/permission error; we then fall back to the v1 equivalent,
+// `POST /v1/accounts` with `controller: { fees: { payer: 'account' }, losses: { payments:
+// 'stripe' }, stripe_dashboard: { type: 'full' }, requirement_collection: 'stripe' }`, which
+// produces an account with the same fee and loss responsibilities. `STRIPE_ACCOUNTS_API=v1`
+// forces the fallback without a round trip.
 
-export interface ConnectAccountStatus {
-  connected: boolean
-  accountId: string | null
-  chargesEnabled: boolean
-  payoutsEnabled: boolean
-  detailsSubmitted: boolean
-  requirementsDue: string[]
-  disabledReason?: string | null
+const V2_UNAVAILABLE_CODES = new Set(['feature_not_enabled', 'parameter_unknown', 'url_invalid', 'resource_missing'])
+
+function prefersV1(): boolean {
+  return process.env.STRIPE_ACCOUNTS_API === 'v1'
 }
 
-export const NOT_CONNECTED_STATUS: ConnectAccountStatus = {
-  connected: false,
-  accountId: null,
-  chargesEnabled: false,
-  payoutsEnabled: false,
-  detailsSubmitted: false,
-  requirementsDue: [],
+/** Does this Stripe error mean "v2 Accounts is not available to this platform"? */
+function isV2Unavailable(err: unknown): boolean {
+  if (!(err instanceof Stripe.errors.StripeError)) return false
+  if (err.type === 'StripeInvalidRequestError' || err.type === 'StripePermissionError') {
+    return err.code ? V2_UNAVAILABLE_CODES.has(err.code) : true
+  }
+  return false
 }
 
-/**
- * Create an Express connected account for an event.
- * POST /v1/accounts — type=express, card_payments + transfers capabilities.
- */
-export async function createConnectAccount({
-  eventId,
-  eventSlug,
-  eventName,
-  email,
-}: {
-  eventId: string
-  eventSlug: string
-  eventName: string
-  email?: string | null
-}): Promise<Stripe.Account> {
-  if (!stripe) throw new Error('Stripe is not configured')
-
-  return stripe.accounts.create({
-    type: 'express',
-    email: email || undefined,
-    capabilities: {
-      card_payments: { requested: true },
-      transfers: { requested: true },
+async function createMerchantAccountV2(input: CreateMerchantInput): Promise<CreateMerchantResult> {
+  const account = await stripe!.v2.core.accounts.create(
+    {
+      contact_email: input.email || undefined,
+      display_name: input.eventName,
+      dashboard: 'full',
+      configuration: {
+        merchant: { capabilities: { card_payments: { requested: true } } },
+      },
+      defaults: {
+        // Stripe collects its processing fees from this account and carries the loss
+        // liability: the platform's only cut is the per-checkout application fee.
+        responsibilities: { fees_collector: 'stripe', losses_collector: 'stripe' },
+      },
+      metadata: { event_id: input.eventId, event_slug: input.eventSlug },
     },
-    business_profile: {
-      name: eventName,
-    },
-    metadata: {
-      event_id: eventId,
-      event_slug: eventSlug,
-    },
-  }, { idempotencyKey: `unconference-connect-${eventId}` })
+    { idempotencyKey: `unconference-merchant-v2-${input.eventId}` },
+  )
+  return { accountId: account.id, api: 'v2' }
 }
 
-/**
- * Create a single-use hosted onboarding link for a connected account.
- * POST /v1/account_links — type=account_onboarding.
- */
-export async function createOnboardingLink({
-  accountId,
-  refreshUrl,
-  returnUrl,
-}: {
-  accountId: string
-  refreshUrl: string
-  returnUrl: string
-}): Promise<string> {
-  if (!stripe) throw new Error('Stripe is not configured')
-
-  const link = await stripe.accountLinks.create({
-    account: accountId,
-    type: 'account_onboarding',
-    refresh_url: refreshUrl,
-    return_url: returnUrl,
-  })
-  return link.url
+async function createMerchantAccountV1(input: CreateMerchantInput): Promise<CreateMerchantResult> {
+  const account = await stripe!.accounts.create(
+    {
+      email: input.email || undefined,
+      controller: {
+        // The merchant pays Stripe's fees, Stripe carries the losses, and the merchant gets
+        // the full Stripe dashboard: the v1 equivalent of the v2 responsibilities above.
+        fees: { payer: 'account' },
+        losses: { payments: 'stripe' },
+        stripe_dashboard: { type: 'full' },
+        requirement_collection: 'stripe',
+      },
+      capabilities: { card_payments: { requested: true }, transfers: { requested: true } },
+      metadata: { event_id: input.eventId, event_slug: input.eventSlug },
+    },
+    { idempotencyKey: `unconference-merchant-v1-${input.eventId}` },
+  )
+  return { accountId: account.id, api: 'v1' }
 }
 
-/**
- * Retrieve a connected account and summarise its readiness.
- * GET /v1/accounts/:id — charges_enabled, payouts_enabled, details_submitted,
- * requirements.currently_due.
- */
-export async function getConnectAccountStatus(accountId: string): Promise<ConnectAccountStatus> {
-  if (!stripe) throw new Error('Stripe is not configured')
-
-  const account = await stripe.accounts.retrieve(accountId)
+/** Readiness from the v1 account shape (works for v1 accounts, and for v2 accounts Stripe mirrors into v1). */
+function readinessFromV1(account: Stripe.Account): MerchantReadiness {
   return {
     connected: true,
     accountId: account.id,
@@ -258,16 +350,133 @@ export async function getConnectAccountStatus(accountId: string): Promise<Connec
       ...(account.requirements?.past_due ?? []),
     ].filter((v, i, arr) => arr.indexOf(v) === i),
     disabledReason: account.requirements?.disabled_reason ?? null,
+    api: 'v1',
+  }
+}
+
+/** Readiness from the v2 configuration statuses. */
+function readinessFromV2(account: Stripe.V2.Core.Account): MerchantReadiness {
+  const merchant = account.configuration?.merchant
+  const recipient = account.configuration?.recipient
+  const entries = account.requirements?.entries ?? []
+  return {
+    connected: true,
+    accountId: account.id,
+    chargesEnabled: merchant?.capabilities?.card_payments?.status === 'active',
+    payoutsEnabled: recipient?.capabilities?.stripe_balance?.payouts?.status === 'active',
+    // v2 reports outstanding collection per requirement entry rather than a single flag.
+    detailsSubmitted: entries.length === 0,
+    requirementsDue: entries
+      .map((entry) => entry.description ?? '')
+      .filter((value, index, all) => value !== '' && all.indexOf(value) === index),
+    disabledReason: null,
+    api: 'v2',
   }
 }
 
 /**
- * Create an Express Dashboard login link for a connected account.
- * POST /v1/accounts/:id/login_links (stripe-node: accounts.createLoginLink).
+ * The Stripe-backed merchant gateway, or null when no key is configured. Onboarding is
+ * always Stripe-hosted; this application never sends a business detail it was not given by
+ * the organizer themselves.
  */
-export async function createDashboardLoginLink(accountId: string): Promise<string> {
-  if (!stripe) throw new Error('Stripe is not configured')
+export function stripeMerchantGateway(): MerchantGateway | null {
+  if (!stripe) return null
+  const client = stripe
+  return {
+    async createAccount(input: CreateMerchantInput): Promise<CreateMerchantResult> {
+      if (prefersV1()) return createMerchantAccountV1(input)
+      try {
+        return await createMerchantAccountV2(input)
+      } catch (err) {
+        if (!isV2Unavailable(err)) throw err
+        console.warn('[stripe] Accounts v2 is unavailable on this platform; creating a v1 merchant account instead')
+        return createMerchantAccountV1(input)
+      }
+    },
 
-  const link = await stripe.accounts.createLoginLink(accountId)
-  return link.url
+    async onboardingLink(input: OnboardingLinkInput): Promise<string> {
+      if (!prefersV1()) {
+        try {
+          const link = await client.v2.core.accountLinks.create({
+            account: input.accountId,
+            use_case: {
+              type: 'account_onboarding',
+              account_onboarding: {
+                configurations: ['merchant'],
+                refresh_url: input.refreshUrl,
+                return_url: input.returnUrl,
+              },
+            },
+          })
+          return link.url
+        } catch (err) {
+          if (!isV2Unavailable(err)) throw err
+        }
+      }
+      const link = await client.accountLinks.create({
+        account: input.accountId,
+        type: 'account_onboarding',
+        refresh_url: input.refreshUrl,
+        return_url: input.returnUrl,
+      })
+      return link.url
+    },
+
+    async readiness(accountId: string): Promise<MerchantReadiness> {
+      try {
+        return readinessFromV1(await client.accounts.retrieve(accountId))
+      } catch (err) {
+        // A v2-only account is not always visible through v1; ask v2 before giving up.
+        try {
+          const account = await client.v2.core.accounts.retrieve(accountId, {
+            include: ['configuration.merchant', 'configuration.recipient', 'requirements'],
+          })
+          return readinessFromV2(account)
+        } catch {
+          throw err
+        }
+      }
+    },
+
+    async dashboardLink(accountId: string): Promise<string> {
+      const link = await client.accounts.createLoginLink(accountId)
+      return link.url
+    },
+  }
+}
+
+/**
+ * Readiness for an event's account, or `NOT_CONNECTED_STATUS` when there is none.
+ *
+ * A live read from Stripe is authoritative. When it cannot be made — no key, or Stripe is
+ * unreachable — what `account.updated` last told us about the account is used instead
+ * (`cached`), so a merchant Stripe has already suspended is not treated as healthy just
+ * because we could not ask. With neither, the answer is `null`: unknown, and the readiness
+ * gate refuses rather than guesses.
+ */
+export async function readMerchantReadiness(
+  gateway: MerchantGateway | null,
+  accountId: string | null,
+  cached?: CachedMerchantStatus | null,
+): Promise<MerchantReadiness | null> {
+  if (!accountId) return NOT_CONNECTED_STATUS
+  if (gateway) {
+    try {
+      return await gateway.readiness(accountId)
+    } catch {
+      // Fall through to whatever Stripe last told us.
+    }
+  }
+  if (cached && cached.chargesEnabled !== null && cached.payoutsEnabled !== null) {
+    return {
+      connected: true,
+      accountId,
+      chargesEnabled: cached.chargesEnabled,
+      payoutsEnabled: cached.payoutsEnabled,
+      detailsSubmitted: cached.chargesEnabled,
+      requirementsDue: [],
+      api: null,
+    }
+  }
+  return null
 }

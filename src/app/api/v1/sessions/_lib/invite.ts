@@ -2,7 +2,7 @@ import 'server-only'
 import { sql } from '@/lib/db'
 
 export interface InvitePreview {
-  status: 'pending' | 'accepted' | 'expired' | 'revoked'
+  status: 'pending' | 'accepted' | 'declined' | 'expired' | 'revoked'
   session_id: string
   event_slug: string
   event_name: string

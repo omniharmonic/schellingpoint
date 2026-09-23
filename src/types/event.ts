@@ -101,6 +101,12 @@ export interface EventRow {
   /** Migration 0026: attendance voting (design §11), off by default; fresh credits per member. */
   attendance_voting_enabled?: boolean;
   attendance_credits?: number;
+  /** Migration 0034: the gathering's own code of conduct (MT §12.19) and the check-in vote gate (MT §12.14). */
+  code_of_conduct_url?: string | null;
+  require_conduct_acceptance?: boolean;
+  checkin_gates_voting?: boolean;
+  /** Migration 0030: move through the phases on the configured dates (MT §12.1). Off by default. */
+  auto_lifecycle?: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -153,7 +159,14 @@ export interface Event {
   map: EventMapView | null;
   /** Attendance voting (design §11): opt-in per gathering, with its own fresh credit budget. */
   attendanceVotingEnabled: boolean;
+  /** Migration 0030: automatic phase transitions on the configured dates. */
+  autoLifecycle: boolean;
   attendanceCredits: number;
+  /** The gathering's own code of conduct (MT §12.19), and whether joining requires accepting it. */
+  codeOfConductUrl: string | null;
+  requireConductAcceptance: boolean;
+  /** MT §12.14: only people checked in at the door may vote in the attendance round. */
+  checkinGatesVoting: boolean;
 }
 
 // Event member relationship
@@ -205,6 +218,10 @@ export function transformEventRow(row: EventRow): Event {
     map: row.map ?? null,
     attendanceVotingEnabled: row.attendance_voting_enabled ?? false,
     attendanceCredits: row.attendance_credits ?? 100,
+    codeOfConductUrl: row.code_of_conduct_url ?? null,
+    requireConductAcceptance: row.require_conduct_acceptance ?? false,
+    checkinGatesVoting: row.checkin_gates_voting ?? false,
+    autoLifecycle: row.auto_lifecycle ?? false,
     // No hardcoded fallback — topics are organizer-defined.
     // Events created before organizer topics existed may have legacy defaults in the DB.
     suggestedTopics: row.suggested_topics || [],

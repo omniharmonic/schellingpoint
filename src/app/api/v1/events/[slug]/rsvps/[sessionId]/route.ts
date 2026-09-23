@@ -12,6 +12,7 @@ import {
   type EventAccess,
 } from '@/app/api/v1/sessions/_lib/access'
 import { publicRsvpFor, retractPublicRsvpFor, type AtprotoOutcome } from '@/app/api/v1/sessions/_lib/atproto'
+import { notify } from '@/lib/notifications'
 
 /**
  * PUT    /api/v1/events/[slug]/rsvps/[sessionId]  { public?: boolean } — RSVP (or join the waitlist)
@@ -19,7 +20,9 @@ import { publicRsvpFor, retractPublicRsvpFor, type AtprotoOutcome } from '@/app/
  *
  * An RSVP is app-side by default (spec §9, §10: a forward-looking co-presence graph).
  * Capacity and waitlist placement are decided by the `assign_rsvp_status` trigger (0005);
- * promotion from the waitlist by `promote_from_waitlist`. `public: true` additionally
+ * promotion from the waitlist by `promote_from_waitlist`. Whoever that trigger promotes is
+ * told here, in the same transaction — a notification is never emitted from a trigger
+ * (spec §9), which is why promotion used to be silent (inventory 8.11 / P2-5). `public: true` additionally
  * writes a `community.lexicon.calendar.rsvp` into the attendee's OWN repo (opt-in, F),
  * and cancelling retracts that record first.
  */
@@ -127,7 +130,32 @@ export async function DELETE(request: Request, { params }: Params) {
     }
   }
   if (rows[0]) {
-    await sql`delete from session_rsvps where id = ${rows[0].id} and user_id = ${accountId}`
+    await tx(async (t) => {
+      const waiting = await t<{ user_id: string }[]>`
+        select user_id from session_rsvps
+        where session_id = ${sessionId} and status = 'waitlist' and user_id <> ${accountId}
+      `
+      await t`delete from session_rsvps where id = ${rows[0].id} and user_id = ${accountId}`
+      if (!waiting.length) return
+      // `promote_from_waitlist` has already run (AFTER DELETE, same transaction): whoever
+      // was on the waitlist and now holds a seat was promoted by this cancellation.
+      const promoted = await t<{ user_id: string }[]>`
+        select user_id from session_rsvps
+        where session_id = ${sessionId} and status = 'confirmed'
+          and user_id in ${t(waiting.map((w) => w.user_id))}
+      `
+      if (!promoted.length) return
+      const [session] = await t<{ title: string }[]>`select title from sessions where id = ${sessionId}`
+      await notify(t, {
+        eventId: access.event.id,
+        userIds: promoted.map((p) => p.user_id),
+        type: 'rsvp_promoted',
+        title: `You have a place in "${session?.title ?? 'a session'}"`,
+        body: 'A place opened up and you were next on the waitlist. You are confirmed.',
+        actionUrl: `/e/${access.event.slug}/sessions/${sessionId}`,
+        data: { session_id: sessionId },
+      })
+    })
   }
   return json({ ...(await state(sessionId, accountId)), ...(atproto ? { atproto } : {}) })
 }

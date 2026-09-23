@@ -20,6 +20,7 @@ import { getEventDays, formatCalendarDate } from '@/lib/events/dates'
 import { parseTimeInTimezone } from '@/lib/events/timezone'
 import { apiFetch } from '@/lib/api/client'
 import { SkillPicker } from '@/components/SkillPicker'
+import { RequiredFeaturesField, useRoomFeatures } from '@/components/RequiredFeatures'
 import { TimePreferences, type TimePreferenceValue, type TimeWindowValue } from '@/components/TimePreferences'
 import { LocationPicker } from '@/components/map/LocationPicker'
 import { SESSION_STATUS } from '@/lib/labels'
@@ -98,6 +99,7 @@ interface EditSessionModalProps {
 export function EditSessionModal({ isOpen, onClose, session, onSave }: EditSessionModalProps) {
   const event = useEvent()
   const { tracks } = useTracks(event.slug)
+  const { vocabulary: roomFeatures } = useRoomFeatures(event.slug)
   const { toast } = useToast()
   const isOrganizer = session.viewer.is_organizer
   const canEditContent = session.viewer.can_edit_content
@@ -126,6 +128,7 @@ export function EditSessionModal({ isOpen, onClose, session, onSave }: EditSessi
       format: session.format || 'talk',
       tags: session.topic_tags,
       skills: session.skills,
+      requiredFeatures: session.required_features,
       trackId: session.track_id,
       chatUrl: session.telegram_group_url || '',
       isSelfHosted: session.is_self_hosted,
@@ -213,6 +216,7 @@ export function EditSessionModal({ isOpen, onClose, session, onSave }: EditSessi
           format: form.format,
           topic_tags: form.tags.length ? form.tags : null,
           skills: form.skills,
+          required_features: form.requiredFeatures,
           is_self_hosted: form.isSelfHosted,
         })
         if (form.isSelfHosted) {
@@ -381,6 +385,14 @@ export function EditSessionModal({ isOpen, onClose, session, onSave }: EditSessi
                 max={5}
                 label="Skills (optional, up to 5)"
                 description="From the shared skill taxonomy."
+              />
+
+              <RequiredFeaturesField
+                value={form.requiredFeatures}
+                onChange={(next) => set('requiredFeatures', next)}
+                vocabulary={roomFeatures}
+                idPrefix="edit"
+                hint="Organizers use this to put you in a room that fits. It rides along on your public proposal."
               />
 
               <fieldset className="space-y-3">

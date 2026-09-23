@@ -88,6 +88,9 @@ export type NotificationType =
   | 'admin_announcement'
   | 'new_proposal'
   | 'proposal_needs_review'
+  | 'event_published'
+  | 'proposals_open'
+  | 'rsvp_promoted'
 
 export interface NotificationTypeLabel {
   label: string
@@ -113,6 +116,9 @@ export const NOTIFICATION_TYPE: Record<NotificationType, NotificationTypeLabel> 
   admin_announcement: { label: 'Announcement', dot: 'bg-signal-cyan' },
   new_proposal: { label: 'New proposal', dot: 'bg-primary' },
   proposal_needs_review: { label: 'Proposal needs review', dot: 'bg-signal-amber' },
+  event_published: { label: 'Gathering published', dot: 'bg-success' },
+  proposals_open: { label: 'Proposals open', dot: 'bg-primary' },
+  rsvp_promoted: { label: 'Off the waitlist', dot: 'bg-success' },
 }
 
 const UNKNOWN_NOTIFICATION: NotificationTypeLabel = { label: 'Notification', dot: 'bg-muted-foreground' }
@@ -121,3 +127,55 @@ const UNKNOWN_NOTIFICATION: NotificationTypeLabel = { label: 'Notification', dot
 export function notificationType(type: string | null | undefined): NotificationTypeLabel {
   return (type && (NOTIFICATION_TYPE as Record<string, NotificationTypeLabel>)[type]) || UNKNOWN_NOTIFICATION
 }
+
+// ── Voting rounds (organizer controls, migration 0031) ───────────────────────
+
+/** Mirrors `RoundPhase` in src/lib/voting/mechanism.ts. */
+export type RoundPhaseName = 'pre-event' | 'attendance'
+
+export const ROUND_PHASE: Record<RoundPhaseName, string> = {
+  'pre-event': 'Pre-event voting',
+  attendance: 'Attendance voting',
+}
+
+/** Mirrors `RoundStatus` in src/lib/voting/rounds.ts. */
+export type RoundStatusName = 'none' | 'upcoming' | 'open' | 'closed'
+
+export const ROUND_STATUS: Record<RoundStatusName, StatusLabel> = {
+  none: { label: 'Not started', badge: 'muted' },
+  upcoming: { label: 'Scheduled', badge: 'secondary' },
+  open: { label: 'Open', badge: 'success' },
+  closed: { label: 'Sealed', badge: 'outline' },
+}
+
+/** Mirrors `round_actions.action` (migration 0031). */
+export type RoundActionName = 'open' | 'extend' | 'close'
+
+export const ROUND_ACTION: Record<RoundActionName, StatusLabel> = {
+  open: { label: 'Opened', badge: 'success' },
+  extend: { label: 'Extended', badge: 'secondary' },
+  close: { label: 'Closed', badge: 'outline' },
+}
+
+// ── Session mergers (PRD §4.4, migration 0031) ───────────────────────────────
+
+/** Mirrors `session_merge_requests.status` (migration 0031). */
+export type MergeRequestStatus = 'pending' | 'accepted' | 'declined' | 'withdrawn'
+
+export const MERGE_REQUEST_STATUS: Record<MergeRequestStatus, StatusLabel> = {
+  pending: { label: 'Awaiting an answer', badge: 'amber' },
+  accepted: { label: 'Merged', badge: 'success' },
+  declined: { label: 'Declined', badge: 'muted' },
+  withdrawn: { label: 'Withdrawn', badge: 'muted' },
+}
+
+/** Badge for a proposal that was folded into another (`sessions.merged_into`). */
+export const MERGED_SESSION: StatusLabel = { label: 'Merged', badge: 'muted' }
+
+/**
+ * The one sentence the merger UI says about votes. The PRD's ×1.1 collaboration bonus is not
+ * applied: a bonus needs the two ballot sets to be told apart from the people behind them, and
+ * after a round closes the ballot key is gone (spec §5.4). Combining what is there, once per
+ * ballot token, is the honest arithmetic.
+ */
+export const MERGE_VOTE_COPY = 'Votes combine; no bonus, because votes are unlinkable.'

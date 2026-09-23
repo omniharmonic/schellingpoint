@@ -36,6 +36,7 @@ interface TranscriptView {
   language: string | null
   visibility: 'members' | 'organizers'
   summary: string | null
+  summary_edited_at: string | null
   created_at: string
   text: string
 }
@@ -45,6 +46,8 @@ interface TranscriptResponse {
   visibility: 'members' | 'organizers'
   tier: 'members' | 'organizers' | null
   can_manage: boolean
+  /** Organizers only: the summary is theirs to edit (design §10.3). */
+  can_edit_summary?: boolean
   transcript: TranscriptView | null
   restricted?: boolean
 }
@@ -99,6 +102,8 @@ export function TranscriptPanel({ sessionId, eventSlug, sessionTitle, canManage 
   const [dialogOpen, setDialogOpen] = React.useState(false)
   const [confirmRemove, setConfirmRemove] = React.useState(false)
   const [removing, setRemoving] = React.useState(false)
+  const [summaryDraft, setSummaryDraft] = React.useState<string | null>(null)
+  const [savingSummary, setSavingSummary] = React.useState(false)
 
   const load = React.useCallback(async () => {
     try {
@@ -124,6 +129,21 @@ export function TranscriptPanel({ sessionId, eventSlug, sessionTitle, canManage 
   if (hidden || !data) return null
   const manage = canManage && data.can_manage
   if (!data.transcript && (!manage || !data.enabled)) return null
+
+  /** Organizers edit what the model wrote (design §10.3); members then read the edit. */
+  const saveSummary = async (text: string) => {
+    setSavingSummary(true)
+    try {
+      await apiFetch(`/api/v1/sessions/${sessionId}/transcript`, { method: 'PATCH', json: { summary: text.trim() ? text : null } })
+      toast({ title: text.trim() ? 'Summary saved' : 'Summary cleared', variant: 'success' })
+      setSummaryDraft(null)
+      await load()
+    } catch (e) {
+      toast({ title: 'That did not save', description: e instanceof Error ? e.message : undefined, variant: 'destructive' })
+    } finally {
+      setSavingSummary(false)
+    }
+  }
 
   const remove = async () => {
     setRemoving(true)
@@ -196,12 +216,39 @@ export function TranscriptPanel({ sessionId, eventSlug, sessionTitle, canManage 
             No transcript yet. Add one so members can search and revisit what was said. It stays inside this gathering — it is never published.
           </p>
         )}
-        {data.transcript?.summary && (
+        {(data.transcript?.summary || (data.can_edit_summary && data.transcript)) && (
           <section className="rounded-xl border bg-muted/40 p-4" aria-labelledby={`summary-${sessionId}`}>
-            <h3 id={`summary-${sessionId}`} className="mb-2 flex items-center gap-2 text-sm font-semibold">
-              Summary <Badge variant="muted">Generated</Badge>
+            <h3 id={`summary-${sessionId}`} className="mb-2 flex flex-wrap items-center gap-2 text-sm font-semibold">
+              Summary <Badge variant="muted">{data.transcript?.summary_edited_at ? 'Edited by an organizer' : 'Generated'}</Badge>
             </h3>
-            <div className="space-y-2 whitespace-pre-wrap text-sm leading-relaxed">{data.transcript.summary}</div>
+            {summaryDraft !== null ? (
+              <form
+                className="space-y-2"
+                onSubmit={(e) => {
+                  e.preventDefault()
+                  void saveSummary(summaryDraft)
+                }}
+              >
+                <Label htmlFor={`summary-edit-${sessionId}`} className="sr-only">Session summary</Label>
+                <Textarea id={`summary-edit-${sessionId}`} rows={10} maxLength={8000} value={summaryDraft} onChange={(e) => setSummaryDraft(e.target.value)} />
+                <p className="text-xs text-muted-foreground">Members read this. Saving an empty summary clears it.</p>
+                <div className="flex flex-wrap gap-2">
+                  <Button type="submit" size="sm" loading={savingSummary}>Save summary</Button>
+                  <Button type="button" size="sm" variant="outline" disabled={savingSummary} onClick={() => setSummaryDraft(null)}>Cancel</Button>
+                </div>
+              </form>
+            ) : (
+              <>
+                <div className="space-y-2 whitespace-pre-wrap text-sm leading-relaxed">
+                  {data.transcript?.summary || <span className="text-muted-foreground">No summary yet. Generate one from the Knowledge page, or write one here.</span>}
+                </div>
+                {data.can_edit_summary && (
+                  <Button className="mt-3" size="sm" variant="outline" onClick={() => setSummaryDraft(data.transcript?.summary ?? '')}>
+                    Edit summary
+                  </Button>
+                )}
+              </>
+            )}
           </section>
         )}
         {data.transcript && (

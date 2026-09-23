@@ -76,6 +76,10 @@ export async function rankEventChunks(
     join sessions s on s.id = c.session_id
     join events e on e.id = c.event_id
     where c.event_id = ${eventId} and c.embedding is not null and c.embedding_model = ${options.model}
+      -- A session hidden by moderation is out of search too, including the MCP server's
+      -- (migration 0033): hiding a session that must not be read and then answering questions
+      -- out of its transcript would defeat the hiding.
+      and not coalesce(s.hidden_by_moderation, false)
       ${tierPredicate(options.tier)}
   `
   const scored: RankedChunk[] = []

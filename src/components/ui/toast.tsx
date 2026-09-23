@@ -134,6 +134,10 @@ function Toaster({ className }: { className?: string }) {
 
   return (
     <div
+      // A bare div is `role=generic`, which may not carry aria-label at all (axe:
+      // aria-prohibited-attr). `region` is what a toast viewport actually is, and it is what
+      // Radix's own ToastViewport uses.
+      role="region"
       aria-label="Notifications"
       className={cn(
         'pointer-events-none fixed inset-x-4 bottom-4 z-[60] flex flex-col gap-2 sm:inset-x-auto sm:right-6 sm:bottom-6 sm:w-96',

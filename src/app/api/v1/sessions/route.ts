@@ -1,9 +1,9 @@
-import { sql, asAccount, dbErrorResponse } from '@/lib/db'
+import { sql, asAccount, dbErrorResponse, pgErrorCode, pgMessage } from '@/lib/db'
 import { assertSameOrigin, requireViewer } from '@/lib/auth/viewer'
-import { validateApiKey } from '@/lib/api/auth'
+import { resolvePublicEvent } from '@/lib/api/auth'
 import { notify } from '@/lib/notifications'
 import { validateSkillUris } from '@/lib/atproto/skills'
-import { apiSuccess, unauthorized, badRequest, notFound, methodNotAllowed, parseIncludes } from '@/lib/api/response'
+import { badRequest, methodNotAllowed } from '@/lib/api/response'
 import {
   ensurePublicMembership,
   isUuid,
@@ -16,45 +16,32 @@ import {
 import { FieldError, parseSessionFields, parseTimePreference } from './_lib/validate'
 import { publishProposalFor, type AtprotoOutcome } from './_lib/atproto'
 import { reconcileTimePreference, saveTimePreference } from './_lib/time-preference'
-import { partnerSessions } from './_lib/partner'
-
-const VALID_INCLUDES = ['host', 'track', 'venue', 'timeslot', 'cohosts']
-const VALID_STATUSES = ['pending', 'approved', 'rejected', 'scheduled']
+import { DAY_REGEX, publicJson, publishedSessions } from '@/app/api/v1/schedule/public-read'
+import { proposalLimitMessage, proposalQuota, quotaOf } from '@/lib/sessions/quota'
 
 /**
- * GET /api/v1/sessions?event=<slug> — partner read API (x-api-key). Public or unlisted,
- * non-draft events only; R9-filtered like every other read (no vote counts, no free-text
- * host names, no attendee-only details).
+ * GET /api/v1/sessions?event=<slug>[&day=YYYY-MM-DD][&track=<id>] — the gathering's published
+ * sessions. PUBLIC and keyless: the shared-key partner API is gone (spec §2), and this endpoint
+ * now answers from exactly the code path the public schedule serves (`publishedSessions`), so it
+ * can never show more than the gathering has already written to the network.
+ *
+ *   { data: PublicSession[], count }   — see docs/api-guide.md and ../schedule/public-read.ts
+ *
+ * Public and unlisted gatherings only, never a draft; unknown or private slugs answer 404.
  */
 export async function GET(request: Request) {
-  if (!validateApiKey(request)) return unauthorized()
-
-  const result = parseIncludes(request, VALID_INCLUDES)
-  if ('error' in result) return result.error
-
   const url = new URL(request.url)
-  const slug = url.searchParams.get('event')?.trim()
-  if (!slug) return badRequest('event query parameter (event slug) is required')
+  const day = url.searchParams.get('day')
+  if (day && !DAY_REGEX.test(day)) return badRequest('Invalid day format. Expected YYYY-MM-DD.')
+  const trackId = url.searchParams.get('track')?.trim() || null
+  if (trackId && !isUuid(trackId)) return badRequest('Invalid track id. Expected a UUID.')
 
-  let statuses = ['approved', 'scheduled']
-  const statusParam = url.searchParams.get('status')
-  if (statusParam) {
-    const requested = statusParam.split(',').map((s) => s.trim())
-    const invalid = requested.filter((s) => !VALID_STATUSES.includes(s))
-    if (invalid.length > 0) {
-      return badRequest(`Invalid status(es): ${invalid.join(', ')}. Valid options: ${VALID_STATUSES.join(', ')}`)
-    }
-    statuses = requested
-  }
+  const resolved = await resolvePublicEvent(request)
+  if ('error' in resolved) return resolved.error
+  const { event } = resolved
 
-  const events = await sql<{ id: string }[]>`
-    select id from events
-    where slug = ${slug} and visibility in ('public', 'unlisted') and status <> 'draft'
-  `
-  if (!events[0]) return notFound('Event')
-
-  const data = await partnerSessions({ eventId: events[0].id, statuses, includes: result.includes })
-  return apiSuccess(data, data.length)
+  const sessions = await publishedSessions(event.id, { actorDid: event.actor_did, day, trackId })
+  return publicJson(sessions, sessions.length)
 }
 
 /**
@@ -65,8 +52,10 @@ export async function GET(request: Request) {
  * is the signed-in proposer, and co-hosts accept invitations themselves (spec §4.2, R9).
  *
  * The insert runs as the proposer so `enforce_event_proposal_rules` applies (window, format,
- * duration, per-person limit, approval status). Organizers are notified in the same
- * transaction. After commit the proposal is written to the proposer's own repository when
+ * duration, per-person limit, approval status). The per-person cap is checked here first so
+ * the answer is a clear 409 `ProposalLimit` with the counts, not a bare 23514; the trigger
+ * remains the authority and a race still lands on the same 409. Organizers are notified in
+ * the same transaction. After commit the proposal is written to the proposer's own repository when
  * they are custodial or have confirmed public linkage (F).
  *
  * 201 `{ id, status, atproto }`.
@@ -115,6 +104,13 @@ export async function POST(request: Request) {
   if (trackError) return trackError
 
   const accountId = viewer.accountId
+  const [{ max_proposals_per_user: cap }] = await sql<{ max_proposals_per_user: number | null }[]>`
+    select max_proposals_per_user from events where id = ${access.event.id}
+  `
+  const quota = await proposalQuota(access.event.id, accountId, cap, access.role)
+  if (quota.atLimit) {
+    return jsonError(409, proposalLimitMessage(quota), { code: 'ProposalLimit', proposals: quota })
+  }
   let created: { id: string; status: string; title: string }
   try {
     created = await asAccount(accountId, async (t) => {
@@ -151,9 +147,27 @@ export async function POST(request: Request) {
         actionUrl: inserted.status === 'pending' ? `/e/${access.event.slug}/admin/sessions` : `/e/${access.event.slug}/sessions/${inserted.id}`,
         data: { session_id: inserted.id, session_title: inserted.title },
       })
+      // The proposer's own receipt (inventory 8.3): what happens next depends on whether
+      // this gathering reviews proposals before they appear.
+      await notify(t, {
+        eventId: access.event.id,
+        userIds: [accountId],
+        type: 'session_submitted',
+        title: `Your proposal "${inserted.title}" was submitted`,
+        body: inserted.status === 'pending'
+          ? `It is with the organizers of ${access.event.name} for review. You can keep editing it until they look at it.`
+          : `It is live on ${access.event.name}. You can edit it at any time, and invite a co-host.`,
+        actionUrl: `/e/${access.event.slug}/sessions/${inserted.id}`,
+        data: { session_id: inserted.id, session_title: inserted.title },
+      })
       return inserted
     })
   } catch (e) {
+    // The trigger is the authority; a concurrent submit that hits the cap answers the same 409.
+    if (pgErrorCode(e) === '23514' && /proposal limit/i.test(pgMessage(e))) {
+      const raced = quotaOf(quota.used + 1, cap, access.role)
+      return jsonError(409, proposalLimitMessage(raced), { code: 'ProposalLimit', proposals: raced })
+    }
     const mapped = dbErrorResponse(e)
     if (mapped) return mapped
     throw e

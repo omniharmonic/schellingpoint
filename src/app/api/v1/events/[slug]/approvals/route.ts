@@ -6,6 +6,7 @@
  *        request-move   { sessionId, reason, target?: { timeSlotId, venueId? }, confirmPublicLinkage? }
  *        request-cancel { sessionId, reason, confirmPublicLinkage? }
  *        request-listing-removal { listingId, reason, confirmPublicLinkage? }
+ *        request-post-deletion   { postId, reason, confirmPublicLinkage? }   retract a feed post
  *        approve        { requestId, confirmPublicLinkage? }
  *        withdraw       { requestId }   (your own approval; withdraws the request if you raised it)
  *
@@ -19,6 +20,7 @@ import { sql } from '@/lib/db'
 import {
   approveRequest,
   listApprovalRequests,
+  requestFeedPostDeletion,
   requestListingRemoval,
   requestSessionCancel,
   requestSessionMove,
@@ -69,12 +71,14 @@ export async function POST(request: Request, { params }: Params) {
         return Response.json(await requestSessionCancel({ ...base, sessionId: str(body?.sessionId), reason: str(body?.reason), confirmPublicLinkage }), { headers: NO_STORE })
       case 'request-listing-removal':
         return Response.json(await requestListingRemoval({ ...base, listingId: str(body?.listingId), reason: str(body?.reason), confirmPublicLinkage }), { headers: NO_STORE })
+      case 'request-post-deletion':
+        return Response.json(await requestFeedPostDeletion({ ...base, postId: str(body?.postId), reason: str(body?.reason), confirmPublicLinkage }), { headers: NO_STORE })
       case 'approve':
         return Response.json(await approveRequest({ ...base, requestId: str(body?.requestId), confirmPublicLinkage }), { headers: NO_STORE })
       case 'withdraw':
         return Response.json(await withdrawApproval({ ...base, requestId: str(body?.requestId) }), { headers: NO_STORE })
       default:
-        return Response.json({ error: 'action must be one of request-move, request-cancel, request-listing-removal, approve, withdraw', field: 'action' }, { status: 400 })
+        return Response.json({ error: 'action must be one of request-move, request-cancel, request-listing-removal, request-post-deletion, approve, withdraw', field: 'action' }, { status: 400 })
     }
   } catch (e) {
     const code = (e as { code?: string })?.code

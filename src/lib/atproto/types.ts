@@ -259,10 +259,20 @@ export interface GatheringRecord {
  * The gathering account's `app.bsky.actor.profile` (borrowed, vendored under
  * `lexicons/vendor/bsky/`). Only the text fields are written: no blobs, labels or pinned post.
  */
+/** A blob as records carry it (the JSON form; `validate.ts` turns it into a `BlobRef` to check). */
+export interface RecordBlob {
+  $type: 'blob'
+  ref: { $link: string }
+  mimeType: string
+  size: number
+}
+
 export interface ActorProfileRecord {
   $type: typeof NSID.actorProfile
   displayName?: string
   description?: string
+  /** Uploaded to THIS repo by its own credential (design §14 item 1). Never a banner. */
+  avatar?: RecordBlob
   createdAt?: string
 }
 

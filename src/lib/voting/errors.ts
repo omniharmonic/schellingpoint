@@ -11,11 +11,15 @@ export type VotingErrorCode =
   | 'NotEligible'
   | 'NotMember'
   | 'TicketRequired'
+  /** The attendance round is gated on check-in at the door and this voter is not checked in. */
+  | 'CheckinRequired'
   | 'SessionNotVotable'
   | 'SessionNotHappening'
   | 'InvalidVotes'
   | 'OverBudget'
   | 'InvalidRound'
+  /** The gathering's phase does not keep a round of this kind open (organizer controls). */
+  | 'WrongPhase'
   | 'WindowNotOpen'
   | 'WindowClosed'
   | 'SelfFeedback'

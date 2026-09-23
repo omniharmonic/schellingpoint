@@ -5,7 +5,8 @@ import path from 'node:path'
 import { randomBytes } from 'node:crypto'
 import postgres from 'postgres'
 import { createTestGathering, signInWithEmail, type TestGathering } from './helpers/gathering'
-import { autoSchedule, tokenOverlap } from '../src/lib/scheduling/auto-scheduler'
+import { autoSchedule } from '../src/lib/scheduling/auto-scheduler'
+import { overlapCoefficient } from '../src/lib/scheduling/clusters'
 
 /**
  * Organizer admin (work package D) end to end against the running dev server (:3001), the local
@@ -93,9 +94,10 @@ function expectNoVoteNumbers(body: unknown, allowNullResults = false) {
 }
 
 test('the auto-scheduler separates sessions with overlapping ballot tokens and honours host blackouts', async () => {
+  // One overlap metric everywhere: the k-filtered overlap coefficient from clusters.ts.
   const shared = new Set(['aa', 'bb', 'cc', 'dd'])
-  expect(tokenOverlap(shared, new Set(['aa', 'bb', 'cc', 'dd']))).toBe(1)
-  expect(tokenOverlap(shared, new Set(['ee']))).toBe(0)
+  expect(overlapCoefficient(shared, new Set(['aa', 'bb', 'cc', 'dd'])).coefficient).toBe(1)
+  expect(overlapCoefficient(shared, new Set(['ee'])).coefficient).toBe(0)
 
   const session = (id: string, extra: Record<string, unknown> = {}) => ({
     id, title: id, duration: 60, expected_attendance: 10, status: 'approved' as const, time_slot_id: null,

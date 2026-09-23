@@ -1,7 +1,7 @@
 import { loadEnvConfig } from '@next/env'
 import Module from 'node:module'
 import path from 'node:path'
-import { randomBytes, randomUUID } from 'node:crypto'
+import { randomBytes } from 'node:crypto'
 import postgres from 'postgres'
 
 // Per-suite fixtures so no spec file depends on (or changes) the seeded gatherings.
@@ -102,7 +102,11 @@ export interface CreateTestGatheringOptions {
   withProgram?: boolean
   /** Mint the gathering's DID on the local PDS via the app's `mintGatheringActor`. */
   mintIdentity?: boolean
-  /** Account id recorded as the minting caller (defaults to a random uuid). */
+  /**
+   * Account id recorded as the minting caller. `at_credentials.created_by` references
+   * `accounts(id)` (migration 0035), so when this is not given the helper creates a throwaway
+   * account to stand in for the organizer and deletes it again in `cleanup()`.
+   */
   mintedBy?: string
 }
 
@@ -144,13 +148,22 @@ export async function createTestGathering(sql: postgres.Sql, opts: CreateTestGat
     )
     returning id
   `
+  // Deleted again in cleanup(); null whenever the caller named its own minter.
+  let throwawayMinterId: string | null = null
+
   const gathering: TestGathering = {
     id: event!.id,
     slug,
     name,
     venueIds: [],
     trackIds: [],
-    cleanup: () => cleanupGathering(sql, event!.id),
+    cleanup: async () => {
+      await cleanupGathering(sql, event!.id)
+      if (throwawayMinterId) {
+        await sql`delete from accounts where id = ${throwawayMinterId}`
+        throwawayMinterId = null
+      }
+    },
   }
 
   try {
@@ -191,10 +204,21 @@ export async function createTestGathering(sql: postgres.Sql, opts: CreateTestGat
     }
 
     if (opts.mintIdentity) {
+      let mintedBy = opts.mintedBy
+      if (!mintedBy) {
+        const suffix = randomTag(10)
+        const [minter] = await sql<{ id: string }[]>`
+          insert into accounts (did, handle, email, kind)
+          values (${`did:plc:tminter${suffix}`}, ${`t-minter-${suffix}.test`}, ${`t-minter-${suffix}@example.test`}, 'custodial')
+          returning id
+        `
+        throwawayMinterId = minter!.id
+        mintedBy = minter!.id
+      }
       const minted = await withServerOnlyShim(async () => {
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const actors = require('../../src/lib/atproto/actors') as typeof import('../../src/lib/atproto/actors')
-        return actors.mintGatheringActor(gathering.id, opts.mintedBy ?? randomUUID())
+        return actors.mintGatheringActor(gathering.id, mintedBy!)
       })
       gathering.actorDid = minted.did
       gathering.actorHandle = minted.handle

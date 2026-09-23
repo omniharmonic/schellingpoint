@@ -108,7 +108,7 @@ export interface CloseRoundResult {
 
 /* ─────────────────────────────── rows ─────────────────────────────── */
 
-interface RoundRow {
+export interface RoundRow {
   id: string
   event_id: string
   phase: string
@@ -277,6 +277,23 @@ async function openRoundIn(t: postgres.TransactionSql, eventId: string, options:
 /* ─────────────────────────────── close ─────────────────────────────── */
 
 /**
+ * Whether an allocation to session `s` is still counted when the round closes: the session is
+ * votable, or it was folded into a votable one by an accepted merger (migration 0031). A
+ * merged source stops taking NEW votes the moment the merger is accepted (`is_votable` goes
+ * false); the votes already cast for it still travel to the target, deduplicated by ballot
+ * token in step 4.
+ */
+function countable(t: postgres.TransactionSql) {
+  return t`(
+    (s.status in ('approved', 'scheduled') and s.is_votable)
+    or exists (
+      select 1 from sessions tg
+      where tg.id = s.merged_into and tg.status in ('approved', 'scheduled') and tg.is_votable
+    )
+  )`
+}
+
+/**
  * Finalize one round (spec §5.3 step 4) in ONE transaction, then publish its tally
  * best-effort. Idempotent: a finalized round returns `closed: false`.
  */
@@ -309,8 +326,7 @@ export async function closeRound(roundId: string, options: CloseRoundOptions = {
         cross join lateral jsonb_each_text(l.allocated) a
         cross join lateral (select case when a.value ~ '^[0-9]{1,6}$' then a.value::int else 0 end as votes) v
         join sessions s on s.event_id = l.event_id and s.id::text = a.key
-        where l.round_id = ${roundId} and v.votes > 0
-          and s.status in ('approved', 'scheduled') and s.is_votable
+        where l.round_id = ${roundId} and v.votes > 0 and ${countable(t)}
       ) p
       cross join vote_rounds r
       where r.id = ${roundId}
@@ -329,23 +345,37 @@ export async function closeRound(roundId: string, options: CloseRoundOptions = {
       cross join lateral jsonb_each_text(l.allocated) a
       cross join lateral (select case when a.value ~ '^[0-9]{1,6}$' then a.value::int else 0 end as votes) v
       join sessions s on s.event_id = l.event_id and s.id::text = a.key
-      where l.round_id = ${roundId} and v.votes > 0
-        and s.status in ('approved', 'scheduled') and s.is_votable
+      where l.round_id = ${roundId} and v.votes > 0 and ${countable(t)}
       order by extensions.gen_random_bytes(16)
     `
 
     // 4. Results — every session votable at close (zero voters included, so a
     //    suppressed public entry never reveals "at least one vote").
+    //
+    //    Mergers (PRD §4.4, migration 0031): a session folded into another contributes its
+    //    entries to the TARGET and gets no row of its own. One ballot token that backed both
+    //    counts once, at the larger of the two votes — after the key is destroyed a token is
+    //    all we have to say "the same person wanted both", and counting them twice would
+    //    invent a voter. The PRD's ×1.1 collaboration bonus is deliberately not applied
+    //    (spec §5, "Mergers and the vote bonus").
     await t`
       insert into vote_round_results (round_id, event_id, session_id, voters, votes, credits)
       select ${roundId}, s.event_id, s.id,
-             count(distinct e.ballot_token)::int,
-             coalesce(sum(e.votes), 0)::int,
-             coalesce(sum(e.credits), 0)::int
+             count(d.ballot_token)::int,
+             coalesce(sum(d.votes), 0)::int,
+             coalesce(sum(d.credits), 0)::int
       from sessions s
-      left join vote_entries e on e.session_id = s.id and e.round_id = ${roundId}
+      left join lateral (
+        select distinct on (e.ballot_token) e.ballot_token, e.votes, e.credits
+        from vote_entries e
+        join sessions es on es.id = e.session_id
+        where e.round_id = ${roundId}
+          and (e.session_id = s.id or es.merged_into = s.id)
+        order by e.ballot_token, e.votes desc, e.credits desc
+      ) d on true
       where s.event_id = ${round.event_id}
-        and ((s.status in ('approved', 'scheduled') and s.is_votable) or e.id is not null)
+        and s.merged_into is null
+        and ((s.status in ('approved', 'scheduled') and s.is_votable) or d.ballot_token is not null)
       group by s.event_id, s.id
     `
 
@@ -531,23 +561,35 @@ export async function organizerResults(eventId: string, options: ReadRoundOption
 }
 
 /**
- * Auto-scheduler inputs (spec §5.4): per session, total votes and the set of ballot
- * tokens (hex) that named it, for Jaccard overlap. Tokens link a participant's entries to
- * each other and to nobody. Throws `RoundOpenError` while open.
+ * Auto-scheduler inputs (spec §5.4): per session, total votes and the set of ballot tokens
+ * (hex) that named it, for the overlap coefficient the scheduler uses. Tokens link a
+ * participant's entries to each other and to nobody. Throws `RoundOpenError` while open.
+ *
+ * Merged sessions fold into their target here on the same rule the tally uses: one token
+ * counts once, at the larger of the two votes. The source disappears from the map, so the
+ * scheduler never places it and never compares its audience separately.
  */
 export async function schedulingInputs(eventId: string, options: ReadRoundOptions = {}): Promise<SchedulingInputs> {
   const round = await resolveClosedRound(eventId, options.roundId, options.phase)
   const bySession = new Map<string, { votes: number; tokens: Set<string> }>()
   if (!round) return { roundId: null, bySession }
   const rows = await sql<{ session_id: string; votes: number; token: string }[]>`
-    select session_id, votes, encode(ballot_token, 'hex') as token
-    from vote_entries where round_id = ${round.id} and event_id = ${eventId}
+    select coalesce(s.merged_into, e.session_id) as session_id, e.votes, encode(e.ballot_token, 'hex') as token
+    from vote_entries e
+    join sessions s on s.id = e.session_id
+    where e.round_id = ${round.id} and e.event_id = ${eventId}
   `
+  // Per target, the best vote each token cast for it (directly or through a merged source).
+  const byToken = new Map<string, Map<string, number>>()
   for (const r of rows) {
-    const agg = bySession.get(r.session_id) ?? { votes: 0, tokens: new Set<string>() }
-    agg.votes += r.votes
-    agg.tokens.add(r.token)
-    bySession.set(r.session_id, agg)
+    const tokens = byToken.get(r.session_id) ?? new Map<string, number>()
+    tokens.set(r.token, Math.max(tokens.get(r.token) ?? 0, r.votes))
+    byToken.set(r.session_id, tokens)
+  }
+  for (const [sessionId, tokens] of byToken) {
+    let votes = 0
+    for (const v of tokens.values()) votes += v
+    bySession.set(sessionId, { votes, tokens: new Set(tokens.keys()) })
   }
   return { roundId: round.id, bySession }
 }

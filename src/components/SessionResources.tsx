@@ -23,6 +23,7 @@ import { FilterChip } from '@/components/ui/filter-chip'
 import { ConfirmInline } from '@/components/ui/confirm-inline'
 import { useToast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api/client'
+import { ReportButton } from '@/components/ReportButton'
 import { ELLIPSIS } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
@@ -247,6 +248,17 @@ export function SessionResources({ sessionId, eventSlug, canManage }: SessionRes
                       </p>
                     </a>
                     <ExternalLink className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                    {/* Somebody has to be able to say "this link is not what it says it is". */}
+                    {!canManage && (
+                      <ReportButton
+                        eventSlug={eventSlug}
+                        subjectKind="comment"
+                        itemRef={`resource:${resource.id}`}
+                        subjectLabel={resource.title}
+                        iconOnly
+                        className="shrink-0 text-muted-foreground"
+                      />
+                    )}
                     {canManage && !isRemoving && (
                       <div className="flex shrink-0 items-center">
                         <Button

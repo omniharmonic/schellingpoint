@@ -9,12 +9,30 @@ export interface ICSEvent {
   startTime: Date
   endTime: Date
   url?: string
+  /**
+   * Minutes before the start for a VALARM ("remind me 15 minutes before"). Omit for none.
+   * Clients that ignore alarms simply skip the component, so this is safe in every export.
+   */
+  alarmMinutes?: number
 }
 
 export interface ICSCalendar {
   name: string
   events: ICSEvent[]
+  /**
+   * How often a subscribed client should re-fetch, as an ISO-8601 duration ('PT1H').
+   * Written as both REFRESH-INTERVAL (RFC 7986) and X-PUBLISHED-TTL, because the clients that
+   * matter read one or the other. Only meaningful for a subscription URL.
+   */
+  refreshInterval?: string
+  /** Shown by clients as the calendar's description. */
+  description?: string
+  /** The canonical URL of this feed (RFC 7986 SOURCE), so a client can resubscribe. */
+  source?: string
 }
+
+/** The default reminder on a session, in minutes before it starts (MT §12.8). */
+export const DEFAULT_ALARM_MINUTES = 15
 
 /**
  * Escape special characters in ICS values
@@ -93,6 +111,14 @@ function generateVEvent(event: ICSEvent): string {
     lines.push(`URL:${event.url}`)
   }
 
+  if (typeof event.alarmMinutes === 'number' && event.alarmMinutes > 0) {
+    lines.push('BEGIN:VALARM')
+    lines.push('ACTION:DISPLAY')
+    lines.push(`TRIGGER:-PT${Math.round(event.alarmMinutes)}M`)
+    lines.push(`DESCRIPTION:${escapeICS(event.title)}`)
+    lines.push('END:VALARM')
+  }
+
   lines.push('END:VEVENT')
 
   return lines.map(foldLine).join('\r\n')
@@ -108,6 +134,8 @@ export interface SessionCalendarInput {
   endTime: string | Date
   location?: string | null
   eventSlug: string
+  /** Override the 15-minute reminder; pass 0 for none. */
+  alarmMinutes?: number
 }
 
 /**
@@ -136,6 +164,7 @@ export function sessionToICSEvent(input: SessionCalendarInput, appUrl: string): 
     startTime: new Date(input.startTime),
     endTime: new Date(input.endTime),
     url,
+    alarmMinutes: input.alarmMinutes ?? DEFAULT_ALARM_MINUTES,
   }
 }
 
@@ -151,9 +180,21 @@ export function generateICS(calendar: ICSCalendar): string {
   lines.push('CALSCALE:GREGORIAN')
   lines.push('METHOD:PUBLISH')
   lines.push(`X-WR-CALNAME:${escapeICS(calendar.name)}`)
+  if (calendar.description) {
+    lines.push(`X-WR-CALDESC:${escapeICS(calendar.description)}`)
+    lines.push(`DESCRIPTION:${escapeICS(calendar.description)}`)
+  }
+  if (calendar.refreshInterval) {
+    lines.push(`REFRESH-INTERVAL;VALUE=DURATION:${calendar.refreshInterval}`)
+    lines.push(`X-PUBLISHED-TTL:${calendar.refreshInterval}`)
+  }
+  if (calendar.source) {
+    lines.push(`SOURCE;VALUE=URI:${calendar.source}`)
+    lines.push(`URL:${calendar.source}`)
+  }
 
-  const eventsICS = calendar.events.map(generateVEvent).join('\r\n')
-  lines.push(eventsICS)
+  // An empty calendar is a legal one (a person with nothing saved yet): push no blank line.
+  if (calendar.events.length) lines.push(calendar.events.map(generateVEvent).join('\r\n'))
 
   lines.push('END:VCALENDAR')
 

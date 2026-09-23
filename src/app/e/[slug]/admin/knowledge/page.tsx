@@ -12,6 +12,9 @@ import { Archive, BellRing, CheckCircle2, Cpu, Download, FileText, Loader2, Refr
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Textarea } from '@/components/ui/textarea'
 import { ConfirmInline } from '@/components/ui/confirm-inline'
 import { useToast } from '@/components/ui/toast'
 import { PageHeader } from '@/components/PageHeader'
@@ -28,7 +31,7 @@ interface CoverageSession {
   host_name: string | null
   track: string | null
   starts_at: string | null
-  transcript: { id: string; format: string; char_count: number; word_count: number; created_at: string; has_summary: boolean; visibility: string } | null
+  transcript: { id: string; format: string; char_count: number; word_count: number; created_at: string; has_summary: boolean; summary_edited: boolean; visibility: string } | null
 }
 
 interface Coverage {
@@ -38,6 +41,7 @@ interface Coverage {
   totals: { sessions: number; with_transcript: number; without_transcript: number; words: number; chunks: number; embedded: number }
   jobs: Array<{ id: string; kind: 'embed' | 'summaries'; status: string; processed: number; last_error: string | null; updated_at: string }>
   themes: { generated_at: string; model: string; themes: Array<{ title: string; summary: string; sessions: string[] }> } | null
+  themes_edited_at: string | null
   providers: {
     embeddings:
       | { configured: true; provider: string; model: string; label: string; local: boolean; error: string | null }
@@ -78,6 +82,9 @@ export default function AdminKnowledgePage() {
   const [error, setError] = React.useState<string | null>(null)
   const [confirmRequest, setConfirmRequest] = React.useState(false)
   const [working, setWorking] = React.useState<'request' | 'embed' | 'summaries' | null>(null)
+  // Design §10.3: what a model generated is a draft. Organizers edit it; members read the edit.
+  const [editingThemes, setEditingThemes] = React.useState<Array<{ title: string; summary: string; sessions: string[] }> | null>(null)
+  const [savingThemes, setSavingThemes] = React.useState(false)
   const base = `/api/v1/events/${event.slug}/knowledge`
   const organizer = isAdmin || role === 'moderator' || can('viewAnalytics')
 
@@ -124,6 +131,20 @@ export default function AdminKnowledgePage() {
       toast({ title: 'That did not work', description: e instanceof Error ? e.message : undefined, variant: 'destructive' })
     } finally {
       setWorking(null)
+    }
+  }
+
+  const saveThemes = async (next: Array<{ title: string; summary: string; sessions: string[] }>) => {
+    setSavingThemes(true)
+    try {
+      await apiFetch(`${base}/summaries`, { method: 'PATCH', json: { themes: next.filter((t) => t.title.trim() && t.summary.trim()) } })
+      toast({ title: 'Themes saved', description: 'Members read what you edited.', variant: 'success' })
+      setEditingThemes(null)
+      await load()
+    } catch (e) {
+      toast({ title: 'That did not save', description: e instanceof Error ? e.message : undefined, variant: 'destructive' })
+    } finally {
+      setSavingThemes(false)
     }
   }
 
@@ -281,20 +302,70 @@ export default function AdminKnowledgePage() {
         <Card>
           <CardHeader>
             <CardTitle className="text-lg">Themes</CardTitle>
-            <CardDescription>Generated {new Date(data.themes.generated_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} from the session transcripts. Members-only.</CardDescription>
+            <CardDescription>
+              Generated {new Date(data.themes.generated_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} from the session transcripts, and yours to edit —
+              members read what is here. Members-only, never published.
+              {data.themes_edited_at ? ` Edited ${new Date(data.themes_edited_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}.` : ''}
+            </CardDescription>
           </CardHeader>
-          <CardContent className="grid gap-4 sm:grid-cols-2">
-            {data.themes.themes.map((t) => (
-              <div key={t.title} className="rounded-xl border p-4">
-                <p className="font-medium">{t.title}</p>
-                <p className="mt-1 text-sm text-muted-foreground">{t.summary}</p>
-                {t.sessions.length > 0 && (
-                  <p className="mt-2 text-xs text-muted-foreground">
-                    {t.sessions.map((id) => data.sessions.find((s) => s.id === id)?.title).filter(Boolean).join(' · ')}
-                  </p>
-                )}
-              </div>
-            ))}
+          <CardContent className="space-y-4">
+            {editingThemes ? (
+              <form
+                className="space-y-4"
+                onSubmit={(e) => {
+                  e.preventDefault()
+                  void saveThemes(editingThemes)
+                }}
+              >
+                {editingThemes.map((t, i) => (
+                  <div key={i} className="space-y-2 rounded-xl border p-4">
+                    <Label htmlFor={`theme-title-${i}`}>Theme {i + 1}</Label>
+                    <Input
+                      id={`theme-title-${i}`}
+                      value={t.title}
+                      maxLength={120}
+                      onChange={(e) => setEditingThemes((prev) => prev!.map((x, j) => (j === i ? { ...x, title: e.target.value } : x)))}
+                    />
+                    <Textarea
+                      id={`theme-summary-${i}`}
+                      aria-label={`Summary of theme ${i + 1}`}
+                      rows={3}
+                      maxLength={2000}
+                      value={t.summary}
+                      onChange={(e) => setEditingThemes((prev) => prev!.map((x, j) => (j === i ? { ...x, summary: e.target.value } : x)))}
+                    />
+                    <Button type="button" size="sm" variant="ghost" onClick={() => setEditingThemes((prev) => prev!.filter((_, j) => j !== i))}>
+                      Remove this theme
+                    </Button>
+                  </div>
+                ))}
+                <div className="flex flex-wrap gap-2">
+                  <Button type="submit" loading={savingThemes}>Save themes</Button>
+                  <Button type="button" variant="outline" disabled={savingThemes} onClick={() => setEditingThemes(null)}>Cancel</Button>
+                  <Button type="button" variant="ghost" disabled={savingThemes} onClick={() => setEditingThemes((prev) => [...(prev ?? []), { title: '', summary: '', sessions: [] }])}>
+                    Add a theme
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">A theme with no title or no summary is dropped. Saving replaces what members read.</p>
+              </form>
+            ) : (
+              <>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  {data.themes.themes.map((t) => (
+                    <div key={t.title} className="rounded-xl border p-4">
+                      <p className="font-medium">{t.title}</p>
+                      <p className="mt-1 text-sm text-muted-foreground">{t.summary}</p>
+                      {t.sessions.length > 0 && (
+                        <p className="mt-2 text-xs text-muted-foreground">
+                          {t.sessions.map((id) => data.sessions.find((s) => s.id === id)?.title).filter(Boolean).join(' · ')}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                <Button variant="outline" size="sm" onClick={() => setEditingThemes(data.themes!.themes.map((t) => ({ ...t })))}>Edit themes</Button>
+              </>
+            )}
           </CardContent>
         </Card>
       )}

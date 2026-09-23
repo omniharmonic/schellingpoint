@@ -21,11 +21,12 @@ import {
   type VotingMechanism,
 } from './mechanism'
 import { isHappeningNow } from './attendance'
+import { checkinGate } from '@/lib/checkin/eligibility'
 import { isUuid, roundState, toRoundInfo, WRITABLE_STATUS, type RoundInfo, type RoundStatus } from './rounds'
 
 export interface Eligibility {
   eligible: boolean
-  code?: 'NotMember' | 'TicketRequired'
+  code?: 'NotMember' | 'TicketRequired' | 'CheckinRequired'
   reason?: string
   /** The member's credit override (event_members.vote_credits, else a voting ticket tier's), if any. */
   override: number | null
@@ -62,8 +63,17 @@ interface LockedRound {
   now: string
 }
 
-/** Eligibility (spec §5.5): an event member; for a ticketed event, a confirmed ticket in a voting tier. */
-export async function checkEligibility(db: Sql, eventId: string, accountId: string): Promise<Eligibility> {
+/**
+ * Eligibility (spec §5.5): an event member; for a ticketed event, a confirmed ticket in a voting tier.
+ * In the attendance round a gathering may additionally require that the voter has been checked in
+ * at the door (MT §12.14) — a no-op unless `events.checkin_gates_voting` is on.
+ */
+export async function checkEligibility(
+  db: Sql,
+  eventId: string,
+  accountId: string,
+  phase: RoundPhase = 'pre-event',
+): Promise<Eligibility> {
   const [row] = await db<{
     role: string | null
     member_credits: number | null
@@ -99,6 +109,10 @@ export async function checkEligibility(db: Sql, eventId: string, accountId: stri
       reason: 'Voting at this gathering needs a confirmed ticket that includes voting.',
       override,
     }
+  }
+  if (phase === 'attendance') {
+    const gate = await checkinGate(db, eventId, accountId)
+    if (!gate.eligible) return { eligible: false, code: gate.code!, reason: gate.reason!, override }
   }
   return { eligible: true, override }
 }
@@ -147,7 +161,7 @@ export async function getAllocation(eventId: string, accountId: string, phase: R
   const [eventRow] = await sql<{ status: string; vote_credits_per_user: number | null; attendance_credits: number | null }[]>`
     select status, vote_credits_per_user, attendance_credits from events where id = ${eventId}
   `
-  const eligibility = await checkEligibility(sql, eventId, accountId)
+  const eligibility = await checkEligibility(sql, eventId, accountId, phase)
   const round = state.round
   const baseCredits = round?.credits ?? (phase === 'attendance' ? eventRow?.attendance_credits : eventRow?.vote_credits_per_user) ?? 0
   const budget = budgetFor(phase, baseCredits, eligibility.override)
@@ -240,7 +254,7 @@ async function setAllocationIn(
   }
   const mechanism = open.mechanism as VotingMechanism
 
-  const eligibility = await checkEligibility(t, eventId, accountId)
+  const eligibility = await checkEligibility(t, eventId, accountId, phase)
   if (!eligibility.eligible) {
     throw new VotingError(eligibility.reason ?? 'You cannot vote in this gathering.', 403, eligibility.code ?? 'NotEligible')
   }

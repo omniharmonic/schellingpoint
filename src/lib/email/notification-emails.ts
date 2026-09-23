@@ -17,6 +17,8 @@ export interface EmailContent {
   subject: string
   html: string
   text: string
+  /** Extra SMTP headers (RFC 8058 unsubscribe); pass straight to `sendMail`. */
+  headers?: Record<string, string>
 }
 
 // Common event info interface
@@ -40,89 +42,6 @@ function eventParams(event: EventInfo): Pick<BaseEmailParams, 'eventName' | 'eve
 function subjectFor(text: string, event: EventInfo): string {
   // Subjects are plain text; strip line breaks so a title cannot inject headers.
   return `${text} — ${event.name}`.replace(/[\r\n]+/g, ' ')
-}
-
-// =============================================================================
-// SESSION STATUS EMAILS
-// =============================================================================
-
-interface SessionStatusEmailParams {
-  event: EventInfo
-  hostName: string
-  sessionTitle: string
-  sessionId: string
-}
-
-export function buildSessionApprovedEmail(params: SessionStatusEmailParams): EmailContent {
-  const { event, hostName, sessionTitle, sessionId } = params
-  const ctaUrl = `${appUrl()}/e/${encodeURIComponent(event.slug)}/sessions/${encodeURIComponent(sessionId)}`
-
-  const html = buildBaseEmail({
-    ...eventParams(event),
-    previewText: `Your session "${sessionTitle}" has been approved!`,
-    heading: 'Session Approved!',
-    bodyHtml: `
-      <p style="margin: 0 0 16px 0;">Hey ${escapeHtml(hostName)},</p>
-      <p style="margin: 0 0 16px 0;">Great news! Your session has been approved and is now visible to attendees:</p>
-      <p style="margin: 0 0 16px 0; font-weight: 600; font-size: 17px; color: #ffffff;">"${escapeHtml(sessionTitle)}"</p>
-      <p style="margin: 0;">Share it with others to gather support.</p>
-    `,
-    ctaUrl,
-    ctaText: 'View Your Session',
-    footerNote: 'You can edit your session details or invite co-hosts from the session page.',
-  })
-
-  return {
-    subject: subjectFor(`Your session "${sessionTitle}" has been approved`, event),
-    html,
-    text: buildPlainText({
-      heading: 'Session approved',
-      paragraphs: [
-        `Hey ${hostName},`,
-        `Your session "${sessionTitle}" has been approved and is now visible to attendees.`,
-      ],
-      ctaUrl,
-      ctaText: 'View your session',
-      eventName: event.name,
-    }),
-  }
-}
-
-export function buildSessionRejectedEmail(params: SessionStatusEmailParams & { reason?: string }): EmailContent {
-  const { event, hostName, sessionTitle, reason } = params
-
-  const reasonHtml = reason
-    ? `<p style="margin: 16px 0; padding: 12px 16px; background-color: #161b22; border-radius: 8px; border-left: 3px solid #8b949e; font-size: 14px; color: #8b949e;">${escapeHtml(reason)}</p>`
-    : ''
-
-  const html = buildBaseEmail({
-    ...eventParams(event),
-    previewText: `Update on your session "${sessionTitle}"`,
-    heading: 'Session Update',
-    bodyHtml: `
-      <p style="margin: 0 0 16px 0;">Hey ${escapeHtml(hostName)},</p>
-      <p style="margin: 0 0 16px 0;">Thank you for submitting a session proposal for ${escapeHtml(event.name)}.</p>
-      <p style="margin: 0 0 8px 0;">Unfortunately, we weren't able to include your session in the program:</p>
-      <p style="margin: 0 0 16px 0; font-weight: 500; color: #ffffff;">"${escapeHtml(sessionTitle)}"</p>
-      ${reasonHtml}
-      <p style="margin: 0;">We received many great submissions and had to make difficult choices. We hope to see you at the event!</p>
-    `,
-    footerNote: 'Feel free to reach out to the organizers if you have questions.',
-  })
-
-  return {
-    subject: subjectFor('Update on your session submission', event),
-    html,
-    text: buildPlainText({
-      heading: 'Session update',
-      paragraphs: [
-        `Hey ${hostName},`,
-        `Thank you for submitting "${sessionTitle}" to ${event.name}. Unfortunately, we weren't able to include it in the program.`,
-        reason ? `Reason: ${reason}` : null,
-      ],
-      eventName: event.name,
-    }),
-  }
 }
 
 // =============================================================================
@@ -179,6 +98,64 @@ export function buildEventInvitationEmail(params: EventInvitationEmailParams): E
 }
 
 // =============================================================================
+// CO-HOST INVITATION EMAIL
+// =============================================================================
+
+interface CohostInviteEmailParams {
+  event: EventInfo
+  /** The proposer, as they present themselves; null for an organizer-curated session. */
+  inviterName: string | null
+  sessionTitle: string
+  inviteToken: string
+  expiresAt: string
+}
+
+/**
+ * The co-host invite link, delivered (inventory 4.3). The link still names nobody: it is
+ * the same opaque token the clipboard button copies, and whoever opens it becomes a
+ * co-host only by accepting it themselves (spec §4.2 double opt-in).
+ */
+export function buildCohostInviteEmail(params: CohostInviteEmailParams): EmailContent {
+  const { event, inviterName, sessionTitle, inviteToken, expiresAt } = params
+  const expiresText = new Date(expiresAt).toLocaleDateString('en-US', {
+    month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC',
+  })
+  const ctaUrl = `${appUrl()}/invite/${encodeURIComponent(inviteToken)}`
+  const who = inviterName?.trim() || 'An organizer'
+
+  const html = buildBaseEmail({
+    ...eventParams(event),
+    previewText: `${who} would like you to co-host "${sessionTitle}"`,
+    heading: 'Co-host a session?',
+    bodyHtml: `
+      <p style="margin: 0 0 16px 0;">Hey there,</p>
+      <p style="margin: 0 0 16px 0;"><strong style="color: #ffffff;">${escapeHtml(who)}</strong> would like you to co-host a session at <strong style="color: #ffffff;">${escapeHtml(event.name)}</strong>:</p>
+      <p style="margin: 0 0 16px 0; font-weight: 600; font-size: 17px; color: #ffffff;">&ldquo;${escapeHtml(sessionTitle)}&rdquo;</p>
+      <p style="margin: 0;">Nothing happens until you accept. Accepting writes a co-host record into your own repository; you can step down later, which deletes it.</p>
+    `,
+    ctaUrl,
+    ctaText: 'See the invitation',
+    footerNote: `This link can be accepted once and expires on ${expiresText}. If you were not expecting it, ignore it.`,
+  })
+
+  return {
+    subject: `${who} invited you to co-host "${sessionTitle}"`.replace(/[\r\n]+/g, ' '),
+    html,
+    text: buildPlainText({
+      heading: 'Co-host a session?',
+      paragraphs: [
+        `${who} would like you to co-host "${sessionTitle}" at ${event.name}.`,
+        'Nothing happens until you accept.',
+      ],
+      ctaUrl,
+      ctaText: 'See the invitation',
+      footerNote: `This link can be accepted once and expires on ${expiresText}.`,
+      eventName: event.name,
+    }),
+  }
+}
+
+// =============================================================================
 // OUTBOX NOTIFICATIONS
 // =============================================================================
 
@@ -204,6 +181,9 @@ const CTA_TEXT: Record<string, string> = {
   approval_requested: 'Review request',
   event_invitation: 'View invitation',
   ticket_confirmed: 'View your ticket',
+  event_published: 'Visit the gathering',
+  proposals_open: 'Propose a session',
+  rsvp_promoted: 'View your session',
 }
 
 export interface NotificationEmailInput {
@@ -214,6 +194,10 @@ export interface NotificationEmailInput {
   actionUrl: string | null
   recipientName: string | null
   event: EventInfo | null
+  /** Where "stop emails like this" goes; omitted only when no signing key is configured. */
+  unsubscribeUrl?: string | null
+  /** RFC 8058 headers for this recipient. */
+  unsubscribeHeaders?: Record<string, string> | null
 }
 
 /**
@@ -251,6 +235,7 @@ export function renderNotificationEmail(input: NotificationEmailInput): EmailCon
     ctaUrl: ctaUrl ?? undefined,
     ctaText: ctaUrl ? ctaText : undefined,
     footerNote: 'You can change which emails you get in the notification settings for this event.',
+    unsubscribeUrl: input.unsubscribeUrl ?? undefined,
   })
 
   return {
@@ -263,6 +248,79 @@ export function renderNotificationEmail(input: NotificationEmailInput): EmailCon
       ctaText,
       footerNote: 'You can change which emails you get in the notification settings for this event.',
       eventName: event.name,
+      unsubscribeUrl: input.unsubscribeUrl,
     }),
+    ...(input.unsubscribeHeaders ? { headers: input.unsubscribeHeaders } : {}),
+  }
+}
+
+// =============================================================================
+// DIGEST
+// =============================================================================
+
+export interface DigestItem {
+  type: string
+  title: string
+  body: string | null
+  actionUrl: string | null
+}
+
+export interface DigestInput {
+  items: readonly DigestItem[]
+  recipientName: string | null
+  event: EventInfo | null
+  unsubscribeUrl?: string | null
+  unsubscribeHeaders?: Record<string, string> | null
+}
+
+/**
+ * One email for everything that piled up past a recipient's hourly limit (inventory P2-8).
+ * Before this, mail over the limit was dropped after a day as `rate_limited`; a flood is a
+ * reason to batch, not a reason to say nothing.
+ */
+export function renderDigestEmail(input: DigestInput): EmailContent {
+  const event: EventInfo = input.event ?? { name: PRODUCT_NAME, slug: '' }
+  const greeting = input.recipientName ? `Hey ${input.recipientName},` : 'Hey there,'
+  const n = input.items.length
+  const heading = `${n} update${n === 1 ? '' : 's'} from ${event.name}`
+
+  const rows = input.items
+    .map((item) => {
+      const link = notificationLink(item.actionUrl)
+      const label = escapeHtml(item.title)
+      const line = link
+        ? `<a href="${escapeHtml(link)}" style="color: #B2FF00; text-decoration: none;">${label}</a>`
+        : label
+      const detail = item.body?.trim() ? `<br><span style="color: #8b949e; font-size: 14px;">${escapeHtml(item.body.trim())}</span>` : ''
+      return `<li style="margin: 0 0 12px 0;">${line}${detail}</li>`
+    })
+    .join('')
+
+  const html = buildBaseEmail({
+    ...eventParams(event),
+    previewText: heading,
+    heading,
+    bodyHtml: `
+      <p style="margin: 0 0 16px 0;">${escapeHtml(greeting)}</p>
+      <p style="margin: 0 0 16px 0;">More happened than fits in one email an hour, so here it is together:</p>
+      <ul style="margin: 0; padding-left: 20px;">${rows}</ul>
+    `,
+    ctaUrl: event.slug ? `${appUrl()}/e/${encodeURIComponent(event.slug)}` : undefined,
+    ctaText: event.slug ? 'Open the gathering' : undefined,
+    footerNote: 'You can change which emails you get in the notification settings for this event.',
+    unsubscribeUrl: input.unsubscribeUrl ?? undefined,
+  })
+
+  return {
+    subject: subjectFor(`${n} update${n === 1 ? '' : 's'}`, event),
+    html,
+    text: buildPlainText({
+      heading,
+      paragraphs: [greeting, ...input.items.map((i) => `• ${i.title}${i.body?.trim() ? ` — ${i.body.trim()}` : ''}`)],
+      footerNote: 'You can change which emails you get in the notification settings for this event.',
+      eventName: event.name,
+      unsubscribeUrl: input.unsubscribeUrl,
+    }),
+    ...(input.unsubscribeHeaders ? { headers: input.unsubscribeHeaders } : {}),
   }
 }

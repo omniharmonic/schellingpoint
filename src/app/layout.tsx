@@ -1,6 +1,7 @@
-import type { Metadata } from 'next'
+import type { Metadata, Viewport } from 'next'
 import './globals.css'
 import { AuthProvider } from '@/hooks/useAuth'
+import { ServiceWorker } from '@/components/ServiceWorker'
 
 
 export const metadata: Metadata = {
@@ -10,8 +11,19 @@ export const metadata: Metadata = {
   ),
   title: 'unconference',
   description: 'Create and manage unconferences, hackathons, and community events. Propose sessions, vote with quadratic voting, and shape the schedule together.',
+  // PWA (MT §12.7, §12.10): installable, with an app icon on the home screen and a shell the
+  // service worker can serve when the room has no signal.
+  manifest: '/manifest.webmanifest',
+  applicationName: 'unconference',
+  appleWebApp: {
+    capable: true,
+    title: 'unconference',
+    statusBarStyle: 'default',
+  },
+  formatDetection: { telephone: false },
   icons: {
     icon: '/icon.svg',
+    apple: '/icons/apple-touch-icon.png',
   },
   openGraph: {
     title: 'unconference',
@@ -25,6 +37,19 @@ export const metadata: Metadata = {
   },
 }
 
+/**
+ * `--primary` in light mode, so the browser chrome matches the app rather than fighting it.
+ */
+export const viewport: Viewport = {
+  themeColor: [
+    { media: '(prefers-color-scheme: light)', color: '#245043' },
+    { media: '(prefers-color-scheme: dark)', color: '#111312' },
+  ],
+  width: 'device-width',
+  initialScale: 1,
+  viewportFit: 'cover',
+}
+
 export default function RootLayout({
   children,
 }: {
@@ -36,6 +61,7 @@ export default function RootLayout({
         <AuthProvider>
           {children}
         </AuthProvider>
+        <ServiceWorker />
       </body>
     </html>
   )

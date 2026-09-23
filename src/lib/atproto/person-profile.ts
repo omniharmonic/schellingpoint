@@ -16,12 +16,16 @@ import 'server-only'
  * once custody ended (`relink_atproto`: `agentForAccount` refuses an owned account — the record they
  * may already have stays in their repo, theirs to keep or delete).
  *
- * No avatar: the record carries no blob (see `buildPersonProfileRecord`). The record is not indexed
- * into `at_records` — like the gathering's profile it is outside `INDEXED_COLLECTIONS`; the privacy
- * audit reads it live from the PDS and checks it exists only behind the opt-in.
+ * The avatar: their own image, uploaded as a blob to their own repo (`blobs.ts`), and only when it
+ * sits in our own upload store — their upload, or the copy mirrored from their own Bluesky repo at
+ * import. An image hosted elsewhere is never re-published on their behalf, and a failed upload
+ * leaves the record text-only. The record is not indexed into `at_records` — like the gathering's
+ * profile it is outside `INDEXED_COLLECTIONS`; the privacy audit reads it live from the PDS and
+ * checks it exists only behind the opt-in.
  */
 import { sql } from '@/lib/db'
 import { agentForAccount, NoActorCredentialError } from './agent'
+import { personAvatarBlob } from './blobs'
 import { NSID } from './nsids'
 import { assertNoForeignDid, buildPersonProfileRecord } from './records'
 import { deleteRecord, getRecord, isInvalidSwap, putRecord, type WriteResult } from './write'
@@ -50,6 +54,7 @@ interface Row {
   created_at: string
   display_name: string | null
   bio: string | null
+  avatar_url: string | null
   publish_profile: boolean
   profile_record_uri: string | null
   profile_record_cid: string | null
@@ -58,7 +63,7 @@ interface Row {
 async function load(accountId: string): Promise<Row> {
   const rows = await sql<Row[]>`
     select a.id, a.did, a.kind, a.owned_at, a.created_at,
-           p.display_name, p.bio, coalesce(p.publish_profile, false) as publish_profile,
+           p.display_name, p.bio, p.avatar_url, coalesce(p.publish_profile, false) as publish_profile,
            p.profile_record_uri, p.profile_record_cid
     from accounts a left join profiles p on p.id = a.id
     where a.id = ${accountId}
@@ -90,7 +95,8 @@ async function agentFor(row: Row) {
 export async function publishPersonProfile(accountId: string, opts: { requireOptIn?: boolean } = {}): Promise<WriteResult> {
   const row = await load(accountId)
   if (opts.requireOptIn !== false && !row.publish_profile) throw new PersonProfileError('not_opted_in', 'This person has not opted in to a public profile record.')
-  const record = buildPersonProfileRecord({ displayName: row.display_name, bio: row.bio, createdAt: row.created_at })
+  const avatar = await personAvatarBlob({ accountId: row.id, did: row.did, url: row.avatar_url })
+  const record = buildPersonProfileRecord({ displayName: row.display_name, bio: row.bio, avatar, createdAt: row.created_at })
   assertNoForeignDid(record, row.did)
   const agent = await agentFor(row)
   const base = { repo: row.did, collection: NSID.actorProfile, rkey: SELF, record: record as unknown as Record<string, unknown> }

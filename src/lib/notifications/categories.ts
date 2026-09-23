@@ -31,6 +31,13 @@ export const NOTIFICATION_TYPES = [
   'approval_requested', // a destructive action awaits another organizer (spec §6)
   'event_invitation',
   'ticket_confirmed',
+  'ticket_refunded',
+  'payments_paused',
+  // 0030: the two lifecycle announcements members were never told about, and the
+  // waitlist promotion that used to happen silently inside a trigger.
+  'event_published',
+  'proposals_open',
+  'rsvp_promoted',
 ] as const
 
 export type NotificationType = (typeof NOTIFICATION_TYPES)[number]
@@ -52,16 +59,23 @@ export const NOTIFICATION_CATEGORY: Record<NotificationType, NotificationCategor
   session_scheduled: 'session_updates',
   session_rescheduled: 'session_updates',
   session_cancelled: 'session_updates',
+  rsvp_promoted: 'session_updates',
   cohost_invited: 'collaboration',
   cohost_accepted: 'collaboration',
   cohost_declined: 'collaboration',
-  voting_opened: 'event_announcements',
-  voting_closed: 'event_announcements',
+  // `voting_updates` used to control nothing (the milestone it was written for is
+  // forbidden by spec §5.3). The two notices a voter acts on live here instead.
+  voting_opened: 'voting_updates',
+  voting_closed: 'voting_updates',
   schedule_published: 'event_announcements',
   event_reminder: 'event_announcements',
   admin_announcement: 'event_announcements',
   event_invitation: 'event_announcements',
   ticket_confirmed: 'event_announcements',
+  ticket_refunded: 'event_announcements',
+  event_published: 'event_announcements',
+  proposals_open: 'event_announcements',
+  payments_paused: 'admin_alerts',
   new_proposal: 'admin_alerts',
   proposal_needs_review: 'admin_alerts',
   proposal_changed: 'admin_alerts',
@@ -72,16 +86,16 @@ export const NOTIFICATION_CATEGORY: Record<NotificationType, NotificationCategor
  * Types whose email is a receipt for something the recipient did, sent regardless of the
  * category's email preference (still shown in the feed only if in-app is on).
  */
-export const TRANSACTIONAL_TYPES: ReadonlySet<NotificationType> = new Set<NotificationType>(['ticket_confirmed'])
+export const TRANSACTIONAL_TYPES: ReadonlySet<NotificationType> = new Set<NotificationType>(['ticket_confirmed', 'ticket_refunded'])
 
 export const CATEGORY_INFO: Record<NotificationCategory, { label: string; description: string }> = {
   session_updates: {
     label: 'Session updates',
-    description: 'When your sessions are approved, declined, scheduled, moved or cancelled',
+    description: 'When your sessions are approved, declined, scheduled, moved or cancelled, and when a waitlisted RSVP of yours becomes a seat',
   },
   voting_updates: {
     label: 'Voting updates',
-    description: 'Updates about voting on your sessions',
+    description: 'When a voting round opens and when it closes. Never a running count — nobody sees one while a round is open.',
   },
   collaboration: {
     label: 'Collaboration',
@@ -89,7 +103,7 @@ export const CATEGORY_INFO: Record<NotificationCategory, { label: string; descri
   },
   event_announcements: {
     label: 'Event announcements',
-    description: 'Voting periods, the published schedule, reminders, invitations and ticket confirmations',
+    description: 'The gathering going live, proposals opening, the published schedule, reminders, invitations and ticket confirmations',
   },
   admin_alerts: {
     label: 'Organizer alerts',
@@ -118,6 +132,11 @@ export const TYPE_LABELS: Record<string, string> = {
   approval_requested: 'Approval requested',
   event_invitation: 'Invitation',
   ticket_confirmed: 'Ticket confirmed',
+  ticket_refunded: 'Ticket refunded',
+  payments_paused: 'Payments paused',
+  event_published: 'Gathering published',
+  proposals_open: 'Proposals open',
+  rsvp_promoted: 'Off the waitlist',
 }
 
 export function isNotificationType(value: unknown): value is NotificationType {

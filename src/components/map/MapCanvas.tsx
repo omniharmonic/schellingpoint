@@ -16,7 +16,8 @@ import 'maplibre-gl/dist/maplibre-gl.css'
 import { cn } from '@/lib/utils'
 import type { MapCanvasProps, MapHandle, MapPin, MapView } from './types'
 
-export const DEFAULT_STYLE_URL = process.env.NEXT_PUBLIC_MAP_STYLE_URL ?? 'https://tiles.openfreemap.org/styles/liberty'
+// `||`, not `??`: the image build defines the variable as an empty string when it is unset.
+export const DEFAULT_STYLE_URL = process.env.NEXT_PUBLIC_MAP_STYLE_URL || 'https://tiles.openfreemap.org/styles/liberty'
 
 const PIN_COLORS: Record<MapPin['kind'], string> = {
   venue: 'hsl(163 48% 27%)',

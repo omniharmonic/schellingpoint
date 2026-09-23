@@ -90,10 +90,20 @@ function toJob(row: JobRow): PublishJob {
   }
 }
 
-/** Every scheduled session with a time slot, in `publishSchedule`'s order. */
+/**
+ * Every scheduled session with a time slot, in `publishSchedule`'s order.
+ *
+ * A session hidden by moderation is not published or re-published: the gathering has decided
+ * not to carry it, and a publish run must not keep refreshing its calendar event afterwards.
+ * (Withdrawing one that is *already* published is a destructive action and goes through the
+ * approvals flow, which addresses sessions by id and so is unaffected by this filter.)
+ */
 export async function schedulableSessionIds(eventId: string): Promise<string[]> {
   const rows = await sql<{ id: string }[]>`
-    select id from sessions where event_id = ${eventId} and status = 'scheduled' and time_slot_id is not null order by created_at, id
+    select id from sessions
+    where event_id = ${eventId} and status = 'scheduled' and time_slot_id is not null
+      and not coalesce(hidden_by_moderation, false)
+    order by created_at, id
   `
   return rows.map((r) => r.id)
 }

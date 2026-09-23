@@ -41,7 +41,8 @@ async function loadStats(eventId: string): Promise<{ stats: EventStats; recent: 
   const [[counts], recent] = await Promise.all([
     sql<{ sessions: number; participants: number; tracks: number }[]>`
       select
-        (select count(*) from sessions where event_id = ${eventId} and status in ('approved', 'scheduled'))::int as sessions,
+        (select count(*) from sessions where event_id = ${eventId} and status in ('approved', 'scheduled')
+           and not coalesce(hidden_by_moderation, false))::int as sessions,
         (select count(*) from event_members where event_id = ${eventId})::int as participants,
         (select count(*) from tracks where event_id = ${eventId} and coalesce(is_active, true))::int as tracks
     `,
@@ -49,6 +50,8 @@ async function loadStats(eventId: string): Promise<{ stats: EventStats; recent: 
       select s.id, s.title, s.format, t.name as track_name, t.color as track_color
       from sessions s left join tracks t on t.id = s.track_id and t.event_id = s.event_id
       where s.event_id = ${eventId} and s.status in ('approved', 'scheduled')
+        -- A session hidden by moderation is out of every listing this app serves (0033).
+        and not coalesce(s.hidden_by_moderation, false)
       order by s.created_at desc
       limit 4
     `,

@@ -230,6 +230,78 @@ test.describe('scheduling library', () => {
     expect(jam.score).toBe(0)
   })
 
+  test('the greedy seed and the objective agree on a keep-apart pair: one metric, one k-filter', () => {
+    // a has 5 tokens, b has 10 and shares 3 of them. Overlap coefficient 3/5 = 0.6, exactly the
+    // keep-apart line. Jaccard — what the seed used to compute — is 3/12 = 0.25, which it did
+    // not even call moderate: the seed and the objective ranked the same pair differently.
+    const A = ['v1', 'v2', 'v3', 'v4', 'v5']
+    const B = ['v1', 'v2', 'v3', 'w1', 'w2', 'w3', 'w4', 'w5', 'w6', 'w7']
+    const ballots = ballotsOf({ a: A, b: B, d: ['v1', 'v2'] })
+    expect(overlapCoefficient(tokens(...A), tokens(...B))).toEqual({ shared: 3, coefficient: 0.6 })
+    expect(keepApartPairs(overlapMatrix(ballots, 3)).map((p) => `${p.a}|${p.b}`)).toEqual(['a|b'])
+
+    // One time row, so the seed has no choice but to place them together — and must say so at
+    // the same threshold the objective uses.
+    const row: SchedulerTimeSlot[] = VENUES.map((v) => ({
+      id: `only-${v.id}`, start_time: iso('15:00'), end_time: iso('16:00'), is_break: false, venue_id: v.id, day_date: DAY,
+    }))
+    const pair = [session('a'), session('b')]
+    const seeded = autoSchedule(pair, row, VENUES, { ballots, timezone: TZ, k: 3, improve: false })
+    const warned = seeded.assignments.flatMap((a) => a.warnings).filter((w) => w.startsWith('High voter overlap'))
+    expect(warned).toEqual(Array(2).fill('High voter overlap (60%) with a session at the same time'))
+
+    // The objective, on the seed's own placement, calls it a keep-apart conflict and charges ×2.
+    const ctx = buildObjectiveContext(pair, row, VENUES, { ballots, k: 3, timezone: TZ })
+    const together = new Map(seeded.assignments.map((a) => [a.sessionId, P(a.slotId, a.venueId)] as const))
+    expect(qualityScore(together, ctx).keepApartConflicts).toBe(1)
+    expect(placementCost(together, ctx).conflict).toBe(6) // 3 shared × 2
+
+    // And the k-filter is the same one: d has two tokens, below k, so neither the seed nor the
+    // objective constrains it even though it shares both of a's voters.
+    const belowK = [session('a'), session('d')]
+    const suppressed = autoSchedule(belowK, row, VENUES, { ballots, timezone: TZ, k: 3, improve: false })
+    expect(suppressed.assignments.flatMap((a) => a.warnings).filter((w) => w.includes('voter overlap'))).toEqual([])
+    const belowCtx = buildObjectiveContext(belowK, row, VENUES, { ballots, k: 3, timezone: TZ })
+    const both = new Map(suppressed.assignments.map((a) => [a.sessionId, P(a.slotId, a.venueId)] as const))
+    expect(placementCost(both, belowCtx).conflict).toBe(0)
+  })
+
+  test('one person cannot be in two rooms: co-host conflicts are violations priced at ×1', () => {
+    // p1 hosts a and co-hosts b; p3 is alone on c.
+    const sessions = [
+      session('a', { host_ids: ['p1'] }),
+      session('b', { host_ids: ['p2', 'p1'] }),
+      session('c', { host_ids: ['p3'] }),
+    ]
+    const ctx = buildObjectiveContext(sessions, SLOTS, VENUES, { ballots: new Map(), k: 3, timezone: TZ })
+
+    const together = new Map([['a', P('r1-main', 'main')], ['b', P('r1-small', 'small')], ['c', P('r2-main', 'main')]])
+    const cost = placementCost(together, ctx)
+    expect(cost).toMatchObject({ hostConflictCount: 1, hostConflict: 1, violationCount: 0, violations: 0 })
+
+    const report = qualityScore(together, ctx)
+    expect(report.hostConflicts).toEqual([{ a: 'a', b: 'b', people: 1 }])
+    expect(report.violations.some((v) => v.includes('share a host'))).toBe(true)
+    expect(report.checks.constraintsMet).toBe(false)
+    // Never who: the report carries counts and titles, never an account id.
+    const blob = JSON.stringify(report)
+    for (const person of ['p1', 'p2', 'p3']) expect(blob).not.toContain(`"${person}"`)
+
+    // Apart, and for sessions with nobody in common, there is nothing to report.
+    const apart = new Map([['a', P('r1-main', 'main')], ['b', P('r2-small', 'small')]])
+    expect(placementCost(apart, ctx).hostConflictCount).toBe(0)
+    const strangers = new Map([['a', P('r1-main', 'main')], ['c', P('r1-small', 'small')]])
+    expect(qualityScore(strangers, ctx).hostConflicts).toEqual([])
+  })
+
+  test('a session merged into another is never placed by the scheduler', () => {
+    const sessions = [session('a'), session('b', { merged_into: 'a' }), session('c')]
+    const result = autoSchedule(sessions, SLOTS, VENUES, { ballots: new Map(), timezone: TZ, k: 3 })
+    expect(result.assignments.map((x) => x.sessionId).sort()).toEqual(['a', 'c'])
+    expect(result.unassigned).toEqual([])
+    expect(result.stats.totalSessions).toBe(2)
+  })
+
   test('autoSchedule keeps its shape, adds quality, improvement and the five PRD stages, and separates keep-apart pairs', () => {
     const sessions = [session('a'), session('b'), session('c'), session('d')]
     const result = autoSchedule(sessions, SLOTS, VENUES, { ballots: BALLOTS, timezone: TZ, k: 3 })

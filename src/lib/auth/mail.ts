@@ -24,6 +24,8 @@ export async function sendMail(input: {
   subject: string
   text: string
   html?: string
+  /** Extra SMTP headers — RFC 8058 `List-Unsubscribe` / `List-Unsubscribe-Post`. */
+  headers?: Record<string, string>
 }): Promise<{ delivered: boolean }> {
   const key = process.env.RESEND_API_KEY?.trim()
   if (!key) {
@@ -40,6 +42,7 @@ export async function sendMail(input: {
     subject: input.subject,
     text: input.text,
     ...(input.html ? { html: input.html } : {}),
+    ...(input.headers && Object.keys(input.headers).length ? { headers: input.headers } : {}),
   })
   if (error) throw new Error(`mail send failed: ${error.name ?? 'error'}`)
   return { delivered: true }

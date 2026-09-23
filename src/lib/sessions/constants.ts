@@ -118,3 +118,14 @@ export const DEFAULT_TAGS: string[] = [
 
 /** How many topic tags a session may carry. */
 export const MAX_TAGS = 5
+
+/**
+ * "What the room needs" (PRD §4.2 step 4). The real vocabulary is the union of the
+ * gathering's own `venues.features` (served by `GET /api/v1/events/[slug]/room-features`);
+ * these four are offered only when no room has been described yet, so the field still works
+ * during setup. A proposer may always add a word of their own.
+ */
+export const DEFAULT_ROOM_FEATURES: string[] = ['projector', 'whiteboard', 'audio', 'flexible seating']
+
+/** How many required features a proposal may carry (mirrors the validator's limit). */
+export const MAX_REQUIRED_FEATURES = 10

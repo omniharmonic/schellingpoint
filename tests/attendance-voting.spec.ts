@@ -246,6 +246,49 @@ test.describe('attendance voting', () => {
     expect(JSON.stringify(body.attendance)).not.toMatch(/"(voters|votes|credits|entries|ballotsCast)"/)
   })
 
+  test('the check-in rule gates the attendance round: refused at the door, allowed once checked in', async ({ request }) => {
+    const [tier] = await raw<{ id: string }[]>`
+      insert into ticket_tiers (event_id, name, price_cents) values (${live!.id}, ${`attv ${RUN} door`}, 0) returning id
+    `
+    const vote = (votes: number) =>
+      api(request, 'PUT', `/api/v1/events/${live!.slug}/votes/mine`, cookies.voterA, { sessionId: S_NOW, votes, round: 'attendance' })
+    try {
+      // Off by default: voterA has been voting all along without a ticket.
+      await raw`update events set checkin_gates_voting = true where id = ${live!.id}`
+
+      const refused = await vote(3)
+      expect(refused.status(), await refused.text()).toBe(403)
+      expect((await refused.json()).code).toBe('CheckinRequired')
+
+      // The read explains it rather than pretending the round is shut.
+      const gated = await api(request, 'GET', `/api/v1/events/${live!.slug}/votes/mine?round=attendance`, cookies.voterA)
+      const gatedBody = await gated.json()
+      expect(gatedBody).toMatchObject({ status: 'open', canVote: false, eligibility: { eligible: false, code: 'CheckinRequired' } })
+      expect(gatedBody.reason).toMatch(/check in/i)
+      // Their existing allocation is untouched: the gate refuses writes, it does not erase votes.
+      expect(gatedBody.allocation).toEqual({ [S_NOW]: 2 })
+
+      // Checked in at the door.
+      await raw`
+        insert into tickets (event_id, tier_id, user_id, status, checked_in_at)
+        values (${live!.id}, ${tier.id}, ${ids.voterA}, 'checked_in', now())
+      `
+      const allowed = await vote(3)
+      expect(allowed.status(), await allowed.text()).toBe(200)
+      const allowedBody = await allowed.json()
+      expect(allowedBody.allocation).toEqual({ [S_NOW]: 3 })
+      expect(allowedBody).toMatchObject({ canVote: true, eligibility: { eligible: true } })
+    } finally {
+      // Hand the round back exactly as the next test expects it: rule off, no ticket, two votes.
+      await raw`update events set checkin_gates_voting = false where id = ${live!.id}`
+      await raw`delete from tickets where event_id = ${live!.id} and user_id = ${ids.voterA}`
+      await raw`delete from ticket_tiers where id = ${tier.id}`
+      const restored = await vote(2)
+      expect(restored.status(), await restored.text()).toBe(200)
+      expect((await restored.json()).allocation).toEqual({ [S_NOW]: 2 })
+    }
+  })
+
   test('the close job seals it: key destroyed, ledger gone, token-only entries, k-suppressed signal', async ({ request }) => {
     // Three voters on S_NOW (k = 3) so its counts show; S_LATER gets none and is suppressed.
     await voting.setAllocation(live!.id, ids.B, S_NOW, 1, 'attendance')

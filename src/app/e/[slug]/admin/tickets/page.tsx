@@ -67,6 +67,21 @@ interface ConnectStatus {
   unavailable?: boolean
 }
 
+interface Sale {
+  ticketId: string
+  status: string
+  attendee: string | null
+  handle: string | null
+  tierName: string | null
+  amountCents: number
+  currency: string
+  contributionCents: number
+  refundedCents: number
+  contributionRefundedCents: number
+  settledAt: string | null
+  refundable: boolean
+}
+
 /** Turn Stripe requirement keys like `business_profile.url` into readable labels. */
 function describeRequirement(key: string): string {
   return key
@@ -146,10 +161,23 @@ function AdminTicketsPageInner() {
     platform_stripe_configured: boolean
     webhook_configured: boolean
     platform_fee_percent: number
+    /** The server's own readiness verdict; the browser checks below only mirror it. */
+    payments_ready?: boolean
+    payments_blocked_code?: string | null
+    payments_blocked_reason?: string | null
   } | null>(null)
   const [isTogglingTicketing, setIsTogglingTicketing] = React.useState(false)
   const [contributionSaved, setContributionSaved] = React.useState(false)
   const [ticketingError, setTicketingError] = React.useState<string | null>(null)
+
+  // Sales & refunds
+  const [sales, setSales] = React.useState<Sale[] | null>(null)
+  const [salesError, setSalesError] = React.useState<string | null>(null)
+  const [refundingTicketId, setRefundingTicketId] = React.useState<string | null>(null)
+  const [refundAmount, setRefundAmount] = React.useState('')
+  const [refundContribution, setRefundContribution] = React.useState(true)
+  const [refundBusy, setRefundBusy] = React.useState(false)
+  const [refundNotice, setRefundNotice] = React.useState<string | null>(null)
 
   // Stripe Connect state
   const [connect, setConnect] = React.useState<ConnectStatus | null>(null)
@@ -246,6 +274,53 @@ function AdminTicketsPageInner() {
     }
   }
 
+  const fetchSales = React.useCallback(async () => {
+    try {
+      const data = await apiFetch<{ sales: Sale[] }>(`${apiBase}/ticketing-settings/sales`)
+      setSales(data.sales)
+      setSalesError(null)
+    } catch (err) {
+      setSalesError(err instanceof Error ? err.message : 'Sales could not be loaded')
+    }
+  }, [apiBase])
+
+  React.useEffect(() => {
+    fetchSales()
+  }, [fetchSales])
+
+  /**
+   * A refund is issued on the organizer's own Stripe account. Leaving the amount blank
+   * returns everything still outstanding and cancels the ticket; an amount returns part of
+   * the price and leaves admission alone.
+   */
+  const submitRefund = async (sale: Sale) => {
+    setRefundBusy(true)
+    setRefundNotice(null)
+    try {
+      const partial = refundAmount.trim() !== ''
+      const amountCents = partial ? Math.round(Number(refundAmount) * 100) : null
+      if (partial && (!Number.isFinite(amountCents) || (amountCents ?? 0) <= 0)) {
+        throw new Error('Enter an amount greater than zero, or leave it blank to refund everything')
+      }
+      const result = await apiFetch<{ amountCents: number; full: boolean; admissionRevoked: boolean }>(
+        `${apiBase}/ticketing-settings/sales/${sale.ticketId}/refund`,
+        { method: 'POST', json: { amountCents, refundApplicationFee: partial ? refundContribution : true } },
+      )
+      setRefundNotice(
+        result.full
+          ? `Refunded ${formatPrice(result.amountCents, sale.currency)} in full. The ticket no longer admits its holder, and they have been told.`
+          : `Refunded ${formatPrice(result.amountCents, sale.currency)}. The ticket still admits its holder.`,
+      )
+      setRefundingTicketId(null)
+      setRefundAmount('')
+      await fetchSales()
+    } catch (err) {
+      setSalesError(err instanceof Error ? err.message : 'The refund could not be issued')
+    } finally {
+      setRefundBusy(false)
+    }
+  }
+
   // Fetch ticketing settings
   React.useEffect(() => {
     apiFetch<NonNullable<typeof settings>>(`${apiBase}/ticketing-settings`)
@@ -256,18 +331,24 @@ function AdminTicketsPageInner() {
   // Paid checkout needs either a connected account that can take charges, or
   // the explicit platform-account fallback. Free-only events may enable
   // ticketing regardless, since free tickets never touch Stripe.
+  // The server decides (ticketing-settings refuses the write with a reason); this mirrors that
+  // verdict so the button explains itself before the request is made. `payments_ready` is
+  // authoritative when present; the connect-status checks are the fallback while it loads.
   const hasPaidTiers = tiers.some((t) => t.price_cents > 0)
   const canEnableTicketing =
-    !hasPaidTiers ||
-    Boolean(connect?.chargesEnabled) ||
-    Boolean(connect?.platformFallbackAllowed && !connect?.connected)
+    settings?.payments_ready !== undefined
+      ? settings.payments_ready
+      : !hasPaidTiers ||
+        Boolean(connect?.chargesEnabled && connect?.payoutsEnabled) ||
+        Boolean(connect?.platformFallbackAllowed && !connect?.connected)
   const ticketingBlockedReason = (() => {
     if (!settings || settings.ticketing_enabled || canEnableTicketing) return null
+    if (settings.payments_blocked_reason) return settings.payments_blocked_reason
     if (connect?.unavailable) {
       return 'Stripe is not configured on this deployment, so paid tickets cannot be sold. Free tiers still work once all paid tiers are removed or deactivated.'
     }
     if (connect?.connected) {
-      return 'Finish Stripe onboarding below before enabling ticket sales. Stripe must be able to accept charges for this account.'
+      return 'Finish Stripe onboarding below before enabling ticket sales. Stripe must be able to accept charges and payouts for this account.'
     }
     return 'Connect a Stripe account below before enabling ticket sales. You have paid ticket tiers, and there is no account to receive the money.'
   })()
@@ -497,7 +578,15 @@ function AdminTicketsPageInner() {
                 }}>
                   {contributionSaved && <p role="status" className="text-sm text-primary">Contribution saved. Applies to new checkouts.</p>}
                   <Label htmlFor="platform-contribution">Your contribution to unconference</Label>
-                  <p className="text-sm text-muted-foreground">Choose what this event gives back. Minimum 1%, with no fixed platform surcharge. Free tickets stay free.</p>
+                  <p className="text-sm text-muted-foreground">
+                    Choose what this gathering gives back: a percentage of each paid ticket, minimum 1%, with no fixed
+                    platform surcharge and nothing added to the buyer&apos;s price. Free tickets stay free.
+                  </p>
+                  <p className="text-sm text-muted-foreground">
+                    This is separate from Stripe&apos;s processing fees. Ticket money is charged on your own Stripe
+                    account: Stripe takes its processing fee there, and unconference takes only the percentage you set
+                    here. On a $25 ticket at 1% the contribution is $0.25.
+                  </p>
                   <div className="flex flex-wrap items-center gap-3">
                     <Input key={settings.platform_fee_percent} id="platform-contribution" name="contribution" type="number" min="1" max="100" step="0.01" required defaultValue={settings.platform_fee_percent} className="w-24" />
                     <span className="text-sm">% of ticket sales</span>
@@ -570,9 +659,9 @@ function AdminTicketsPageInner() {
                         : !connect?.connected
                           ? connect?.platformFallbackAllowed
                             ? 'No Stripe account connected. Paid tickets are charged to the platform account until you connect your own.'
-                            : 'Connect a Stripe account to receive ticket revenue. Payouts go straight to you; your chosen contribution supports unconference.'
+                            : 'Connect a Stripe account to sell tickets. Buyers are charged on your account, Stripe deducts its processing fees there, and unconference receives only the contribution you chose.'
                           : connect.chargesEnabled
-                            ? `Connected to ${connect.accountId}. Ticket revenue is paid out to this account${connect.payoutsEnabled ? '' : ' once payouts are enabled'}.`
+                            ? `Connected to ${connect.accountId}. Tickets are charged on this account and paid out to it${connect.payoutsEnabled ? '' : ' once payouts are enabled'}.`
                             : `Account ${connect.accountId} was created but Stripe still needs information before it can accept charges.`}
                     </p>
                   </div>
@@ -716,6 +805,111 @@ function AdminTicketsPageInner() {
               )}
             </CardContent>
           </Card>
+
+          {/* Sales & refunds */}
+          {sales !== null && sales.length > 0 && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Paid sales</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <p className="text-sm text-muted-foreground">
+                  Every settled paid checkout. A refund is issued on your own Stripe account. Refunding the whole
+                  amount cancels the ticket and returns your contribution with it; refunding part of it returns only
+                  that part and the holder keeps their ticket.
+                </p>
+                {refundNotice && (
+                  <Alert>
+                    <CheckCircle2 className="h-4 w-4" />
+                    <AlertDescription>{refundNotice}</AlertDescription>
+                  </Alert>
+                )}
+                {salesError && (
+                  <Alert variant="destructive">
+                    <AlertTriangle className="h-4 w-4" />
+                    <AlertDescription>{salesError}</AlertDescription>
+                  </Alert>
+                )}
+                <ul className="divide-y rounded-xl border">
+                  {sales.map((sale) => (
+                    <li key={sale.ticketId} className="p-3 space-y-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="font-medium truncate">
+                            {sale.attendee?.trim() || sale.handle || 'Attendee'}
+                            {sale.tierName ? <span className="text-muted-foreground"> · {sale.tierName}</span> : null}
+                          </p>
+                          <p className="text-xs text-muted-foreground">
+                            {formatPrice(sale.amountCents, sale.currency)} paid
+                            {sale.contributionCents > 0 && <> · {formatPrice(sale.contributionCents, sale.currency)} contribution</>}
+                            {sale.refundedCents > 0 && <> · {formatPrice(sale.refundedCents, sale.currency)} refunded</>}
+                            {sale.settledAt ? ` · ${formatDate(sale.settledAt)}` : ''}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Badge variant={sale.status === 'cancelled' ? 'secondary' : sale.status === 'checked_in' ? 'success' : 'outline'}>
+                            {sale.status.replace(/_/g, ' ')}
+                          </Badge>
+                          {sale.refundable && refundingTicketId !== sale.ticketId && (
+                            <Button variant="outline" size="sm" onClick={() => {
+                              setRefundingTicketId(sale.ticketId)
+                              setRefundAmount('')
+                              setRefundContribution(true)
+                              setRefundNotice(null)
+                              setSalesError(null)
+                            }}>
+                              Refund
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                      {refundingTicketId === sale.ticketId && (
+                        <div className="rounded-lg border bg-muted/30 p-3 space-y-3">
+                          <div className="flex flex-wrap items-end gap-3">
+                            <div className="space-y-1">
+                              <Label htmlFor={`refund-${sale.ticketId}`} className="text-xs">Amount (blank = everything left)</Label>
+                              <Input
+                                id={`refund-${sale.ticketId}`}
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                placeholder={((sale.amountCents - sale.refundedCents) / 100).toFixed(2)}
+                                value={refundAmount}
+                                onChange={(e) => setRefundAmount(e.target.value)}
+                                className="w-32"
+                              />
+                            </div>
+                            <label className="flex items-center gap-2 text-sm">
+                              <input
+                                type="checkbox"
+                                checked={refundAmount.trim() === '' ? true : refundContribution}
+                                disabled={refundAmount.trim() === ''}
+                                onChange={(e) => setRefundContribution(e.target.checked)}
+                              />
+                              Return the unconference contribution too
+                            </label>
+                          </div>
+                          <p className="text-xs text-muted-foreground">
+                            {refundAmount.trim() === ''
+                              ? 'A full refund returns the contribution as well and cancels the ticket. The holder is notified.'
+                              : 'A partial refund leaves the ticket valid. Stripe processing fees are not returned by any refund.'}
+                          </p>
+                          <div className="flex items-center gap-2">
+                            <Button size="sm" onClick={() => void submitRefund(sale)} disabled={refundBusy}>
+                              {refundBusy ? <Loader2 className="h-4 w-4 animate-spin" aria-label="Refunding" /> : 'Issue refund'}
+                            </Button>
+                            <Button variant="ghost" size="sm" onClick={() => setRefundingTicketId(null)} disabled={refundBusy}>
+                              Cancel
+                            </Button>
+                          </div>
+                        </div>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </CardContent>
+            </Card>
+          )}
 
           {/* Stats */}
           <div className="grid gap-4 md:grid-cols-3">

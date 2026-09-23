@@ -32,8 +32,9 @@ export default async function DashboardPage({ params }: PageProps) {
 
   const [counts] = await sql<{ public_sessions: number; scheduled: number; pending: number; members: number }[]>`
     select
-      count(*) filter (where s.status in ('approved', 'scheduled'))::int as public_sessions,
-      count(*) filter (where s.status = 'scheduled')::int as scheduled,
+      -- Hidden by moderation is out of the public counts as well as the public lists (0033).
+      count(*) filter (where s.status in ('approved', 'scheduled') and not coalesce(s.hidden_by_moderation, false))::int as public_sessions,
+      count(*) filter (where s.status = 'scheduled' and not coalesce(s.hidden_by_moderation, false))::int as scheduled,
       count(*) filter (where s.status = 'pending')::int as pending,
       (select count(*) from event_members m where m.event_id = ${event.id})::int as members
     from sessions s
@@ -48,6 +49,8 @@ export default async function DashboardPage({ params }: PageProps) {
     left join profiles p on p.id = s.host_id
     left join tracks t on t.id = s.track_id and t.event_id = s.event_id
     where s.event_id = ${event.id} and s.status in ('approved', 'scheduled')
+      -- Hidden by moderation: out of the listings, including this one (0033).
+      and not coalesce(s.hidden_by_moderation, false)
     order by s.created_at desc
     limit 6
   `

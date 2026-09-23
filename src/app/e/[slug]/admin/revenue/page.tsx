@@ -33,6 +33,10 @@ interface RevenueStats {
   pendingTickets: number
   checkedIn: number
   refundNeeded: { count: number; amountCents: number }
+  /** Paid Stripe deliveries this application refused: a card was charged and no ticket issued. */
+  unmatchedPayments?: { id: string; reason: string; sessionId: string | null; receivedAt: string }[]
+  /** False while Stripe's processing fees live on the organizer's own account and are not read here. */
+  processingFeesKnown?: boolean
   currency: string
   tierBreakdown: {
     tierId: string
@@ -46,6 +50,16 @@ interface RevenueStats {
     tickets: number
     revenue: number
   }[]
+}
+
+
+/** Why a paid delivery was refused, in words an organizer can act on. */
+const UNMATCHED_REASON: Record<string, string> = {
+  EVENT_ACCOUNT_CHANGED:
+    'the gathering was reconnected to a different Stripe account while this checkout was open',
+  AMOUNT_MISMATCH: 'the amount charged did not match the price this checkout was quoted',
+  ACCOUNT_MISMATCH: 'it arrived on a Stripe account this gathering is not connected to',
+  NO_REFERENCE: 'it names a checkout this application never opened',
 }
 
 export default function RevenueDashboardPage() {
@@ -138,7 +152,7 @@ export default function RevenueDashboardPage() {
     <div>
       <PageHeader
         title="Revenue"
-        subtitle="Ticket sales and what reaches you after the platform contribution."
+        subtitle="Ticket sales, the contribution you chose, and what Stripe still takes before this reaches your bank."
         actions={<Button asChild variant="outline"><Link href={`/e/${event.slug}/admin/tickets`}>Ticket types</Link></Button>}
       />
 
@@ -153,8 +167,43 @@ export default function RevenueDashboardPage() {
                 </p>
                 <p className="text-sm text-muted-foreground">
                   These buyers paid after their checkout hold lapsed and the tier had filled, or paid twice. They have no
-                  ticket. Refund them from your Stripe dashboard; each is cleared here once Stripe reports the refund.
+                  ticket. Refund them from your own Stripe dashboard — the payment lives on your account — and each is
+                  cleared here once Stripe reports the refund. A refund returns the ticket price to the buyer; the
+                  contribution already collected is not reversed unless you reverse it in Stripe.
                 </p>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {(stats.unmatchedPayments?.length ?? 0) > 0 && (
+          <Card className="border-destructive">
+            <CardContent className="py-4 flex items-start gap-3">
+              <AlertTriangle className="h-5 w-5 text-destructive mt-0.5" aria-hidden="true" />
+              <div className="space-y-2">
+                <p className="font-medium">
+                  {plural(stats.unmatchedPayments!.length, 'payment')} could not be matched to a checkout
+                </p>
+                <p className="text-sm text-muted-foreground">
+                  Stripe confirmed these as paid, but this site refused to issue a ticket for them, so somebody was
+                  charged and got nothing. Where the payment was provably one of ours it has already been refunded
+                  automatically; check the rest in your Stripe dashboard and refund them there.
+                </p>
+                <ul className="text-sm text-muted-foreground space-y-1">
+                  {stats.unmatchedPayments!.slice(0, 10).map((row) => (
+                    <li key={row.id}>
+                      <span className="font-mono text-xs">{row.sessionId ?? row.id}</span>
+                      {' — '}
+                      {UNMATCHED_REASON[row.reason] ?? row.reason}
+                      {' ('}
+                      {new Date(row.receivedAt).toLocaleDateString()}
+                      {')'}
+                    </li>
+                  ))}
+                  {stats.unmatchedPayments!.length > 10 && (
+                    <li>and {stats.unmatchedPayments!.length - 10} more</li>
+                  )}
+                </ul>
               </div>
             </CardContent>
           </Card>
@@ -197,21 +246,28 @@ export default function RevenueDashboardPage() {
                 {formatPrice(stats.platformFees, stats.currency)}
               </div>
               <p className="text-xs text-muted-foreground">
-                Recorded at checkout. Stripe processing fees are separate.
+                The percentage you chose, collected per sale. It is not a Stripe fee: Stripe charges its own
+                processing fees to your account separately.
               </p>
             </CardContent>
           </Card>
 
           <Card>
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Net to you</CardTitle>
+              <CardTitle className="text-sm font-medium">
+                {stats.processingFeesKnown ? 'Net to you' : 'Net to you, before Stripe processing fees'}
+              </CardTitle>
               <DollarSign className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
             </CardHeader>
             <CardContent>
               <div className="text-2xl font-semibold tabular-nums">
                 {formatPrice(stats.netRevenue, stats.currency)}
               </div>
-              <p className="text-xs text-muted-foreground">Gross revenue less the platform contribution</p>
+              <p className="text-xs text-muted-foreground">
+                {stats.processingFeesKnown
+                  ? 'Gross revenue less the platform contribution and Stripe processing fees'
+                  : 'Gross revenue less your contribution. Stripe deducts its processing fees from your account on top of this; your Stripe dashboard has the exact figures.'}
+              </p>
             </CardContent>
           </Card>
 

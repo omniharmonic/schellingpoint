@@ -46,6 +46,7 @@ export async function scheduledCalendarEvents(event: AccessEvent, sessionIds?: s
     left join venues v on v.id = s.venue_id and v.event_id = s.event_id
     where s.event_id = ${event.id}
       and s.status = 'scheduled'
+      and not coalesce(s.hidden_by_moderation, false)
       and coalesce(ts.start_time, s.self_hosted_start_time) is not null
       and coalesce(ts.end_time, s.self_hosted_end_time) is not null
       ${sessionIds ? sql`and s.id in ${sql(sessionIds)}` : sql``}
@@ -75,13 +76,17 @@ export async function scheduledCalendarEvents(event: AccessEvent, sessionIds?: s
   })
 }
 
-export function icsResponse(ics: string, filename: string): Response {
+/**
+ * `disposition: 'inline'` is what a calendar client subscribing to the URL needs: it reads the
+ * body rather than handing the browser a download. Everything else is unchanged.
+ */
+export function icsResponse(ics: string, filename: string, opts: { disposition?: 'attachment' | 'inline' } = {}): Response {
   const safe = filename.replace(/[\r\n"]/g, '').slice(0, 120) || 'schedule.ics'
   return new Response(ics, {
     status: 200,
     headers: {
       'Content-Type': 'text/calendar; charset=utf-8',
-      'Content-Disposition': `attachment; filename="${encodeURIComponent(safe)}"`,
+      'Content-Disposition': `${opts.disposition ?? 'attachment'}; filename="${encodeURIComponent(safe)}"`,
       'Cache-Control': 'private, no-store',
     },
   })

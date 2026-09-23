@@ -84,6 +84,35 @@ export function overlapIndex(matrix: OverlapMatrix): Map<string, OverlapPair> {
   return new Map(matrix.pairs.map((p) => [pairKey(p.a, p.b), p]))
 }
 
+/**
+ * The one overlap lookup every stage shares (the greedy seed, the objective, the clusters
+ * panel and the quality report): the overlap coefficient of two sessions, or `null` when the
+ * pair is not comparable because either side has fewer than k ballot tokens.
+ *
+ * Nothing else may compute overlap: a second metric (Jaccard, say) makes the seed rank pairs
+ * on a scale the objective it is then optimized against does not use.
+ */
+export function pairOverlap(index: ReadonlyMap<string, OverlapPair>, a: string, b: string): OverlapPair | null {
+  return index.get(pairKey(a, b)) ?? null
+}
+
+/**
+ * The strongest comparable overlap between `sessionId` and any of `others`, or `null` when
+ * none of them is comparable. k-filtered, like everything built on `overlapIndex`.
+ */
+export function maxPairOverlap(
+  index: ReadonlyMap<string, OverlapPair>,
+  sessionId: string,
+  others: readonly string[],
+): OverlapPair | null {
+  let best: OverlapPair | null = null
+  for (const other of others) {
+    const pair = pairOverlap(index, sessionId, other)
+    if (pair && (!best || pair.coefficient > best.coefficient)) best = pair
+  }
+  return best
+}
+
 /** Pairs at or above the keep-apart line, strongest first. */
 export function keepApartPairs(matrix: OverlapMatrix, threshold = KEEP_APART_THRESHOLD): OverlapPair[] {
   return matrix.pairs

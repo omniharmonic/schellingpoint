@@ -8,6 +8,12 @@ import { canRolePerform } from '@/lib/permissions'
 import type { EventRoleName } from '@/types/event'
 import { readTicketToken } from './qr'
 import { calculatePlatformFee } from '@/lib/payments/format'
+import {
+  findReferenceForTicket,
+  markReferencesRefundedForSessions,
+  writeCheckoutReference,
+  type ChargeModel,
+} from '@/lib/payments/references'
 
 /**
  * Tickets are app-side entitlements bound to an account, and so to its DID (spec §5.5). They
@@ -310,14 +316,24 @@ export interface CheckoutGateway {
     successUrl: string
     cancelUrl: string
   }): Promise<{ id: string; url: string | null }>
-  expireSession(sessionId: string): Promise<'expired' | 'complete' | 'open'>
+  /**
+   * A session lives in the account it was created in: a direct-charge session is invisible to
+   * a platform-scoped call, so the account recorded in `checkout_references` is passed back.
+   */
+  expireSession(sessionId: string, connectedAccountId: string | null): Promise<'expired' | 'complete' | 'open'>
 }
 
 export type CheckoutResult = { ok: true; ticketId: string; sessionId: string; url: string | null } | ClaimFailure
 
 /**
  * Paid checkout: take a hold under the tier lock, then open a Stripe session that expires with
- * the hold. If Stripe fails, the seat is released immediately.
+ * the hold, then record the immutable quote for that session before the URL leaves this
+ * function. If Stripe fails — or the reference cannot be written — the seat is released
+ * immediately and the buyer never sees a payment page we could not vouch for.
+ *
+ * With a connected account the session is opened in *that* account's context and the platform
+ * takes `application_fee_amount` (model `direct`). Without one, only the opt-in platform
+ * fallback remains, which takes no fee at all (model `platform`).
  */
 export async function startPaidCheckout(
   input: {
@@ -343,10 +359,16 @@ export async function startPaidCheckout(
       }
     }
 
+    let opened: { id: string; account: string | null } | null = null
     try {
       if (hold.previousSessionId) {
-        // Never leave two payable sessions for one seat.
-        const previous = await gateway.expireSession(hold.previousSessionId)
+        // Never leave two payable sessions for one seat. The old session is closed in the
+        // account it was opened in, which the reference (not today's event row) records.
+        const previousReference = await findReferenceForTicket(hold.ticketId, t)
+        const previous = await gateway.expireSession(
+          hold.previousSessionId,
+          previousReference?.session_id === hold.previousSessionId ? previousReference.connected_account_id : null,
+        )
         if (previous !== 'expired') {
           return {
             ok: false, status: 409, code: 'PAYMENT_IN_PROGRESS',
@@ -359,7 +381,10 @@ export async function startPaidCheckout(
         select name, price_cents, currency from ticket_tiers where id = ${input.tierId}
       `
       const [contribution] = await t<{ platform_fee_percent: number }[]>`select platform_fee_percent from events where id = ${input.event.id}`
-      const platformFeeCents = input.event.stripe_account_id ? calculatePlatformFee(tier.price_cents, contribution.platform_fee_percent) : 0
+      const connectedAccountId = input.event.stripe_account_id
+      const model: ChargeModel = connectedAccountId ? 'direct' : 'platform'
+      const appliedPercent = connectedAccountId ? Number(contribution.platform_fee_percent) : 0
+      const platformFeeCents = connectedAccountId ? calculatePlatformFee(tier.price_cents, appliedPercent) : 0
       await t`update tickets set quoted_price_cents = ${tier.price_cents}, paid_currency = ${tier.currency},
         platform_fee_cents = ${platformFeeCents} where id = ${hold.ticketId}`
       const base = `${input.origin}/e/${encodeURIComponent(input.event.slug)}/tickets`
@@ -375,14 +400,36 @@ export async function startPaidCheckout(
         eventId: input.event.id,
         eventName: input.event.name,
         customerEmail: input.holder.email,
-        stripeAccountId: input.event.stripe_account_id,
+        stripeAccountId: connectedAccountId,
         successUrl: `${base}/success?ticket=${hold.ticketId}`,
         cancelUrl: `${base}?cancelled=true`,
       })
+      opened = { id: session.id, account: connectedAccountId }
       await t`update tickets set checkout_session_id = ${session.id}, updated_at = now() where id = ${hold.ticketId}`
+      // The immutable quote. Nothing may be settled for this session without it.
+      await writeCheckoutReference(t, {
+        sessionId: session.id,
+        connectedAccountId,
+        eventId: input.event.id,
+        tierId: input.tierId,
+        ticketId: hold.ticketId,
+        holderAccountId: input.holder.accountId,
+        unitAmount: tier.price_cents,
+        currency: tier.currency,
+        contributionPercent: appliedPercent,
+        applicationFeeAmount: platformFeeCents,
+        model,
+      })
       return { ok: true, ticketId: hold.ticketId, sessionId: session.id, url: session.url }
     } catch (err) {
       console.error('[checkout] payment session could not be opened:', err instanceof Error ? err.name : 'error')
+      // A session that exists without its reference could never be settled; close it rather
+      // than leave a payable page behind.
+      if (opened) {
+        await gateway
+          .expireSession(opened.id, opened.account)
+          .catch(() => console.error('[checkout] the unusable session could not be expired'))
+      }
       await release()
       return { ok: false, status: 502, error: 'Failed to create checkout session', code: 'CHECKOUT_FAILED' }
     }
@@ -400,7 +447,8 @@ export type SettlementOutcome = 'confirmed' | 'already_confirmed' | 'refund_need
  * Membership and `ticket_confirmed` are written in the same transaction as the confirmation.
  */
 export async function settlePaidCheckout(input: {
-  ticketId: string
+  /** The hold this checkout was opened for, or null once the expired-hold sweep removed it. */
+  ticketId: string | null
   eventId: string
   tierId: string | null
   holderId: string | null
@@ -440,6 +488,20 @@ export async function settlePaidCheckout(input: {
       row.checkout_session_id === input.sessionId ||
       (input.paymentIntentId !== null && row.payment_intent_id === input.paymentIntentId)
 
+    /**
+     * Point the checkout reference back at whichever ticket this payment ended up owning.
+     * The expired-hold sweep clears `ticket_id`, and settlement may then rebuild the seat or
+     * take over a newer hold; without this the sale would exist with no ticket attached, which
+     * hides it from the organizer's sales list and from the refund path while the revenue page
+     * still counts the money. It only ever fills an empty link (see migration 0029).
+     */
+    const relinkReference = async (ticketId: string) => {
+      await t`
+        update checkout_references set ticket_id = ${ticketId}
+        where session_id = ${input.sessionId} and ticket_id is null
+      `
+    }
+
     const confirm = async (id: string) => {
       await t`
         update tickets
@@ -450,6 +512,7 @@ export async function settlePaidCheckout(input: {
             checkout_session_id = ${input.sessionId}, updated_at = now()
         where id = ${id}
       `
+      await relinkReference(id)
       await afterConfirmed(t, id)
       return 'confirmed' as const
     }
@@ -461,11 +524,14 @@ export async function settlePaidCheckout(input: {
               payment_confirmed_at = now(), hold_expires_at = null, checkout_session_id = ${input.sessionId}, updated_at = now()
           where id = ${id}
         `
+        await relinkReference(id)
       } else {
-        await t`
+        const [created] = await t<{ id: string }[]>`
           insert into tickets (event_id, tier_id, user_id, status, payment_intent_id, amount_paid_cents, payment_confirmed_at, checkout_session_id)
           values (${input.eventId}, ${tierId}, ${holderId}, 'refund_needed', ${input.paymentIntentId}, ${input.amountPaidCents}, now(), ${input.sessionId})
+          returning id
         `
+        await relinkReference(created.id)
       }
       return 'refund_needed' as const
     }
@@ -521,15 +587,53 @@ export async function releaseCheckoutHold(input: { ticketId: string; eventId: st
   return result.count > 0
 }
 
-/** Cancels whatever a fully refunded payment intent paid for (including refund-needed rows). */
-export async function cancelRefundedTicket(paymentIntentId: string): Promise<number> {
+/**
+ * Cancels whatever a fully refunded payment intent paid for (including refund-needed rows),
+ * and records the refund on that checkout's reference.
+ *
+ * `deliveredAccount` is the account the `charge.refunded` delivery arrived on. A direct-charge
+ * refund is delivered on the merchant's own account, so it must match the account recorded in
+ * the reference: a connected merchant refunding one of *their own* payments cannot revoke
+ * admission at another gathering. When a refund arrives before the completion that created the
+ * ticket, there is nothing to match yet — the fingerprint is still written, so the completion
+ * replay is refused when it turns up (this is the out-of-order case, unchanged).
+ *
+ * The application fee is not reversed by a refund: `application_fee_amount` on the reference
+ * stays as the contribution that was collected, and `refunded_at` records that the sale went
+ * back. Reversing the fee is a deliberate, separate act in Stripe.
+ */
+export async function cancelRefundedTicket(
+  paymentIntentId: string,
+  deliveredAccount: string | null = null,
+): Promise<number | 'account_mismatch'> {
   return tx(async (t) => {
     await t`select pg_advisory_xact_lock(hashtextextended(${`payment:${paymentIntentId}`}, 0))`
+
+    // Only the reference that was actually paid counts: a reused hold can carry several, and
+    // the superseded ones were never settled.
+    const candidates = await t<{ id: string; session_id: string | null; reference_account: string | null; has_reference: boolean }[]>`
+      select tk.id, cr.session_id, cr.connected_account_id as reference_account, (cr.id is not null) as has_reference
+      from tickets tk
+      left join checkout_references cr
+        on cr.session_id = tk.checkout_session_id and cr.settled_at is not null
+      where tk.payment_intent_id = ${paymentIntentId}
+        and tk.status in ('pending', 'confirmed', 'checked_in', 'refund_needed')
+    `
+    // Every reference we can see must agree with the account the delivery arrived on.
+    const mismatch = candidates.some(
+      (row) => row.has_reference && (row.reference_account ?? null) !== (deliveredAccount ?? null),
+    )
+    if (mismatch) {
+      console.warn('[tickets] a refund delivery did not match the checkout reference account; ignored')
+      return 'account_mismatch' as const
+    }
+
     await t`insert into refunded_payments (payment_fingerprint) values (${createHash('sha256').update(paymentIntentId).digest('hex')}) on conflict do nothing`
     const result = await t`
       update tickets set status = 'cancelled', hold_expires_at = null, updated_at = now()
       where payment_intent_id = ${paymentIntentId} and status in ('pending', 'confirmed', 'checked_in', 'refund_needed')
     `
+    await markReferencesRefundedForSessions(t, candidates.map((row) => row.session_id).filter((id): id is string => Boolean(id)))
     return result.count
   })
 }

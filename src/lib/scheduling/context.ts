@@ -35,16 +35,30 @@ export async function loadSchedulingContext(eventId: string): Promise<Scheduling
   const [event, k, rows, timeSlots, venues, availability] = await Promise.all([
     loadEvent(eventId),
     eventK(eventId),
+    // A proposal folded into another by an accepted merger is not scheduled: its audience
+    // and its calendar event belong to the target now (migration 0031).
     sql<{
       id: string; title: string; duration: number | null; expected_attendance: number | null
       status: 'pending' | 'approved' | 'rejected' | 'scheduled'; time_slot_id: string | null
       track_id: string | null; time_preferences: string[] | null; required_features: string[] | null
-      format: string | null; pinned_venue_id: string | null
+      format: string | null; pinned_venue_id: string | null; host_ids: string[] | null
     }[]>`
-      select id, title, duration, expected_attendance, status, time_slot_id, track_id, time_preferences,
-             required_features, format, pinned_venue_id
-      from sessions where event_id = ${eventId}
-      order by created_at
+      select s.id, s.title, s.duration, s.expected_attendance, s.status, s.time_slot_id, s.track_id,
+             s.time_preferences, s.required_features, s.format, s.pinned_venue_id,
+             -- The host plus every accepted co-host: who must be in the room at once.
+             (
+               select coalesce(array_agg(distinct p), '{}')
+               from unnest(
+                 array_remove(
+                   array[s.host_id] || coalesce(
+                     (select array_agg(c.user_id) from session_cohosts c
+                      where c.session_id = s.id and c.cohost_inactive_at is null), '{}'::uuid[]),
+                   null)
+               ) as p
+             ) as host_ids
+      from sessions s
+      where s.event_id = ${eventId} and s.merged_into is null
+      order by s.created_at
     `,
     sql<{ id: string; start_time: string; end_time: string; is_break: boolean; venue_id: string | null; day_date: string | null; label: string | null }[]>`
       select id, start_time, end_time, coalesce(is_break, false) as is_break, venue_id, day_date, label
@@ -65,6 +79,7 @@ export async function loadSchedulingContext(eventId: string): Promise<Scheduling
   const bySession = new Map(availability.map((a) => [a.session_id, a]))
   const sessions: SchedulerSession[] = rows.map((s) => ({
     ...s,
+    host_ids: s.host_ids ?? [],
     windows: Array.isArray(bySession.get(s.id)?.windows) ? bySession.get(s.id)!.windows : [],
     blackouts: Array.isArray(bySession.get(s.id)?.blackouts) ? bySession.get(s.id)!.blackouts : [],
   }))

@@ -17,20 +17,23 @@
  *   venue features      +6 all present (one missing: +2; none required: +3)
  *   capacity fit        +5 comfortable, +3 tight, 0 over (unknown capacity: +2)
  *   track spread        +3 when no same-track session runs at that time (no track: +1)
- *   voter overlap       −4 (≥50%), −2 (≥30%), +2 (<10% or no data)
+ *   voter overlap       −4 (≥60%, the keep-apart line), −2 (≥30%), +2 (<10%, or not comparable)
  *   primary venue       +2 for sessions with more than 20 votes
  *
- * Voter overlap (spec §5.4) is Jaccard similarity over BALLOT TOKENS, not people: after a
- * round closes each vote row carries hmac(ballot_key, did) computed once and the key is
- * destroyed, so tokens link one participant's votes to each other and to nobody. The inputs
- * come from package C's `schedulingInputs`, which refuses while the round is open. The
- * overlap matrix never leaves the server; only the resulting assignments do.
+ * Voter overlap (spec §5.4) is the OVERLAP COEFFICIENT `|A∩B| / min(|A|,|B|)` over BALLOT
+ * TOKENS, not people: after a round closes each vote row carries hmac(ballot_key, did)
+ * computed once and the key is destroyed, so tokens link one participant's votes to each
+ * other and to nobody. The seed reads it from the same k-filtered matrix the objective and
+ * the clusters panel use (`clusters.ts`), so the greedy pass and the local search that
+ * follows it rank pairs on one scale; a pair below k is "no data", never a penalty. The
+ * inputs come from package C's `schedulingInputs`, which refuses while the round is open.
+ * The overlap matrix never leaves the server; only the resulting assignments do.
  *
  * Pure: no I/O, safe to unit test.
  */
 
 import { DEFAULT_POLICY_THRESHOLDS } from '@/lib/events/policy'
-import { KEEP_APART_THRESHOLD, keepApartPairs } from './clusters'
+import { KEEP_APART_THRESHOLD, keepApartPairs, maxPairOverlap, overlapIndex, overlapMatrix, type OverlapPair } from './clusters'
 import { hillClimb, type HillClimbStats } from './improve'
 import { buildObjectiveContext, concurrentOverlaps, type Placement as SlotPlacement } from './objective'
 import { qualityScore, type QualityReport } from './quality'
@@ -53,6 +56,13 @@ export interface SchedulerSession {
   /** The host's availability (`time_preferences` table, spec §4.2): instants, preference 1 best. */
   windows?: ReadonlyArray<{ startsAt: string; endsAt: string; preference?: 1 | 2 | 3 }>
   blackouts?: ReadonlyArray<{ startsAt: string; endsAt: string }>
+  /**
+   * The people who must be in the room: the host plus every accepted co-host. Account ids,
+   * compared only inside the scheduler (MT §12.18); never serialized into a response.
+   */
+  host_ids?: readonly string[] | null
+  /** An accepted merger folded this proposal into another: the scheduler ignores it. */
+  merged_into?: string | null
 }
 
 export interface SchedulerTimeSlot {
@@ -142,16 +152,6 @@ function halfOfDay(iso: string, timezone: string): '_am' | '_pm' {
   return hour < 12 ? '_am' : '_pm'
 }
 
-/** Jaccard similarity of two token sets (0..1). */
-export function tokenOverlap(a: ReadonlySet<string>, b: ReadonlySet<string>): number {
-  if (a.size === 0 || b.size === 0) return 0
-  const [small, large] = a.size <= b.size ? [a, b] : [b, a]
-  let intersection = 0
-  for (const token of small) if (large.has(token)) intersection++
-  const union = a.size + b.size - intersection
-  return union > 0 ? intersection / union : 0
-}
-
 interface Placement {
   occupied: Set<string>
   tracksAtTime: Map<string, Set<string>>
@@ -165,6 +165,7 @@ function scoreSlot(
   placement: Placement,
   ballots: BallotInputs,
   timezone: string,
+  overlap: ReadonlyMap<string, OverlapPair>,
 ): { score: number; warnings: string[] } {
   const warnings: string[] = []
   let score = 0
@@ -248,16 +249,13 @@ function scoreSlot(
     score += 1
   }
 
-  // 6. Ballot-token overlap with sessions already placed at the same time
-  const mine = ballots.get(session.id)?.tokens
+  // 6. Ballot-token overlap with sessions already placed at the same time. One metric, one
+  //    k-filter: `clusters.ts`, exactly as objective.ts and the clusters panel read it.
   const concurrent = placement.sessionsAtTime.get(timeKey) ?? []
-  if (mine && mine.size > 0 && concurrent.length > 0) {
-    let max = 0
-    for (const other of concurrent) {
-      const theirs = ballots.get(other)?.tokens
-      if (theirs) max = Math.max(max, tokenOverlap(mine, theirs))
-    }
-    if (max >= 0.5) {
+  const worst = concurrent.length > 0 ? maxPairOverlap(overlap, session.id, concurrent) : null
+  if (worst) {
+    const max = worst.coefficient
+    if (max >= KEEP_APART_THRESHOLD) {
       score -= 4
       warnings.push(`High voter overlap (${Math.round(max * 100)}%) with a session at the same time`)
     } else if (max >= 0.3) {
@@ -305,9 +303,11 @@ export function autoSchedule(
 ): AutoScheduleResult {
   const ballots: BallotInputs = options.ballots ?? new Map()
   const k = options.k ?? DEFAULT_POLICY_THRESHOLDS.feedbackK
+  // One k-filtered overlap lookup for the seed, the objective and the report (design §9.2).
+  const overlap = overlapIndex(overlapMatrix(ballots, k))
   const votesOf = (id: string) => ballots.get(id)?.votes ?? 0
   const queue = sessions
-    .filter((s) => s.status === 'approved' && !s.time_slot_id)
+    .filter((s) => s.status === 'approved' && !s.time_slot_id && !s.merged_into)
     .map((s, index) => ({ s, index }))
     .sort((a, b) => votesOf(b.s.id) - votesOf(a.s.id) || a.index - b.index)
     .map(({ s }) => s)
@@ -337,7 +337,7 @@ export function autoSchedule(
     for (const slot of candidates) {
       if (placement.occupied.has(slot.id)) continue
       const venue = venueById.get(slot.venue_id!)!
-      const { score, warnings } = scoreSlot(session, slot, venue, placement, ballots, options.timezone)
+      const { score, warnings } = scoreSlot(session, slot, venue, placement, ballots, options.timezone, overlap)
       if (!best || score > best.score) best = { slot, venue, score, warnings }
     }
     if (!best || best.score < 0) {
@@ -393,7 +393,7 @@ export function autoSchedule(
       const track = sessionById.get(otherId)?.track_id
       if (track) others.tracksAtTime.set(key, new Set([...(others.tracksAtTime.get(key) ?? []), track]))
     }
-    const { score, warnings } = scoreSlot(sessionById.get(a.sessionId)!, slot, venue, others, ballots, options.timezone)
+    const { score, warnings } = scoreSlot(sessionById.get(a.sessionId)!, slot, venue, others, ballots, options.timezone, overlap)
     rescored.push({
       sessionId: a.sessionId,
       sessionTitle: a.sessionTitle,

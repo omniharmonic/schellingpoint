@@ -6,96 +6,78 @@
  *         transaction); if the hold lapsed, confirm only if a seat is still free, otherwise
  *         mark `refund_needed` (logged, shown on the organizer revenue page)
  *   checkout.session.expired / async_payment_failed → release that session's hold
- *   charge.refunded (full refund)                   → cancel the ticket (or refund-needed row)
+ *   charge.refunded (full refund)                   → cancel the ticket (or refund-needed row);
+ *                                                     a partial refund is recorded, not revoked
+ *   account.updated / v2.core.account.updated       → record the merchant's capabilities and
+ *                                                     pause paid sales if one was lost
  *
- * The hold is found by `metadata.ticket_id` (set at checkout), checked against
- * `metadata.event_id`; `tier_id`/`holder_id` settle a payment whose hold was already swept. Every handler is idempotent. 503 when Stripe or the webhook secret is
- * not configured. Logs name the event type only.
+ * This route does three things and delegates the rest to `handleStripeEvent`:
+ *
+ *   1. verifies the signature against every configured secret (STRIPE_WEBHOOK_SECRET, plus
+ *      STRIPE_WEBHOOK_SECRET_CONNECT when the Connect destination has its own),
+ *   2. refuses any delivery whose `livemode` disagrees with the configured key, so a sandbox
+ *      destination and a live one can never settle each other's tickets even if both point
+ *      here by mistake,
+ *   3. passes the event on, where the connected account in the envelope and the app's own
+ *      `checkout_references` row decide what may happen. Metadata never grants admission.
+ *
+ * Every handler is idempotent. 503 when Stripe or the webhook secret is not configured.
+ * Logs name the event type, the outcome and — for a refusal — the machine-readable reason.
+ * No secret, signature or payload is ever logged.
  */
 import type Stripe from 'stripe'
-import { constructWebhookEvent, stripe } from '@/lib/payments/stripe'
-import { cancelRefundedTicket, releaseCheckoutHold, settlePaidCheckout } from '@/lib/tickets'
+import { constructWebhookEvent, stripe, stripeKeyLivemode, stripeRefundGateway } from '@/lib/payments/stripe'
+import { handleStripeEvent } from '@/lib/payments/webhook'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-
-function ticketRef(session: Stripe.Checkout.Session): { ticketId: string; eventId: string; tierId: string | null; holderId: string | null } | null {
-  const m = session.metadata ?? {}
-  if (!m.ticket_id || !m.event_id || !UUID.test(m.ticket_id) || !UUID.test(m.event_id)) return null
-  return {
-    ticketId: m.ticket_id,
-    eventId: m.event_id,
-    tierId: m.tier_id && UUID.test(m.tier_id) ? m.tier_id : null,
-    holderId: m.holder_id && UUID.test(m.holder_id) ? m.holder_id : null,
-  }
-}
-
-function paymentIntentId(value: string | Stripe.PaymentIntent | null): string | null {
-  if (!value) return null
-  return typeof value === 'string' ? value : value.id
+/** Both destinations may sign with their own secret; a delivery has to match one of them. */
+function webhookSecrets(): string[] {
+  return [process.env.STRIPE_WEBHOOK_SECRET, process.env.STRIPE_WEBHOOK_SECRET_CONNECT]
+    .filter((value): value is string => typeof value === 'string' && value.length > 0)
 }
 
 export async function POST(request: Request): Promise<Response> {
-  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET
-  if (!stripe || !webhookSecret) {
+  const secrets = webhookSecrets()
+  if (!stripe || secrets.length === 0) {
     return Response.json({ error: 'Payments are not configured' }, { status: 503 })
   }
 
   const signature = request.headers.get('stripe-signature')
   if (!signature) return Response.json({ error: 'Missing signature' }, { status: 400 })
 
-  let event: Stripe.Event
-  try {
-    event = constructWebhookEvent(await request.text(), signature, webhookSecret)
-  } catch {
-    return Response.json({ error: 'Invalid signature' }, { status: 400 })
+  const payload = await request.text()
+  let event: Stripe.Event | null = null
+  for (const secret of secrets) {
+    try {
+      event = constructWebhookEvent(payload, signature, secret)
+      break
+    } catch {
+      // Try the next configured destination secret.
+    }
+  }
+  if (!event) return Response.json({ error: 'Invalid signature' }, { status: 400 })
+
+  // Sandbox and live are never mixed: the key decides which world this deployment is in.
+  const livemode = stripeKeyLivemode()
+  if (livemode !== null && event.livemode !== livemode) {
+    console.error(`[webhooks:stripe] ${event.type} refused: livemode=${event.livemode} but this deployment is ${livemode ? 'live' : 'test'}`)
+    return Response.json({ error: 'Wrong Stripe mode for this endpoint' }, { status: 400 })
   }
 
   try {
-    switch (event.type) {
-      case 'checkout.session.completed':
-      case 'checkout.session.async_payment_succeeded': {
-        const session = event.data.object as Stripe.Checkout.Session
-        const ref = ticketRef(session)
-        if (!ref) break
-        // `completed` also fires for delayed payment methods before the money arrives.
-        if (session.payment_status !== 'paid') break
-        await settlePaidCheckout({
-          ...ref,
-          sessionId: session.id,
-          paymentIntentId: paymentIntentId(session.payment_intent),
-          amountPaidCents: session.amount_total ?? null,
-          currency: session.currency,
-          platformFeeCents: /^\d+$/.test(session.metadata?.platform_fee_cents ?? '') ? Number(session.metadata!.platform_fee_cents) : null,
-        })
-        break
-      }
-
-      case 'checkout.session.expired':
-      case 'checkout.session.async_payment_failed': {
-        const session = event.data.object as Stripe.Checkout.Session
-        const ref = ticketRef(session)
-        if (ref) await releaseCheckoutHold({ ticketId: ref.ticketId, eventId: ref.eventId, sessionId: session.id })
-        break
-      }
-
-      case 'charge.refunded': {
-        const charge = event.data.object as Stripe.Charge
-        const pi = paymentIntentId(charge.payment_intent)
-        if (pi && charge.refunded) await cancelRefundedTicket(pi)
-        break
-      }
-
-      default:
-        break
+    const result = await handleStripeEvent(event, { refunds: stripeRefundGateway() })
+    if (result.outcome === 'rejected') {
+      // A refusal is final, not a retry: answer 2xx so Stripe stops redelivering it.
+      console.error(`[webhooks:stripe] ${result.type} rejected: ${result.detail ?? 'unverified'}`)
+    } else if (result.outcome !== 'unhandled') {
+      console.info(`[webhooks:stripe] ${result.type} ${result.outcome}${result.detail ? ` (${result.detail})` : ''}`)
     }
+    return Response.json({ received: true, outcome: result.outcome })
   } catch (err) {
     // Non-2xx makes Stripe retry; handlers are idempotent.
     console.error(`[webhooks:stripe] ${event.type} failed:`, err instanceof Error ? err.name : 'error')
     return Response.json({ error: 'Webhook handler failed' }, { status: 500 })
   }
-
-  return Response.json({ received: true })
 }

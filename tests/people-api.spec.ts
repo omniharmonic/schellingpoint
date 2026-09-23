@@ -320,7 +320,8 @@ test.describe('people API', () => {
 
   test('the shared-key profiles endpoints are gone', async () => {
     for (const path of ['/api/v1/profiles', `/api/v1/profiles?event=${publicSlug}`, `/api/v1/profiles/${alice.id}`]) {
-      const res = await fetch(`${base}${path}`, { headers: { 'x-api-key': process.env.API_KEY_BONFIRESAI || 'anything' } })
+      // The header is meaningless now: no route reads a key at all (spec §2).
+      const res = await fetch(`${base}${path}`, { headers: { 'x-api-key': 'anything' } })
       expect(res.status, path).toBe(410)
       const text = await res.text()
       expect(text).not.toContain('alice_example')

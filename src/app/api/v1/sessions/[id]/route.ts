@@ -1,10 +1,11 @@
 import { asAccount, dbErrorResponse, sql } from '@/lib/db'
 import { assertSameOrigin, requireViewer } from '@/lib/auth/viewer'
-import { validateApiKey } from '@/lib/api/auth'
+import { publicEventForRow } from '@/lib/api/auth'
 import { notify, type NotificationType } from '@/lib/notifications'
 import { validateSkillUris } from '@/lib/atproto/skills'
 import { flagProposalWithdrawn } from '@/lib/atproto/drift'
-import { apiSuccess, unauthorized, badRequest, notFound, methodNotAllowed, isValidUUID } from '@/lib/api/response'
+import { mergedSources } from '@/lib/sessions/merge'
+import { badRequest, notFound, methodNotAllowed, isValidUUID } from '@/lib/api/response'
 import {
   canSeeSession,
   json,
@@ -25,33 +26,27 @@ import {
 } from '../_lib/validate'
 import { publishProposalFor, withdrawProposalFor, type AtprotoOutcome } from '../_lib/atproto'
 import { reconcileTimePreference, saveTimePreference } from '../_lib/time-preference'
-import { partnerSessions } from '../_lib/partner'
+import { publicJson, publishedSessions } from '@/app/api/v1/schedule/public-read'
 
 type Params = { params: Promise<{ id: string }> }
 
-/** GET /api/v1/sessions/[id] — partner read API (x-api-key); public/unlisted non-draft events only. */
+/**
+ * GET /api/v1/sessions/[id] — one published session, public and keyless (the shared-key partner
+ * API is gone, spec §2). Served by the same `publishedSessions` read the public schedule uses:
+ * published records only, for public or unlisted non-draft gatherings. `?event=<slug>` is
+ * optional and must match. 404 when the session is not published or not publicly readable.
+ */
 export async function GET(request: Request, { params }: Params) {
-  if (!validateApiKey(request)) return unauthorized()
   const { id } = await params
   if (!isValidUUID(id)) return badRequest('Invalid session ID format. Expected a UUID.')
 
-  const url = new URL(request.url)
-  const requestedSlug = url.searchParams.get('event')?.trim() || null
-  const events = await sql<{ id: string; slug: string }[]>`
-    select e.id, e.slug from events e join sessions s on s.event_id = e.id
-    where s.id = ${id} and e.visibility in ('public', 'unlisted') and e.status <> 'draft'
-  `
-  const event = events[0]
-  if (!event || (requestedSlug && requestedSlug !== event.slug)) return notFound('Session')
+  const [row] = await sql<{ event_id: string }[]>`select event_id from sessions where id = ${id}`
+  const event = await publicEventForRow(request, row?.event_id)
+  if (!event) return notFound('Session')
 
-  const [session] = await partnerSessions({
-    eventId: event.id,
-    statuses: ['approved', 'scheduled'],
-    includes: ['host', 'track', 'venue', 'timeslot', 'cohosts'],
-    sessionId: id,
-  })
+  const [session] = await publishedSessions(event.id, { actorDid: event.actor_did, sessionId: id })
   if (!session) return notFound('Session')
-  return apiSuccess(session)
+  return publicJson(session)
 }
 
 function normalize(value: unknown): string {
@@ -280,6 +275,17 @@ export async function DELETE(request: Request, { params }: Params) {
     return jsonError(403, access.isOrganizer
       ? 'Organizers decline a proposal instead of deleting it'
       : 'Only the proposer can withdraw a proposal')
+  }
+
+  // A session other proposals were merged into cannot simply go: deleting it would leave each
+  // source un-merged but unvotable, and every vote cast for them would be dropped at close
+  // with nobody told (migration 0031 makes `merged_into` ON DELETE RESTRICT for this reason).
+  const merged = await mergedSources(id)
+  if (merged.length > 0) {
+    return jsonError(409, merged.length === 1
+      ? 'Another proposal was merged into this session. Undo that merger before withdrawing it.'
+      : `${merged.length} proposals were merged into this session. Undo those mergers before withdrawing it.`,
+      { code: 'MergeTarget', mergedSources: merged.length })
   }
 
   const atproto: AtprotoOutcome = rel.proposal_uri ? await withdrawProposalFor(id, viewer.accountId) : { skipped: 'nothing_to_withdraw' }

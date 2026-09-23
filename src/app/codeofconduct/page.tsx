@@ -11,7 +11,19 @@ export default function CodeOfConductPage() {
       {/* Content */}
       <main className="container mx-auto px-5 py-12 max-w-3xl flex-1">
         <h1 className="page-title mb-2">Code of conduct</h1>
-        <p className="text-muted-foreground mb-8">Last updated: February 2026</p>
+        <p className="text-muted-foreground mb-4">Last updated: February 2026</p>
+        {/*
+          Each gathering may publish its own code of conduct and require people to accept it
+          when they join (MT §12.19). This page is the floor, not the ceiling: a gathering's own
+          document adds to it and never replaces it, and it is linked from that gathering's own
+          join screen and settings.
+        */}
+        <p className="mb-8 rounded-xl border bg-muted/40 p-4 text-sm text-muted-foreground">
+          This is the floor for every gathering on unconference. A gathering may also publish its own code of
+          conduct, and may ask you to accept it when you join — you will find the link on its join screen and
+          under Settings once you are a member. A gathering&apos;s own document adds to this one; it never
+          replaces it.
+        </p>
 
         <div className="prose prose-invert prose-sm max-w-none space-y-8">
           {/* 1. Our Pledge */}
@@ -22,7 +34,7 @@ export default function CodeOfConductPage() {
             </p>
             <p className="text-muted-foreground leading-relaxed mt-3">
               Your safety and comfort are our priority. If you have questions or concerns at any point before, during, or after the event, contact us at{' '}
-              <a href="mailto:kim@impactfulevents.io" className="text-primary hover:underline">kim@impactfulevents.io</a>{' '}
+              <a href="mailto:kim@impactfulevents.io" className="text-primary underline underline-offset-2">kim@impactfulevents.io</a>{' '}
               or find an event organizer member at the event information desk.
             </p>
           </section>
@@ -115,7 +127,7 @@ export default function CodeOfConductPage() {
             </p>
             <ul className="list-disc list-inside text-muted-foreground space-y-2 mt-2">
               <li><strong className="text-foreground">At the event:</strong> Find an event organizer member (identifiable by a blue wristband) or go to the information desk.</li>
-              <li><strong className="text-foreground">Online or after the event:</strong> Email <a href="mailto:kim@impactfulevents.io" className="text-primary hover:underline">kim@impactfulevents.io</a> with a description of the incident, the time and location (or channel), and any supporting documentation.</li>
+              <li><strong className="text-foreground">Online or after the event:</strong> Email <a href="mailto:kim@impactfulevents.io" className="text-primary underline underline-offset-2">kim@impactfulevents.io</a> with a description of the incident, the time and location (or channel), and any supporting documentation.</li>
             </ul>
             <p className="text-muted-foreground leading-relaxed mt-3">
               All reports will be reviewed and investigated. The event organizer is obligated to maintain confidentiality regarding the identity of the reporter.
@@ -145,7 +157,7 @@ export default function CodeOfConductPage() {
             <h3 className="text-lg font-medium mt-5 mb-2">Appeal</h3>
             <p className="text-muted-foreground leading-relaxed">
               Individuals subject to enforcement actions may appeal by submitting additional context or evidence in writing to{' '}
-              <a href="mailto:conduct@schellingpoint.xyz" className="text-primary hover:underline">conduct@schellingpoint.xyz</a>{' '}
+              <a href="mailto:conduct@schellingpoint.xyz" className="text-primary underline underline-offset-2">conduct@schellingpoint.xyz</a>{' '}
               within 14 days of the action. Appeals will be reviewed by a member of the organizing team who was not involved in the original decision.
             </p>
           </section>

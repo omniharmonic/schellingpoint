@@ -76,6 +76,8 @@ interface SessionRow {
   proposal_uri: string | null
   calendar_event_uri: string | null
   proposal_withdrawn_at: string | null
+  merged_into: string | null
+  merged_into_title: string | null
   created_at: string
   updated_at: string
   host_display_name: string | null
@@ -161,6 +163,11 @@ export interface SessionView {
   proposal_uri: string | null
   calendar_event_uri: string | null
   proposal_withdrawn: boolean
+  /**
+   * An accepted merger folded this proposal into another (PRD §4.4). The author's own record
+   * is untouched — this is the app saying where the conversation went.
+   */
+  merged_into: { id: string; title: string } | null
   is_favorite: boolean
   my_rsvp: { status: 'confirmed' | 'waitlist'; waitlist_position: number | null; public: boolean } | null
   viewer: {
@@ -207,9 +214,11 @@ async function queryRows(access: EventAccess, filters: SessionListFilters, sessi
     s.host_id = ${viewerId}::uuid
     or exists (select 1 from session_cohosts oc where oc.session_id = s.id and oc.user_id = ${viewerId}::uuid)
   )`
+  // A session hidden by moderation leaves the listings for everyone but the organizers who
+  // hid it and the author, whose own record it still is (migration 0033).
   const visibility = access.isOrganizer
     ? sql`true`
-    : sql`(((s.status in ${sql([...PUBLIC_STATUSES])}) and (s.author_inactive_at is null or s.status = 'scheduled')) or ${ownership})`
+    : sql`(not coalesce(s.hidden_by_moderation, false) or ${ownership}) and (((s.status in ${sql([...PUBLIC_STATUSES])}) and (s.author_inactive_at is null or s.status = 'scheduled')) or ${ownership})`
 
   let statuses: string[] | null
   if (sessionId || filters.statuses === 'all' || filters.mine) {
@@ -228,6 +237,13 @@ async function queryRows(access: EventAccess, filters: SessionListFilters, sessi
         : filters.sort === 'time' ? sql`${startExpr} asc nulls last, lower(s.title) asc`
           : sql`s.created_at desc`
 
+  // A proposal folded into another (migration 0031) leaves the lists: the conversation is at
+  // the target now. It stays reachable at its own URL, and its own people and the organizers
+  // still see it, so nobody's work silently vanishes.
+  const merged = sessionId || access.isOrganizer
+    ? sql``
+    : sql`and (s.merged_into is null or ${viewerId ? ownership : sql`false`})`
+
   return sql<SessionRow[]>`
     select
       s.id, s.event_id, s.title, s.description, s.format, s.duration, s.topic_tags, s.skill_uris as skills, s.status,
@@ -236,7 +252,7 @@ async function queryRows(access: EventAccess, filters: SessionListFilters, sessi
       v.latitude::float8 as venue_latitude, v.longitude::float8 as venue_longitude,
       s.telegram_group_url, s.expected_attendance, s.required_features, s.time_preferences,
       s.rsvp_count, s.waitlist_count, s.host_id, s.rejection_reason, s.proposal_uri, s.calendar_event_uri,
-      s.proposal_withdrawn_at, s.created_at, s.updated_at,
+      s.proposal_withdrawn_at, s.merged_into, mt.title as merged_into_title, s.created_at, s.updated_at,
       -- A proposer whose repo is taken down / deactivated is not shown (sessions.author_inactive_at).
       case when s.author_inactive_at is null then hp.display_name end as host_display_name,
       case when s.author_inactive_at is null then hp.avatar_url end as host_avatar_url,
@@ -264,6 +280,7 @@ async function queryRows(access: EventAccess, filters: SessionListFilters, sessi
       tp.windows as time_windows, tp.blackouts as time_blackouts, tp.publish as time_publish,
       tp.record_uri as time_record_uri
     from sessions s
+    left join sessions mt on mt.id = s.merged_into
     left join profiles hp on hp.id = s.host_id
     left join accounts ha on ha.id = s.host_id
     left join session_host_listings hl on hl.session_id = s.id and ${access.isOrganizer}
@@ -275,6 +292,7 @@ async function queryRows(access: EventAccess, filters: SessionListFilters, sessi
     left join time_preferences tp on tp.session_id = s.id and tp.account_id = s.host_id
     where s.event_id = ${eventId}
       and ${visibility}
+      ${merged}
       ${sessionId ? sql`and s.id = ${sessionId}` : sql``}
       ${statuses ? (statuses.length ? sql`and s.status in ${sql(statuses)}` : sql`and false`) : sql``}
       ${filters.mine ? sql`and ${viewerId ? ownership : sql`false`}` : sql``}
@@ -375,6 +393,7 @@ export function serializeSession(row: SessionRow, access: EventAccess, detail: b
     proposal_uri: row.proposal_uri,
     calendar_event_uri: row.calendar_event_uri,
     proposal_withdrawn: !!row.proposal_withdrawn_at,
+    merged_into: row.merged_into ? { id: row.merged_into, title: row.merged_into_title ?? 'another session' } : null,
     is_favorite: !!row.is_favorite,
     my_rsvp: row.rsvp_status === 'confirmed' || row.rsvp_status === 'waitlist'
       ? { status: row.rsvp_status, waitlist_position: row.rsvp_waitlist_position, public: !!row.rsvp_uri }

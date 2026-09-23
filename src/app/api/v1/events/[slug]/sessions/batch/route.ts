@@ -4,8 +4,9 @@
  * Body: { action: 'approve' | 'reject' | 'assign_track' | 'delete', session_ids: uuid[], reason?, track_id? }
  *
  * Runs as the organizer's account (`asAccount`) so the session update rules and RLS apply at
- * the database boundary. Each host gets one notification per session whose status actually
- * changed (`session_approved` / `session_rejected`), written in the same transaction (plan §7.2).
+ * the database boundary. Each host AND co-host gets one notification per session whose status
+ * actually changed (`session_approved` / `session_rejected`), written in the same transaction
+ * (plan §7.2) — the same recipients the single-session path resolves (inventory P2-10).
  *
  *   approve       pending | rejected → approved
  *   reject        pending | approved → rejected (reason stored and sent to the host)
@@ -15,6 +16,7 @@
  *
  * Sessions that cannot take the action are reported in `skipped` with a reason.
  */
+import type postgres from 'postgres'
 import { asAccount } from '@/lib/db'
 import { notify } from '@/lib/notifications'
 import {
@@ -42,6 +44,32 @@ interface Skipped {
   id: string
   title: string
   reason: string
+}
+
+/**
+ * Everyone who runs a session: the proposer and every accepted co-host, minus the organizer
+ * doing the reviewing. Mirrors `PATCH /api/v1/sessions/[id]`.
+ */
+async function recipientsFor(
+  tx: postgres.TransactionSql,
+  eventId: string,
+  sessionIds: readonly string[],
+  actingAccountId: string,
+): Promise<Map<string, string[]>> {
+  const byId = new Map<string, string[]>()
+  if (!sessionIds.length) return byId
+  const rows = await tx<{ session_id: string; user_id: string | null }[]>`
+    select s.id as session_id, s.host_id as user_id
+    from sessions s where s.event_id = ${eventId} and s.id in ${tx(sessionIds as string[])}
+    union
+    select c.session_id, c.user_id
+    from session_cohosts c where c.event_id = ${eventId} and c.session_id in ${tx(sessionIds as string[])}
+  `
+  for (const row of rows) {
+    if (!row.user_id || row.user_id === actingAccountId) continue
+    byId.set(row.session_id, [...(byId.get(row.session_id) ?? []), row.user_id])
+  }
+  return byId
 }
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ slug: string }> }) {
@@ -95,14 +123,11 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ sl
             update sessions set status = 'approved', rejection_reason = null
             where event_id = ${eventId} and id in ${tx(changed.map((r) => r.id))}
           `
-          const hosts = await tx<{ id: string; host_id: string | null }[]>`
-            select id, host_id from sessions where event_id = ${eventId} and id in ${tx(changed.map((r) => r.id))}
-          `
-          const hostOf = new Map(hosts.map((h) => [h.id, h.host_id]))
+          const recipients = await recipientsFor(tx, eventId, changed.map((r) => r.id), ctx.viewer.accountId)
           for (const r of changed) {
             await notify(tx, {
               eventId,
-              userIds: [hostOf.get(r.id)],
+              userIds: recipients.get(r.id) ?? [],
               type: 'session_approved',
               title: 'Your session has been approved',
               body: `"${r.title}" has been approved for ${event.name}.`,
@@ -126,14 +151,11 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ sl
             update sessions set status = 'rejected', rejection_reason = ${reason}
             where event_id = ${eventId} and id in ${tx(changed.map((r) => r.id))}
           `
-          const hosts = await tx<{ id: string; host_id: string | null }[]>`
-            select id, host_id from sessions where event_id = ${eventId} and id in ${tx(changed.map((r) => r.id))}
-          `
-          const hostOf = new Map(hosts.map((h) => [h.id, h.host_id]))
+          const recipients = await recipientsFor(tx, eventId, changed.map((r) => r.id), ctx.viewer.accountId)
           for (const r of changed) {
             await notify(tx, {
               eventId,
-              userIds: [hostOf.get(r.id)],
+              userIds: recipients.get(r.id) ?? [],
               type: 'session_rejected',
               title: 'Session not selected',
               body: `"${r.title}" was not selected for ${event.name}.${reason ? ` Reason: ${reason}` : ''}`,

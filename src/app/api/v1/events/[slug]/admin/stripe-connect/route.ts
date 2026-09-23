@@ -1,17 +1,21 @@
 /**
- * Stripe Connect (Express) onboarding for an event.
+ * Merchant-account onboarding for a gathering (Stripe Connect).
  *
- * GET    → connection status for the event's connected account
- *          { connected, accountId, chargesEnabled, payoutsEnabled,
- *            detailsSubmitted, requirementsDue, platformFallbackAllowed }
- * POST   → create the Express account if missing, then return an onboarding
- *          link { url }. With `?action=dashboard`, return an Express Dashboard
- *          login link instead.
- * DELETE → disconnect (owner only): clears events.stripe_account_id and turns
- *          ticketing off unless platform-account charging is explicitly allowed.
+ * GET    → readiness for the event's merchant account
+ *          { connected, accountId, chargesEnabled, payoutsEnabled, detailsSubmitted,
+ *            requirementsDue, api, platformFallbackAllowed }
+ * POST   → create the merchant account if missing, then return a Stripe-hosted onboarding
+ *          link { url }. With `?action=dashboard`, return a dashboard login link instead.
+ * DELETE → disconnect (owner only): clears events.stripe_account_id and stops paid sales.
  *          The Stripe account itself is never deleted.
  *
- * Return/refresh from Stripe-hosted onboarding land on
+ * Accounts are created through `stripeMerchantGateway()`: Accounts v2 with a merchant
+ * configuration, a full Stripe dashboard and `fees_collector`/`losses_collector` of `stripe`
+ * (falling back to the v1 `controller` equivalent when v2 is not enabled for the platform).
+ * Stripe-hosted onboarding collects country, legal identity and payout details directly from
+ * the organizer; this application never invents or attests to a business detail.
+ *
+ * Return/refresh from onboarding land on
  *   /e/[slug]/admin/tickets?stripe=return|refresh
  * There is no server-side callback: the tickets page re-fetches GET here,
  * which is the only trustworthy source of onboarding state.
@@ -25,15 +29,8 @@ import Stripe from 'stripe'
 import { assertSameOrigin, requireEventRole } from '@/lib/auth/viewer'
 import { sql } from '@/lib/db'
 import type { EventRoleName } from '@/types/event'
-import {
-  NOT_CONNECTED_STATUS,
-  createConnectAccount,
-  createDashboardLoginLink,
-  createOnboardingLink,
-  getConnectAccountStatus,
-  isPlatformChargeFallbackAllowed,
-  isStripeConfigured,
-} from '@/lib/payments/stripe'
+import { NOT_CONNECTED_STATUS } from '@/lib/payments/merchant'
+import { isPlatformChargeFallbackAllowed, isStripeConfigured, stripeMerchantGateway } from '@/lib/payments/stripe'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -90,7 +87,8 @@ export async function GET(
 
   // A status read is not a failure: answer 200 so the admin page can render the
   // "not configured" state without a console error on every load.
-  if (!isStripeConfigured()) {
+  const gateway = stripeMerchantGateway()
+  if (!gateway) {
     return NextResponse.json({ ...NOT_CONNECTED_STATUS, platformFallbackAllowed: false, unavailable: true })
   }
 
@@ -102,13 +100,13 @@ export async function GET(
   }
 
   try {
-    const status = await getConnectAccountStatus(accountId)
+    const status = await gateway.readiness(accountId)
     return NextResponse.json({ ...status, platformFallbackAllowed })
   } catch (err) {
     // The account id is stored but Stripe can't return it (deleted, wrong mode
     // key, etc). Report it as connected-but-unhealthy so the owner can disconnect.
     const message = err instanceof Error ? err.message : 'Unable to retrieve Stripe account'
-    console.error('[stripe-connect] accounts.retrieve failed')
+    console.error('[stripe-connect] merchant readiness could not be read')
     return NextResponse.json({
       ...NOT_CONNECTED_STATUS,
       connected: true,
@@ -127,18 +125,19 @@ export async function POST(
   const auth = await authorize(request, slug, ADMIN_ROLES)
   if (!auth.ok) return auth.response
 
-  if (!isStripeConfigured()) return notConfigured()
+  const gateway = stripeMerchantGateway()
+  if (!gateway || !isStripeConfigured()) return notConfigured()
 
   const action = request.nextUrl.searchParams.get('action')
   const { event, viewer } = auth
 
-  // --- Express Dashboard login link -------------------------------------
+  // --- Stripe-hosted dashboard login link -------------------------------
   if (action === 'dashboard') {
     if (!event.stripe_account_id) {
       return NextResponse.json({ error: 'No Stripe account is connected to this event' }, { status: 400 })
     }
     try {
-      const url = await createDashboardLoginLink(event.stripe_account_id)
+      const url = await gateway.dashboardLink(event.stripe_account_id)
       return NextResponse.json({ url })
     } catch (err) {
       return stripeErrorResponse(err, 'Failed to create dashboard link')
@@ -149,18 +148,19 @@ export async function POST(
     return NextResponse.json({ error: `Unknown action '${action}'` }, { status: 400 })
   }
 
-  // --- Create account if needed, then onboarding link -------------------
+  // --- Create the merchant account if needed, then an onboarding link ----
   let accountId = event.stripe_account_id
 
   if (!accountId) {
     try {
-      const account = await createConnectAccount({
+      const created = await gateway.createAccount({
         eventId: event.id,
         eventSlug: event.slug,
         eventName: event.name,
         email: viewer.email,
       })
-      accountId = account.id
+      accountId = created.accountId
+      console.info(`[stripe-connect] created a merchant account via Accounts ${created.api}`)
     } catch (err) {
       return stripeErrorResponse(err, 'Failed to create Stripe account')
     }
@@ -191,7 +191,7 @@ export async function POST(
   const base = `${origin}/e/${encodeURIComponent(event.slug)}/admin/tickets`
 
   try {
-    const url = await createOnboardingLink({
+    const url = await gateway.onboardingLink({
       accountId,
       refreshUrl: `${base}?stripe=refresh`,
       returnUrl: `${base}?stripe=return`,
@@ -219,7 +219,9 @@ export async function DELETE(
     return NextResponse.json({ error: 'No Stripe account is connected to this event' }, { status: 400 })
   }
 
-  // Admission rules survive a payout disconnection. Paid checkout fails closed.
+  // Admission rules survive a payout disconnection. Paid checkout fails closed: an open
+  // checkout whose reference names this account can no longer be settled, because the
+  // reference and the event row no longer agree.
   const [updated] = await sql<{ ticketing_enabled: boolean; stripe_account_id: string | null }[]>`
     update events
     set stripe_account_id = null,

@@ -22,6 +22,7 @@ import { BrandingSection } from './_components/BrandingSection'
 import { ImagesSection } from './_components/ImagesSection'
 import { FeedNetworkSection } from './_components/FeedNetworkSection'
 import { LifecycleSection } from './_components/LifecycleSection'
+import { CloneSection } from './_components/CloneSection'
 import { DangerZone } from './_components/DangerZone'
 import { SETTINGS_SECTIONS } from './_components/labels'
 
@@ -108,6 +109,7 @@ export default function EventSettingsPage() {
     <ImagesSection event={event} />
     <React.Suspense fallback={null}><FeedNetworkSection event={event} network={network} /></React.Suspense>
     <LifecycleSection event={event} status={status} onChanged={setStatus} hasIdentity={Boolean(network?.did)} />
+    <CloneSection event={event} />
     {isOwner ? <div className="border-t pt-8"><DangerZone event={event} status={status} published={Boolean(network?.publishedAt)} /></div> : null}
   </div>
 }

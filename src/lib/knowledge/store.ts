@@ -31,6 +31,8 @@ export interface TranscriptRow {
   status: 'ready' | 'processing' | 'failed'
   summary: string | null
   summary_generated_at: string | null
+  /** Set when an organizer edited the generated summary (design §10.3); null = as generated. */
+  summary_edited_at: string | null
   replaced_at: string | null
   created_at: string
 }
@@ -43,7 +45,7 @@ export interface TranscriptWithContent extends TranscriptRow {
 // (`next build` evaluates every route's module graph without DATABASE_URL).
 const rowColumns = () => sql`
   id, event_id, session_id, uploaded_by, source, format, char_count, language, consent_confirmed_at,
-  visibility, status, summary, summary_generated_at, replaced_at, created_at
+  visibility, status, summary, summary_generated_at, summary_edited_at, replaced_at, created_at
 `
 
 /** The tier a role reads at: organizers see everything, other members the members tier. */
@@ -118,6 +120,49 @@ export async function updateSummary(transcriptId: string, summary: string | null
   await sql`update session_transcripts set summary = ${summary}, summary_generated_at = ${summary ? sql`now()` : null} where id = ${transcriptId}`
 }
 
+/** Longest summary an organizer may save (a generated one is a few hundred words). */
+export const MAX_SUMMARY_CHARS = 8_000
+
+/**
+ * An organizer's edit of the current summary (design §10.3). The generated text is replaced in
+ * place — members read one summary, the edited one — and who edited it, and when, is kept.
+ * Empty text clears the summary (the next summaries run writes a fresh one).
+ */
+export async function editSummary(input: { sessionId: string; summary: string | null; editedBy: string }): Promise<TranscriptRow | null> {
+  const summary = input.summary?.trim() ? input.summary.trim().slice(0, MAX_SUMMARY_CHARS) : null
+  const rows = await sql<TranscriptRow[]>`
+    update session_transcripts set
+      summary = ${summary},
+      summary_edited_at = ${summary ? sql`now()` : null},
+      summary_edited_by = ${summary ? input.editedBy : null}
+    where session_id = ${input.sessionId} and replaced_at is null
+    returning ${rowColumns()}
+  `
+  return rows[0] ?? null
+}
+
+/**
+ * Is there at least one ready transcript THIS VIEWER may read? The workspace sidebar shows "Ask"
+ * only then (design §10.2; inventory 17.7). One indexed count, computed server-side per render:
+ * a member sees it when a members-tier transcript exists, an organizer whenever any does, and a
+ * non-member never.
+ */
+export async function hasReadableTranscripts(eventId: string, role: EventRoleName | null | undefined): Promise<boolean> {
+  const tier = readTier(role)
+  if (!tier) return false
+  const [event] = await sql<{ transcripts_enabled: boolean; transcripts_visibility: TranscriptVisibility }[]>`
+    select transcripts_enabled, transcripts_visibility from events where id = ${eventId}
+  `
+  if (!event?.transcripts_enabled) return false
+  if (tier === 'members' && event.transcripts_visibility !== 'members') return false
+  const [row] = await sql<{ n: number }[]>`
+    select count(*)::int as n from session_transcripts
+    where event_id = ${eventId} and replaced_at is null and status = 'ready'
+      ${tier === 'members' ? sql`and visibility = 'members'` : sql``}
+  `
+  return (row?.n ?? 0) > 0
+}
+
 export async function readyTranscriptCount(eventId: string): Promise<number> {
   const [row] = await sql<{ count: number }[]>`
     select count(*) as count from session_transcripts where event_id = ${eventId} and replaced_at is null and status = 'ready'
@@ -165,7 +210,7 @@ export interface CoverageSession {
   host_name: string | null
   track: string | null
   starts_at: string | null
-  transcript: { id: string; format: string; char_count: number; word_count: number; created_at: string; has_summary: boolean; visibility: string } | null
+  transcript: { id: string; format: string; char_count: number; word_count: number; created_at: string; has_summary: boolean; summary_edited: boolean; visibility: string } | null
 }
 
 export interface CoverageJob {
@@ -184,14 +229,16 @@ export interface Coverage {
   totals: { sessions: number; with_transcript: number; without_transcript: number; words: number; chunks: number; embedded: number }
   jobs: CoverageJob[]
   themes: unknown
+  /** When an organizer last edited the themes (design §10.3); null = exactly as generated. */
+  themes_edited_at: string | null
   providers: ProviderStatus
 }
 
 /** Organizer view: every approved / scheduled session, with or without a transcript. */
 export async function coverage(eventId: string): Promise<Coverage> {
   const embeddingModel = embeddingsConfig()?.storedModel ?? null
-  const [event] = await sql<{ transcripts_enabled: boolean; transcripts_visibility: TranscriptVisibility; themes: unknown }[]>`
-    select transcripts_enabled, transcripts_visibility, themes from events where id = ${eventId}
+  const [event] = await sql<{ transcripts_enabled: boolean; transcripts_visibility: TranscriptVisibility; themes: unknown; themes_edited_at: string | null }[]>`
+    select transcripts_enabled, transcripts_visibility, themes, themes_edited_at from events where id = ${eventId}
   `
   type Row = Omit<CoverageSession, 'transcript'> & {
     transcript_id: string | null
@@ -200,13 +247,15 @@ export async function coverage(eventId: string): Promise<Coverage> {
     word_count: number | null
     transcript_created_at: string | null
     has_summary: boolean | null
+    summary_edited: boolean | null
     visibility: string | null
   }
   const rows = await sql<Row[]>`
     select s.id, s.title, s.status, s.host_id, p.display_name as host_name, tr.name as track, ts.start_time as starts_at,
            t.id as transcript_id, t.format, t.char_count,
            case when t.id is null then null else array_length(regexp_split_to_array(btrim(t.content), '\\s+'), 1) end as word_count,
-           t.created_at as transcript_created_at, (t.summary is not null) as has_summary, t.visibility
+           t.created_at as transcript_created_at, (t.summary is not null) as has_summary,
+           (t.summary_edited_at is not null) as summary_edited, t.visibility
     from sessions s
     left join profiles p on p.id = s.host_id
     left join tracks tr on tr.id = s.track_id
@@ -231,6 +280,7 @@ export async function coverage(eventId: string): Promise<Coverage> {
           word_count: r.word_count ?? 0,
           created_at: r.transcript_created_at ?? '',
           has_summary: !!r.has_summary,
+          summary_edited: !!r.summary_edited,
           visibility: r.visibility ?? 'members',
         }
       : null,
@@ -262,6 +312,7 @@ export async function coverage(eventId: string): Promise<Coverage> {
     },
     jobs,
     themes: event?.themes ?? null,
+    themes_edited_at: event?.themes_edited_at ?? null,
     providers: providerStatus(),
   }
 }

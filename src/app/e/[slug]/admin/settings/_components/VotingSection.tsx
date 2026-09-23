@@ -7,6 +7,7 @@ import type { Event, VotingMechanism } from '@/types/event'
 import { SectionCard, SaveBar, Field, ChoiceCard, Toggle } from './SectionCard'
 import { useSectionSave, toEventLocal, sameValue } from './shared'
 import { VOTING_MECHANISMS } from './constants'
+import { RoundControls } from '@/components/admin/RoundControls'
 
 export function VotingSection({ event }: { event: Event }) {
   const { state, save } = useSectionSave(event.id)
@@ -16,6 +17,7 @@ export function VotingSection({ event }: { event: Event }) {
   const [closesAt, setClosesAt] = React.useState(() => toEventLocal(event.votingClosesAt, event.timezone))
   const [attendanceEnabled, setAttendanceEnabled] = React.useState(event.attendanceVotingEnabled)
   const [attendanceCredits, setAttendanceCredits] = React.useState(event.attendanceCredits)
+  const [checkinGate, setCheckinGate] = React.useState(event.checkinGatesVoting)
   const fieldError = (field: string) => (state.status === 'error' && state.field === field ? state.message : null)
 
   React.useEffect(() => {
@@ -26,11 +28,13 @@ export function VotingSection({ event }: { event: Event }) {
   const patch = {
     vote_credits_per_user: credits, voting_mechanism: mechanism, voting_opens_at: opensAt || null, voting_closes_at: closesAt || null,
     attendance_voting_enabled: attendanceEnabled, attendance_credits: attendanceCredits,
+    checkin_gates_voting: checkinGate,
   }
   const dirty = !sameValue(patch, {
     vote_credits_per_user: event.voteCreditsPerUser, voting_mechanism: event.votingMechanism,
     voting_opens_at: toEventLocal(event.votingOpensAt, event.timezone) || null, voting_closes_at: toEventLocal(event.votingClosesAt, event.timezone) || null,
     attendance_voting_enabled: event.attendanceVotingEnabled, attendance_credits: event.attendanceCredits,
+    checkin_gates_voting: event.checkinGatesVoting,
   })
   const creditsChanged = Number.isInteger(credits) && credits > 0 && credits !== event.voteCreditsPerUser
   const validCredits = Number.isInteger(credits) && credits > 0 && Number.isInteger(attendanceCredits) && attendanceCredits > 0
@@ -74,6 +78,11 @@ export function VotingSection({ event }: { event: Event }) {
       <Field label="Attendance credits per attendee" htmlFor="attendance-credits" error={fieldError('attendance_credits')} hint="Independent of the pre-event budget; nothing carries over.">
         <Input id="attendance-credits" type="number" min={1} value={attendanceCredits} onChange={e => { const v = parseInt(e.target.value, 10); setAttendanceCredits(Number.isNaN(v) ? 0 : v) }} className="max-w-[160px]" error={!!fieldError('attendance_credits')} disabled={!attendanceEnabled} />
       </Field>
+      <Toggle id="checkin-gates-voting" checked={checkinGate} onChange={setCheckinGate}
+        label="Only checked-in people can vote during the event"
+        description="Attendance votes then count only for people who have been checked in at the door. It does not touch pre-event voting, which happens before anyone has arrived. Leave it off unless you actually run a check-in desk — nobody can vote otherwise." />
+      {fieldError('checkin_gates_voting') ? <p className="text-xs text-destructive" role="alert">{fieldError('checkin_gates_voting')}</p> : null}
     </div>
+    <RoundControls eventSlug={event.slug} timezone={event.timezone} />
   </SectionCard>
 }

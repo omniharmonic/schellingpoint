@@ -36,6 +36,11 @@ export type GatheringAction =
   | 'publish-post'
   /** Removing a post people may already have seen or shared: destructive (two organisers). */
   | 'delete-post'
+  /**
+   * Upload a blob (an avatar, a link-card thumb) to the gathering's repo. Non-destructive: a blob
+   * nothing references is invisible, and uploading one overwrites nothing.
+   */
+  | 'upload-blob'
   | 'write-policy'
   | 'set-peers'
   | 'publish-venue'
@@ -85,6 +90,7 @@ const MIN_ROLE: Record<GatheringAction, 'steward' | 'host' | 'any'> = {
   'publish-profile': 'steward',
   'publish-post': 'steward',
   'delete-post': 'steward',
+  'upload-blob': 'steward',
   'write-policy': 'steward',
   'publish-policy': 'steward',
   'set-peers': 'steward',
@@ -219,6 +225,30 @@ export interface GatheringSession {
    * At most `APPLY_WRITES_MAX_OPS` per call. Results are in input order.
    */
   applyCreates?(input: { creates: SessionCreateInput[] }): Promise<Array<{ uri: string; cid: string }>>
+  /**
+   * Optional: upload a blob to the repo (`com.atproto.repo.uploadBlob`). Absent → the port
+   * answers `blob uploads are not available for this gathering` and the caller carries on
+   * without an image.
+   */
+  uploadBlob?(input: { bytes: Uint8Array; mimeType: string }): Promise<UploadedBlobRef>
+}
+
+/** A blob in its JSON form — what a record carries and what `validate.ts` turns into a `BlobRef`. */
+export interface UploadedBlobRef {
+  $type: 'blob'
+  ref: { $link: string }
+  mimeType: string
+  size: number
+}
+
+export interface UploadBlobAsGatheringInput {
+  callerUserId: string | null
+  bytes: Uint8Array
+  mimeType: string
+  /** Mandatory written reason, like every other call through the port. */
+  reason: string
+  /** Organiser-facing label for the audit row ('gathering-avatar', 'feed-thumb'). */
+  purpose?: string
 }
 
 export interface ReadYourWrites {
@@ -297,6 +327,11 @@ export interface GatheringActorPort {
    * amended); earlier chunks stay written. Results are in input order.
    */
   applyCreatesAsGathering(inputs: CreateAsGatheringInput[], opts?: { maxOps?: number }): Promise<WriteAsGatheringResult[]>
+  /**
+   * Upload a blob as the gathering. Authorised (steward) and audited exactly like a record write,
+   * but it writes no record: the returned ref is only useful once some record names it.
+   */
+  uploadBlobAsGathering(input: UploadBlobAsGatheringInput): Promise<{ blob: UploadedBlobRef; auditId: string }>
 }
 
 export interface GatheringActorDeps {
@@ -500,6 +535,34 @@ export class AppCustodyGatheringActor implements GatheringActorPort {
       }
     }
     return out
+  }
+
+  /**
+   * BLOBS (design §14 item 1). A blob is not a record: it has no collection, no rkey and no
+   * lexicon of its own — the lexicon check happens when a record names it. What it still gets is
+   * everything else the port guarantees: the steward gate, a mandatory written reason, and one
+   * audit row (amended with the blob's CID, or with the failure). The caller passes BYTES it
+   * produced itself; nothing here fetches a URL.
+   */
+  async uploadBlobAsGathering(input: UploadBlobAsGatheringInput): Promise<{ blob: UploadedBlobRef; auditId: string }> {
+    const purpose = (input.purpose ?? 'blob').slice(0, 40)
+    const auditId = await this.gate(
+      { callerUserId: input.callerUserId, action: 'upload-blob', collection: 'blob', rkey: purpose, reason: input.reason },
+      `blob://${this.actorDid}/${purpose}`,
+    )
+    if (!this.deps.session.uploadBlob) {
+      await this.deps.audit.amend(auditId, 'upload failed: this gathering session cannot upload blobs').catch(() => undefined)
+      throw new Error('blob uploads are not available for this gathering')
+    }
+    let blob: UploadedBlobRef
+    try {
+      blob = await this.deps.session.uploadBlob({ bytes: input.bytes, mimeType: input.mimeType })
+    } catch (e) {
+      await this.deps.audit.amend(auditId, `upload failed: ${describeError(e)}`).catch(() => undefined)
+      throw e
+    }
+    await this.deps.audit.amend(auditId, `blob ${blob.ref.$link} (${blob.mimeType}, ${blob.size} bytes)`).catch(() => undefined)
+    return { blob, auditId }
   }
 
   async deleteRecordAsGathering(input: Omit<DeleteAsGatheringInput, 'eventId'>): Promise<{ auditId: string }> {

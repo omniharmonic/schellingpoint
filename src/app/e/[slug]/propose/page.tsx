@@ -22,9 +22,10 @@ import { useAuth } from '@/hooks/useAuth'
 import { useEvent } from '@/contexts/EventContext'
 import { parseTimeInTimezone, formatInEventTimezone } from '@/lib/events/timezone'
 import { getEventDays, formatCalendarDate } from '@/lib/events/dates'
-import { apiFetch } from '@/lib/api/client'
+import { apiFetch, ApiError } from '@/lib/api/client'
 import { useTracks } from '@/hooks/useTracks'
 import { SkillPicker } from '@/components/SkillPicker'
+import { RequiredFeaturesField, useRoomFeatures } from '@/components/RequiredFeatures'
 import { TimePreferences, type TimePreferenceValue } from '@/components/TimePreferences'
 import { LocationPicker } from '@/components/map/LocationPicker'
 import {
@@ -37,6 +38,14 @@ import {
   TIME_OPTIONS,
 } from '@/lib/sessions/constants'
 import { cn } from '@/lib/utils'
+
+/** The per-person proposal cap as `GET /api/v1/events/[slug]/me` reports it. */
+interface ProposalQuotaView {
+  used: number
+  limit: number | null
+  remaining: number | null
+  atLimit: boolean
+}
 
 /** Said wherever a record is written into someone's own repository. */
 const PERMANENCE = 'Public records can be deleted from your repository later, but copies may persist on the network.'
@@ -84,12 +93,15 @@ export default function ProposePage() {
   const proposalsClosed = !isParticipationOpen(event, 'propose')
 
   const { tracks } = useTracks(event.slug)
+  const { vocabulary: roomFeatures } = useRoomFeatures(event.slug)
+  const [quota, setQuota] = React.useState<ProposalQuotaView | null>(null)
   const [title, setTitle] = React.useState('')
   const [trackId, setTrackId] = React.useState<string | null>(null)
   const [description, setDescription] = React.useState('')
   const [format, setFormat] = React.useState('talk')
   const [duration, setDuration] = React.useState(60)
   const [expectedAttendance, setExpectedAttendance] = React.useState<number | null>(null)
+  const [requiredFeatures, setRequiredFeatures] = React.useState<string[]>([])
   const [tags, setTags] = React.useState<string[]>([])
   const [customTag, setCustomTag] = React.useState('')
   const [skills, setSkills] = React.useState<string[]>([])
@@ -132,6 +144,22 @@ export default function ProposePage() {
     }
   }, [user, authLoading, router, event.slug])
 
+  // The per-person cap, visible before it is hit (inventory 3.5): "2 of 5 proposals used".
+  const refreshQuota = React.useCallback(async () => {
+    if (!user) return
+    try {
+      const me = await apiFetch<{ proposals: ProposalQuotaView | null }>(
+        `/api/v1/events/${encodeURIComponent(event.slug)}/me`,
+        { cache: 'no-store' },
+      )
+      setQuota(me.proposals ?? null)
+    } catch {
+      setQuota(null)
+    }
+  }, [event.slug, user])
+
+  React.useEffect(() => { void refreshQuota() }, [refreshQuota])
+
   React.useEffect(() => {
     if (allowedFormats.length > 0 && !allowedFormats.some((f) => f.value === format)) setFormat(allowedFormats[0].value)
   }, [allowedFormats, format])
@@ -155,6 +183,7 @@ export default function ProposePage() {
     setFormat(allowedFormats[0]?.value ?? 'talk')
     setDuration(allowedDurations.includes(60) ? 60 : allowedDurations[0] ?? 60)
     setExpectedAttendance(null)
+    setRequiredFeatures([])
     setTags([])
     setSkills([])
     setAvailability({ windows: [], blackouts: [] })
@@ -167,6 +196,7 @@ export default function ProposePage() {
     setSelfHostedStartTime('')
     setSelfHostedEndTime('')
     setTrackId(null)
+    void refreshQuota()
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -204,6 +234,7 @@ export default function ProposePage() {
           format,
           duration,
           expected_attendance: expectedAttendance,
+          required_features: requiredFeatures,
           topic_tags: tags.length > 0 ? tags : null,
           skills,
           is_self_hosted: isSelfHosted,
@@ -225,7 +256,10 @@ export default function ProposePage() {
       else if (result.atproto?.error) setPublishNote('Your proposal is saved. Writing its public record failed; you can publish it from the session page.')
       else if (result.atproto?.skipped === 'not_confirmed') setPublishNote('Your proposal is saved in this gathering. Confirm public linkage from the session page to publish it to your repository.')
       setCreated({ id: result.id, title: title.trim() })
+      void refreshQuota()
     } catch (err) {
+      // A race against the cap (or any other refusal) re-reads the real standing.
+      if (err instanceof ApiError && err.code === 'ProposalLimit') void refreshQuota()
       setError(err instanceof Error ? err.message : 'Your proposal could not be submitted. Please try again.')
     } finally {
       setIsSubmitting(false)
@@ -300,6 +334,12 @@ export default function ProposePage() {
   }
 
   const tagsFull = tags.length >= MAX_TAGS
+  const atLimit = !!quota?.atLimit
+  const quotaLabel = quota && quota.limit !== null
+    ? atLimit
+      ? `You have used all ${quota.limit} of your proposals for this gathering.`
+      : `${quota.used} of ${quota.limit} proposals used.`
+    : null
 
   return (
     <DashboardLayout>
@@ -390,6 +430,13 @@ export default function ProposePage() {
                   ))}
                 </div>
               </fieldset>
+
+              <RequiredFeaturesField
+                value={requiredFeatures}
+                onChange={setRequiredFeatures}
+                vocabulary={roomFeatures}
+                idPrefix="propose"
+              />
 
               <fieldset className="space-y-2">
                 <legend className="text-sm font-medium leading-none">When can you be there? (optional)</legend>
@@ -615,11 +662,16 @@ export default function ProposePage() {
                 </div>
               )}
 
-              <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+              <div className="flex flex-col-reverse items-stretch gap-2 sm:flex-row sm:items-center sm:justify-end">
+                {quotaLabel && (
+                  <p className={cn('mr-auto text-sm', atLimit ? 'text-destructive' : 'text-muted-foreground')} role="status" data-testid="proposal-quota">
+                    {quotaLabel}
+                  </p>
+                )}
                 <Button type="button" variant="outline" asChild>
                   <Link href={`/e/${event.slug}/sessions`}>Cancel</Link>
                 </Button>
-                <Button type="submit" loading={isSubmitting}>
+                <Button type="submit" loading={isSubmitting} disabled={atLimit}>
                   Propose a session
                 </Button>
               </div>

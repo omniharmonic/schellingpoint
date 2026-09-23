@@ -30,6 +30,8 @@ export function buildPlainText(params: {
   ctaText?: string | null
   footerNote?: string | null
   eventName?: string | null
+  /** RFC 8058 unsubscribe page; rendered as the last line so a plain-text reader can find it. */
+  unsubscribeUrl?: string | null
 }): string {
   const lines = [params.heading, '']
   for (const p of params.paragraphs) {
@@ -38,6 +40,7 @@ export function buildPlainText(params: {
   if (params.ctaUrl) lines.push(`${params.ctaText || 'Open'}: ${params.ctaUrl}`, '')
   if (params.footerNote) lines.push(params.footerNote, '')
   lines.push(`— ${params.eventName || PRODUCT_NAME}`)
+  if (params.unsubscribeUrl) lines.push('', `Stop these emails: ${params.unsubscribeUrl}`)
   return lines.join('\n')
 }
 
@@ -52,6 +55,8 @@ export interface BaseEmailParams {
   ctaUrl?: string
   ctaText?: string
   footerNote?: string
+  /** RFC 8058 unsubscribe page for this recipient; omitted for identity mail. */
+  unsubscribeUrl?: string
 }
 
 export function buildBaseEmail(params: BaseEmailParams): string {
@@ -65,6 +70,7 @@ export function buildBaseEmail(params: BaseEmailParams): string {
   const footerNote = params.footerNote ? escapeHtml(params.footerNote) : undefined
   const ctaUrl = safeHref(params.ctaUrl)
   const eventLogoUrl = safeHref(params.eventLogoUrl)
+  const unsubscribeUrl = safeHref(params.unsubscribeUrl)
 
   // Default logo fallback
   const logoHtml = eventLogoUrl
@@ -205,6 +211,9 @@ export function buildBaseEmail(params: BaseEmailParams): string {
               <p style="margin: 0; font-size: 11px; color: #484f58;">
                 Powered by <a href="${escapeHtml(appUrl())}" style="color: #6e7681; text-decoration: none;">${PRODUCT_NAME}</a>
               </p>
+              ${unsubscribeUrl ? `<p style="margin: 8px 0 0 0; font-size: 11px; color: #484f58;">
+                <a href="${unsubscribeUrl}" style="color: #6e7681; text-decoration: underline;">Stop emails like this</a>
+              </p>` : ''}
             </td>
           </tr>
         </table>

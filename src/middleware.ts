@@ -19,6 +19,11 @@ export const config = {
 const PASS_THROUGH = [
   '/.well-known/', '/xrpc/', '/api/', '/uploads/', '/auth/', '/oauth/', '/internal/', '/e/', '/fonts/',
   '/login', '/account', '/create', '/events', '/invite', '/privacy', '/terms', '/codeofconduct',
+  // An unsubscribe link in an email must work whatever host the email was sent from.
+  '/unsubscribe',
+  // The offline shell must render on a gathering subdomain too — that is where a phone with
+  // no signal actually is.
+  '/offline',
 ]
 
 function passesThrough(pathname: string): boolean {

@@ -1,5 +1,4 @@
 import 'server-only'
-import crypto from 'crypto'
 import type { NextResponse } from 'next/server'
 import { sql } from '@/lib/db'
 import { badRequest, notFound } from '@/lib/api/response'
@@ -65,19 +64,4 @@ export async function publicEventForRow(request: Request, eventId: string | null
   const requested = eventSlugParam(request)
   if (requested && requested !== event.slug) return null
   return event
-}
-
-// ---------------------------------------------------------------------------
-// Transitional: package B's GET /api/v1/sessions still gates on the shared key. The key API does
-// not survive (spec §2); remove this with that caller.
-// ---------------------------------------------------------------------------
-
-/** @deprecated The shared-key API does not survive (spec §2). Kept only until /api/v1/sessions stops importing it. */
-export function validateApiKey(request: Request): boolean {
-  const apiKey = request.headers.get('x-api-key')
-  const expected = process.env.API_KEY_BONFIRESAI
-  if (!apiKey || !expected) return false
-  const a = Buffer.from(apiKey, 'utf8')
-  const b = Buffer.from(expected, 'utf8')
-  return a.length === b.length && crypto.timingSafeEqual(a, b)
 }

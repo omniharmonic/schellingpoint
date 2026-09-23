@@ -20,6 +20,8 @@ import {
   canReadTranscript,
   currentTranscript,
   deleteCurrentTranscript,
+  editSummary,
+  MAX_SUMMARY_CHARS,
   readTier,
   saveTranscript,
   type TranscriptRow,
@@ -36,6 +38,9 @@ import {
  *           required; the gathering's `transcripts_enabled` must be on (409 otherwise).
  *           multipart/form-data (`file`, `consent`, `language?`, `visibility?`) or JSON
  *           (`text`, `format?`, `consent`, `language?`, `visibility?`). 5 MB, text only.
+ * PATCH   → edit the generated summary (design §10.3): ORGANIZERS only, `{ summary }`. Members
+ *           then read the edited text, not the generated one; `summary_edited_at/_by` record who
+ *           stands behind it. An empty summary clears it.
  * DELETE  → remove the current transcript (same people).
  *
  * Transcripts are never records: nothing here touches a repo.
@@ -90,7 +95,7 @@ export async function GET(request: Request, { params }: RouteParams) {
   const ctx = await loadContext(request, id)
   if (ctx instanceof Response) return ctx
   const tier = readTier(ctx.access.role)
-  const base = { enabled: ctx.enabled, visibility: ctx.eventVisibility, tier, can_manage: ctx.canManage }
+  const base = { enabled: ctx.enabled, visibility: ctx.eventVisibility, tier, can_manage: ctx.canManage, can_edit_summary: ctx.access.isOrganizer }
   if (!ctx.access.viewer) return jsonError(401, 'Sign in to read transcripts')
   if (!tier) return jsonError(403, 'Transcripts are for members of this gathering')
 
@@ -218,6 +223,34 @@ export async function POST(request: Request, { params }: RouteParams) {
     },
     { status: 201 },
   )
+}
+
+/** Organizer edit of the summary. The transcript itself is never edited: only its summary. */
+export async function PATCH(request: Request, { params }: RouteParams) {
+  const { id } = await params
+  const ctx = await loadContext(request, id)
+  if (ctx instanceof Response) return ctx
+  const bad = assertSameOrigin(request)
+  if (bad) return bad
+  if (!ctx.access.viewer) return jsonError(401, 'Unauthorized')
+  if (!ctx.access.isOrganizer) return jsonError(403, 'Only organizers can edit a session summary')
+
+  let body: Record<string, unknown>
+  try {
+    body = (await request.json()) as Record<string, unknown>
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error()
+  } catch {
+    return jsonError(400, 'Invalid JSON body')
+  }
+  if (!('summary' in body) || (body.summary !== null && typeof body.summary !== 'string')) {
+    return jsonError(400, 'Send the summary text (or null to clear it)', { field: 'summary' })
+  }
+  if (typeof body.summary === 'string' && body.summary.length > MAX_SUMMARY_CHARS) {
+    return jsonError(400, `Summaries are limited to ${MAX_SUMMARY_CHARS} characters`, { field: 'summary' })
+  }
+  const updated = await editSummary({ sessionId: id, summary: body.summary, editedBy: ctx.access.viewer.accountId })
+  if (!updated) return jsonError(404, 'This session has no transcript')
+  return json({ transcript: publicRow(updated) })
 }
 
 export async function DELETE(request: Request, { params }: RouteParams) {
