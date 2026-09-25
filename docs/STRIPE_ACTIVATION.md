@@ -1,17 +1,51 @@
 # Stripe activation
 
-Status, 23 September 2026: **the direct-charge model is implemented and tested; payments are
-still not activated.** No Stripe key exists in this repository, in the local stack or in
-production. Nothing in this document claims that money has moved, that Connect settings were
-inspected, or that a real account was verified — none of that has happened.
+Status, 25 September 2026: **the direct-charge model is implemented and tested; payments are
+still not activated, and no money has moved.** A sandbox test key now exists locally (in
+`.env.local`, never in the repository) and Stripe has answered for the first time — but it
+answered *no* to the one thing everything else depends on: **the sandbox platform is not a
+Connect platform**, so no merchant account can be created and no charge, payout, refund or
+`account.updated` has ever happened. Enabling Connect is a dashboard action only the account
+owner can take. No live key exists anywhere, and production holds no Stripe key at all.
 
-What changed: the code no longer creates Express accounts or destination charges. It creates
-merchant accounts through Accounts v2 with Stripe collecting fees and losses, and it charges
-tickets **directly on the organizer's own account** with the contribution as an application
-fee. Every path is covered by tests that substitute Stripe at the application's own seams, so
-the behaviour below is verified logic rather than intention — but Stripe itself has never
-answered any of it. `scripts/stripe-sandbox-verify.mjs` is the script that will close that gap
-the moment a test key exists.
+What was verified against the sandbox on 25 September 2026, and what was not:
+
+- **Accounts v2 is not enabled for this sandbox.** `POST /v2/core/accounts` answers 400
+  `non_connect_platform_accounts_v2_access_blocked`. The v1 `controller` fallback is therefore
+  the path that runs.
+- **The fallback did not run, and now does.** Stripe sends that v2 refusal with *no* `type` in
+  the error envelope, so the SDK classifies it as `StripeUnknownError` — a type
+  `isV2Unavailable()` did not match, so the error was rethrown and v1 was never attempted. The
+  standalone script's bare `catch` hid this; the application surfaced the raw v2 message to the
+  organizer instead. Fixed in `src/lib/payments/stripe.ts` (a known *code* is now decisive
+  whatever type Stripe wraps it in; an unrecognised type with an unrelated code is still
+  rethrown) and covered by a test. Confirmed afterwards through the real route: the log line
+  `[stripe] Accounts v2 is unavailable on this platform` appears and v1 is tried.
+- **v1 account creation is refused too**, with `You can only create new accounts if you've
+  signed up for Connect` (`StripeInvalidRequestError`, no code). This is the hard stop. The
+  route answers 502 and the admin tickets page shows Stripe's own message rather than
+  pretending to be connected.
+- **The readiness gate holds against a real key.** With the key present, the webhook secret
+  present and no merchant account, `POST …/admin/ticketing-settings` refuses to switch paid
+  sales on (409 `NO_MERCHANT_ACCOUNT`) and the attendee checkout route refuses the charge
+  (503 `NO_MERCHANT_ACCOUNT`) without creating a ticket or a checkout reference.
+- **Webhook delivery, signature, mode and idempotency were verified with real Stripe
+  deliveries** forwarded by `stripe listen` (see "Webhook destinations" below).
+- **usd has a $0.50 minimum**: a Checkout Session for 50 cents is accepted, 49 cents and 1 cent
+  are refused with `amount_too_small` — "The Checkout Session's total amount due must add up to
+  at least $0.50 USD". Other currencies are still unchecked.
+- **Not verified, because Connect is off:** merchant creation, hosted onboarding, readiness
+  becoming true, a direct charge, the 75-cent application fee on a $25 ticket at 3%, the
+  absence of `transfer_data`, Stripe's processing fee landing on the merchant's balance
+  transaction, `account.updated`, refunds, revenue figures, and the behaviour of a 100%
+  contribution (which needs a connected-account context to test at all).
+
+The code no longer creates Express accounts or destination charges. It creates merchant
+accounts through Accounts v2 with Stripe collecting fees and losses, and it charges tickets
+**directly on the organizer's own account** with the contribution as an application fee. Every
+path is covered by tests that substitute Stripe at the application's own seams, so the
+behaviour below is verified logic; the money facts remain unconfirmed by Stripe.
+`scripts/stripe-sandbox-verify.mjs` is the script that closes that gap once Connect is enabled.
 
 ## The fee model
 
@@ -35,11 +69,15 @@ says plainly that the contribution is separate from Stripe's processing fees.
    `losses_collector: 'stripe'`. Onboarding is `POST /v2/core/account_links` with
    `use_case.type: 'account_onboarding'` and `configurations: ['merchant']` — Stripe collects
    country, legal identity and payout details itself; the application attests to nothing.
-   If v2 is not enabled for the platform (the create call fails with an invalid-request or
-   permission error), it falls back to the v1 equivalent, `POST /v1/accounts` with
+   If v2 is not enabled for the platform, it falls back to the v1 equivalent,
+   `POST /v1/accounts` with
    `controller: { fees: { payer: 'account' }, losses: { payments: 'stripe' },
    stripe_dashboard: { type: 'full' }, requirement_collection: 'stripe' }`, and logs which API
-   was used. `STRIPE_ACCOUNTS_API=v1` forces the fallback. Readiness reads `charges_enabled`
+   was used. The fallback triggers on the error *code* — a platform that was never enabled for
+   Accounts v2 answers `non_connect_platform_accounts_v2_access_blocked` with no error type at
+   all, which the SDK reports as `StripeUnknownError` — or on an invalid-request/permission
+   error; anything else is rethrown so a real outage reaches the organizer.
+   `STRIPE_ACCOUNTS_API=v1` forces the fallback. Readiness reads `charges_enabled`
    and `payouts_enabled` (v1) or the merchant/recipient configuration statuses (v2).
 2. **Direct charges.** Sessions are created, retrieved and expired in the connected account's
    context. Refunds too. Sessions written by an older release carry `model: 'destination'` on
@@ -118,7 +156,7 @@ says plainly that the contribution is separate from Stripe's processing fees.
 
 ## Tests
 
-`tests/payments-direct.spec.ts` (13 cases) and the payment cases in `tests/ticket-audit.spec.ts`
+`tests/payments-direct.spec.ts` (17 cases) and the payment cases in `tests/ticket-audit.spec.ts`
 run against the real local database with Stripe substituted only at the application's own seams
 (`CheckoutGateway`, `MerchantGateway`, `RefundGateway` — the fakes live in `tests/helpers/payments.ts`,
 so no pretend-Stripe code ships). They cover: $25 at 1% producing a 25-cent application fee with
@@ -132,31 +170,49 @@ page and refunded automatically when it is provably ours; two simultaneous deliv
 event id dispatching exactly once; automatic
 refund of a seatless payment in the merchant context; organizer full and partial refunds;
 `account.updated` pausing and resuming paid sales with a single notification; the readiness gate
-at every stage; and the 90-day holder anonymisation. Database-boundary rules are in
-`tests/sql/db-rules.sql`.
+at every stage; the Accounts v2 → v1 fallback firing on the code the sandbox actually returns
+while a rate-limit or unrelated error is still rethrown; and the 90-day holder anonymisation.
+Database-boundary rules are in `tests/sql/db-rules.sql`.
 
 ## Still pending — needs a human
 
 These cannot be done from the repository and have **not** been done:
 
-- **Keys.** No `STRIPE_SECRET_KEY` exists anywhere. Create a restricted key in the sandbox, run
-  the sandbox verification below, then create a separate restricted key for live.
-- **Connect configuration.** Nobody has inspected the platform's Connect settings, confirmed
-  whether Accounts v2 is enabled for it, or confirmed the platform's own fee and loss
-  responsibility settings. The v1 fallback exists precisely because that is unknown.
-- **Sandbox verification.** `STRIPE_SECRET_KEY=sk_test_… node scripts/stripe-sandbox-verify.mjs`
-  walks: create merchant → print the hosted onboarding link → poll readiness → create a $25
-  Checkout Session at 3% in the merchant's context → print the payment URL → after you pay with
-  a test card, verify the session, the 75-cent application fee, the absence of `transfer_data`,
-  and that Stripe's processing fee came off the *merchant's* balance transaction. It refuses to
-  run with a live key. Nothing in the database is touched.
-- **Webhook destinations.** Separate sandbox and live Connect destinations must be created,
-  listening for `checkout.session.completed`, `checkout.session.async_payment_succeeded`,
+- **Enable Connect on the sandbox platform — this blocks everything else.** Account
+  `acct_1UJg0cHrYu3hjgEA` ("Unconference Test", US, usd) is a standard account, not a Connect
+  platform: both `POST /v2/core/accounts` and `POST /v1/accounts` are refused (see the status
+  section above for the exact errors). Until the owner turns Connect on at
+  `dashboard.stripe.com/…/settings/connect/platform-setup`, no merchant account, charge, payout
+  or refund can be exercised. Enabling Accounts v2 as well is optional — the v1 fallback now
+  works — but is the intended path.
+- **Live keys.** Only a sandbox key exists, and only in `.env.local` on a developer machine;
+  production still holds none. A separate restricted key for live is still to be created, and
+  its permissions confirmed against this implementation, including connected-account access.
+- **Sandbox verification of the money facts.** `STRIPE_SECRET_KEY=sk_test_… node
+  scripts/stripe-sandbox-verify.mjs` walks: create merchant → print the hosted onboarding link →
+  poll readiness → create a $25 Checkout Session at 3% in the merchant's context → print the
+  payment URL → after you pay with a test card, verify the session, the 75-cent application fee,
+  the absence of `transfer_data`, and that Stripe's processing fee came off the *merchant's*
+  balance transaction. It refuses to run with a live key and touches nothing in the database. Run
+  on 25 September 2026: it stopped at step 1 with the two Connect refusals above. Everything from
+  onboarding onwards is still unverified.
+- **Webhook destinations.** Signature verification, the livemode check and idempotency were
+  verified on 25 September 2026 against real Stripe deliveries forwarded by
+  `stripe listen --forward-to … --forward-connect-to …`: a test-mode delivery is accepted by the
+  test key, a `checkout.session.completed` naming a session this application never opened is
+  refused and recorded (`stripe_events.rejection = 'NO_REFERENCE'`, with the session id and no
+  gathering), and `stripe events resend` of that same event id is dropped as a duplicate — one
+  row, `received_at` unchanged, logged `duplicate` rather than re-processed. What remains: create
+  the persistent sandbox and live Connect destinations listening for
+  `checkout.session.completed`, `checkout.session.async_payment_succeeded`,
   `checkout.session.async_payment_failed`, `checkout.session.expired`, `charge.refunded` and
-  `account.updated`. Confirm the restricted keys' permissions against this implementation,
-  including connected-account access. Do not deploy short-lived CLI credentials.
-- **Currency minimums and the contribution ceiling.** Supported currencies' minimum charge
-  amounts, and the behaviour at a 100% contribution, have not been checked against Stripe.
+  `account.updated`, and put their signing secrets in the deployment's environment. Do not deploy
+  short-lived CLI credentials. `account.updated` could not be exercised at all: `stripe trigger
+  account.updated` produced no delivery on a non-Connect platform.
+- **Currency minimums and the contribution ceiling.** usd is confirmed at $0.50
+  (`amount_too_small` below it, message quoted above); every other supported currency is still
+  unchecked. A 100% contribution is still unchecked — `application_fee_amount` is only accepted
+  in a connected account's context, so it cannot be probed until Connect is on.
 - **A live test purchase.** Not authorized and not performed. A real-money test needs explicit
   authorization for that transaction.
 

@@ -364,6 +364,36 @@ test.describe('direct charges', () => {
     }
   })
 
+  test('a platform without Accounts v2 falls back to a v1 merchant account', async () => {
+    const stripeLib = await load<StripeLib>('../src/lib/payments/stripe')
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const Stripe = require('stripe') as typeof import('stripe').default
+
+    // What the sandbox actually answered on 2026-09-25: the v2 error envelope carries no
+    // `type`, so the SDK classifies it as StripeUnknownError. Matching on the error *type*
+    // alone rethrew it and the v1 fallback never ran; the code is what decides.
+    const notEnabled = Stripe.errors.StripeError.generate({
+      code: 'non_connect_platform_accounts_v2_access_blocked',
+      message: 'Accounts v2 is not enabled for your sandbox merchant',
+    } as never)
+    expect(notEnabled.type).toBe('StripeUnknownError')
+    expect(stripeLib.isV2Unavailable(notEnabled)).toBe(true)
+
+    // The documented v1-era shapes still count.
+    for (const code of ['feature_not_enabled', 'parameter_unknown', 'url_invalid', 'resource_missing']) {
+      const err = Stripe.errors.StripeError.generate({ type: 'invalid_request_error', code, message: code } as never)
+      expect(stripeLib.isV2Unavailable(err)).toBe(true)
+    }
+
+    // A real failure is never mistaken for "v2 is off": it has to reach the organizer.
+    const rateLimited = Stripe.errors.StripeError.generate({ type: 'rate_limit_error', code: 'rate_limit', message: 'slow down' } as never)
+    expect(stripeLib.isV2Unavailable(rateLimited)).toBe(false)
+    const unknownWithOtherCode = Stripe.errors.StripeError.generate({ code: 'account_invalid', message: 'nope' } as never)
+    expect(unknownWithOtherCode.type).toBe('StripeUnknownError')
+    expect(stripeLib.isV2Unavailable(unknownWithOtherCode)).toBe(false)
+    expect(stripeLib.isV2Unavailable(new Error('network down'))).toBe(false)
+  })
+
   test('the readiness gate refuses paid sales until charges and payouts are both live', async () => {
     const merchant = await load<Merchant>('../src/lib/payments/merchant')
     const { paidSalesBlock } = merchant

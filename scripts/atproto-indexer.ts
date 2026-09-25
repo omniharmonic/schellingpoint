@@ -40,6 +40,7 @@ const HEARTBEAT_MS = 60_000
 const RECONCILE_DRAIN_MS = 30_000
 const BACKOFF_MIN_MS = 1_000
 const BACKOFF_MAX_MS = 30_000
+const OPEN_TIMEOUT_MS = 30_000 // a handshake that neither opens nor fails within this is abandoned
 /** Re-subscribe slightly behind the last frame: Jetstream replay is inclusive and ingest is idempotent. */
 const RESUME_OVERLAP_US = 5_000_000
 
@@ -123,7 +124,38 @@ async function main(): Promise<void> {
     const socket = new WebSocket(url)
     ws = socket
 
+    // One reconnect per socket, whichever signal arrives first. Node's WebSocket reports a
+    // failed handshake (non-101 status, network error) as an `error` event that is not always
+    // followed by `close`; relying on `close` alone left the indexer disconnected for hours
+    // with nothing scheduled (observed 2026-09-25). A handshake that never completes at all is
+    // bounded by the open timeout below.
+    let settled = false
+    const scheduleReconnect = (code: number, reason?: string) => {
+      if (ws === socket) ws = null
+      if (settled || stopping) return
+      settled = true
+      clearTimeout(openTimeout)
+      log('disconnected', { code, reason: reason || undefined, retryInMs: backoff })
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null
+        connect()
+      }, backoff)
+      backoff = Math.min(backoff * 2, BACKOFF_MAX_MS)
+    }
+    const openTimeout = setTimeout(() => {
+      if (socket.readyState === WebSocket.CONNECTING) {
+        log('open timeout', { afterMs: OPEN_TIMEOUT_MS })
+        try {
+          socket.close()
+        } catch {
+          // never opened
+        }
+        scheduleReconnect(1006, 'open timeout')
+      }
+    }, OPEN_TIMEOUT_MS)
+
     socket.onopen = () => {
+      clearTimeout(openTimeout)
       backoff = BACKOFF_MIN_MS
       log('connected')
     }
@@ -166,13 +198,12 @@ async function main(): Promise<void> {
     }
     socket.onerror = (event: Event) => {
       log('socket error', { message: (event as ErrorEvent).message ?? 'unknown' })
+      // An error on an open socket is followed by `close`, which is a no-op once settled; an
+      // error during the handshake may be the only signal we get.
+      if (socket.readyState !== WebSocket.OPEN) scheduleReconnect(1006, 'socket error')
     }
     socket.onclose = (event: CloseEvent) => {
-      if (ws === socket) ws = null
-      if (stopping) return
-      log('disconnected', { code: event.code, reason: event.reason || undefined, retryInMs: backoff })
-      reconnectTimer = setTimeout(connect, backoff)
-      backoff = Math.min(backoff * 2, BACKOFF_MAX_MS)
+      scheduleReconnect(event.code, event.reason)
     }
   }
 

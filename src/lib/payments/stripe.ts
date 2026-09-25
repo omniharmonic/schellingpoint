@@ -281,15 +281,35 @@ export function constructWebhookEvent(
 // produces an account with the same fee and loss responsibilities. `STRIPE_ACCOUNTS_API=v1`
 // forces the fallback without a round trip.
 
-const V2_UNAVAILABLE_CODES = new Set(['feature_not_enabled', 'parameter_unknown', 'url_invalid', 'resource_missing'])
+const V2_UNAVAILABLE_CODES = new Set([
+  'feature_not_enabled',
+  'parameter_unknown',
+  'url_invalid',
+  'resource_missing',
+  // What a platform that was never enabled for Accounts v2 actually answers (observed against
+  // the sandbox, 2026-09-25). Stripe sends it with an error type the SDK cannot classify.
+  'non_connect_platform_accounts_v2_access_blocked',
+])
 
 function prefersV1(): boolean {
   return process.env.STRIPE_ACCOUNTS_API === 'v1'
 }
 
-/** Does this Stripe error mean "v2 Accounts is not available to this platform"? */
-function isV2Unavailable(err: unknown): boolean {
+/**
+ * Does this Stripe error mean "v2 Accounts is not available to this platform"?
+ *
+ * A known code is decisive whatever error *type* Stripe wraps it in: a platform that was never
+ * enabled for Accounts v2 answers `non_connect_platform_accounts_v2_access_blocked` with a type
+ * the SDK does not recognise (`StripeUnknownError`), so matching on the type alone would rethrow
+ * and the v1 fallback would never run — which is what happened against the sandbox on
+ * 2026-09-25. An unrecognised type with an unrelated code is still rethrown.
+ *
+ * Exported so the rule can be asserted against Stripe's real error shapes without a key, the
+ * same way `buildCheckoutSessionParams` is.
+ */
+export function isV2Unavailable(err: unknown): boolean {
   if (!(err instanceof Stripe.errors.StripeError)) return false
+  if (err.code && V2_UNAVAILABLE_CODES.has(err.code)) return true
   if (err.type === 'StripeInvalidRequestError' || err.type === 'StripePermissionError') {
     return err.code ? V2_UNAVAILABLE_CODES.has(err.code) : true
   }
