@@ -281,14 +281,26 @@ export function constructWebhookEvent(
 // produces an account with the same fee and loss responsibilities. `STRIPE_ACCOUNTS_API=v1`
 // forces the fallback without a round trip.
 
+/**
+ * Invalid-request/permission codes that mean "not available here". These are the v1-shaped
+ * errors; the v2 ones are handled by type below. Kept as documentation of what Stripe has
+ * actually answered, and so a *typed* invalid request with one of these codes still falls back.
+ *
+ * Observed from v2 against the sandbox on 2026-09-25, all three in the same afternoon:
+ *   non_connect_platform_accounts_v2_access_blocked — platform was never enabled for v2
+ *   identity_country_required — v2 wants the merchant's country before a merchant
+ *     configuration; the organizer never gave us one and this application will not invent it
+ *   account_not_yet_compatible_with_v2 — a freshly created v1 account is not yet addressable
+ *     through the v2 account-links API
+ */
 const V2_UNAVAILABLE_CODES = new Set([
   'feature_not_enabled',
   'parameter_unknown',
   'url_invalid',
   'resource_missing',
-  // What a platform that was never enabled for Accounts v2 actually answers (observed against
-  // the sandbox, 2026-09-25). Stripe sends it with an error type the SDK cannot classify.
   'non_connect_platform_accounts_v2_access_blocked',
+  'identity_country_required',
+  'account_not_yet_compatible_with_v2',
 ])
 
 function prefersV1(): boolean {
@@ -296,19 +308,29 @@ function prefersV1(): boolean {
 }
 
 /**
- * Does this Stripe error mean "v2 Accounts is not available to this platform"?
+ * Does this Stripe error mean "we cannot do this through Accounts v2 here, use v1"?
  *
- * A known code is decisive whatever error *type* Stripe wraps it in: a platform that was never
- * enabled for Accounts v2 answers `non_connect_platform_accounts_v2_access_blocked` with a type
- * the SDK does not recognise (`StripeUnknownError`), so matching on the type alone would rethrow
- * and the v1 fallback would never run — which is what happened against the sandbox on
- * 2026-09-25. An unrecognised type with an unrelated code is still rethrown.
+ * The decisive rule is the error *type*. The v2 error envelope carries no `type`, so the SDK
+ * cannot classify it and reports `StripeUnknownError` — every v2 refusal observed against the
+ * sandbox on 2026-09-25 arrived that way, with a different `code` each time (three of them in
+ * one afternoon; see `V2_UNAVAILABLE_CODES`). Matching code-by-code is whack-a-mole, and each
+ * miss left the organizer with a raw Stripe message and no way to connect at all.
+ *
+ * Falling back is safe: v1 produces an account with the same fee and loss responsibilities, and
+ * its onboarding is Stripe-hosted too, so the worst case is using v1 where v2 would have served.
+ * Refusing is not safe — it blocks the organizer. Real failures keep their own types
+ * (`StripeConnectionError`, `StripeAPIError`, `StripeRateLimitError`, `StripeAuthenticationError`)
+ * and still throw, so an outage or a bad key reaches the organizer instead of being retried
+ * pointlessly against v1.
  *
  * Exported so the rule can be asserted against Stripe's real error shapes without a key, the
  * same way `buildCheckoutSessionParams` is.
  */
 export function isV2Unavailable(err: unknown): boolean {
   if (!(err instanceof Stripe.errors.StripeError)) return false
+  // An answer from v2 that the SDK cannot classify: v2 is not usable for this call. The SDK
+  // sets this `type` at runtime but leaves it out of its own union, hence the widening.
+  if ((err.type as string) === 'StripeUnknownError') return true
   if (err.code && V2_UNAVAILABLE_CODES.has(err.code)) return true
   if (err.type === 'StripeInvalidRequestError' || err.type === 'StripePermissionError') {
     return err.code ? V2_UNAVAILABLE_CODES.has(err.code) : true

@@ -369,28 +369,41 @@ test.describe('direct charges', () => {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const Stripe = require('stripe') as typeof import('stripe').default
 
-    // What the sandbox actually answered on 2026-09-25: the v2 error envelope carries no
-    // `type`, so the SDK classifies it as StripeUnknownError. Matching on the error *type*
-    // alone rethrew it and the v1 fallback never ran; the code is what decides.
-    const notEnabled = Stripe.errors.StripeError.generate({
-      code: 'non_connect_platform_accounts_v2_access_blocked',
-      message: 'Accounts v2 is not enabled for your sandbox merchant',
-    } as never)
-    expect(notEnabled.type).toBe('StripeUnknownError')
-    expect(stripeLib.isV2Unavailable(notEnabled)).toBe(true)
+    // Every v2 refusal the sandbox actually gave on 2026-09-25 — platform not enabled for v2,
+    // v2 demanding a country the organizer never gave us, and a fresh v1 account not yet
+    // addressable through v2. The v2 error envelope carries no `type`, so all three reach the
+    // SDK as StripeUnknownError with only the `code` to tell them apart. Matching code by code
+    // was whack-a-mole: each miss rethrew and left the organizer unable to connect at all.
+    for (const code of [
+      'non_connect_platform_accounts_v2_access_blocked',
+      'identity_country_required',
+      'account_not_yet_compatible_with_v2',
+      'some_code_stripe_has_not_invented_yet',
+    ]) {
+      const err = Stripe.errors.StripeError.generate({ code, message: code } as never)
+      expect(err.type).toBe('StripeUnknownError')
+      expect(stripeLib.isV2Unavailable(err)).toBe(true)
+    }
 
-    // The documented v1-era shapes still count.
+    // The documented v1-shaped invalid requests still count.
     for (const code of ['feature_not_enabled', 'parameter_unknown', 'url_invalid', 'resource_missing']) {
       const err = Stripe.errors.StripeError.generate({ type: 'invalid_request_error', code, message: code } as never)
       expect(stripeLib.isV2Unavailable(err)).toBe(true)
     }
 
-    // A real failure is never mistaken for "v2 is off": it has to reach the organizer.
-    const rateLimited = Stripe.errors.StripeError.generate({ type: 'rate_limit_error', code: 'rate_limit', message: 'slow down' } as never)
-    expect(stripeLib.isV2Unavailable(rateLimited)).toBe(false)
-    const unknownWithOtherCode = Stripe.errors.StripeError.generate({ code: 'account_invalid', message: 'nope' } as never)
-    expect(unknownWithOtherCode.type).toBe('StripeUnknownError')
-    expect(stripeLib.isV2Unavailable(unknownWithOtherCode)).toBe(false)
+    // A real failure is never mistaken for "use v1 instead": retrying against v1 would fail the
+    // same way, so an outage, a bad key or a throttle has to reach the organizer.
+    for (const type of ['rate_limit_error', 'api_error', 'authentication_error']) {
+      const err = Stripe.errors.StripeError.generate({ type, message: type } as never)
+      expect(stripeLib.isV2Unavailable(err), type).toBe(false)
+    }
+    // A dropped connection is built directly by the SDK, not from a raw error envelope.
+    const dropped = new Stripe.errors.StripeConnectionError({ type: 'api_error', message: 'socket hang up' })
+    expect(dropped.type).toBe('StripeConnectionError')
+    expect(stripeLib.isV2Unavailable(dropped)).toBe(false)
+    // A typed invalid request about the payload itself is a bug on our side, not v2 being off.
+    const badParam = Stripe.errors.StripeError.generate({ type: 'invalid_request_error', code: 'account_invalid', message: 'nope' } as never)
+    expect(stripeLib.isV2Unavailable(badParam)).toBe(false)
     expect(stripeLib.isV2Unavailable(new Error('network down'))).toBe(false)
   })
 
