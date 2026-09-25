@@ -15,6 +15,10 @@
  * Stripe-hosted onboarding collects country, legal identity and payout details directly from
  * the organizer; this application never invents or attests to a business detail.
  *
+ * A create that Stripe refuses is retryable: `connectMerchantAccount` counts the failure on
+ * `events.stripe_connect_attempts`, which scopes the idempotency key, so the organizer's next
+ * click is a fresh request instead of Stripe's cached copy of the same error (0040).
+ *
  * Return/refresh from onboarding land on
  *   /e/[slug]/admin/tickets?stripe=return|refresh
  * There is no server-side callback: the tickets page re-fetches GET here,
@@ -29,6 +33,7 @@ import Stripe from 'stripe'
 import { assertSameOrigin, requireEventRole } from '@/lib/auth/viewer'
 import { sql } from '@/lib/db'
 import type { EventRoleName } from '@/types/event'
+import { connectMerchantAccount } from '@/lib/payments/connect'
 import { NOT_CONNECTED_STATUS } from '@/lib/payments/merchant'
 import { isPlatformChargeFallbackAllowed, isStripeConfigured, stripeMerchantGateway } from '@/lib/payments/stripe'
 
@@ -149,43 +154,24 @@ export async function POST(
   }
 
   // --- Create the merchant account if needed, then an onboarding link ----
-  let accountId = event.stripe_account_id
-
-  if (!accountId) {
-    try {
-      const created = await gateway.createAccount({
-        eventId: event.id,
-        eventSlug: event.slug,
-        eventName: event.name,
-        email: viewer.email,
-      })
-      accountId = created.accountId
-      console.info(`[stripe-connect] created a merchant account via Accounts ${created.api}`)
-    } catch (err) {
-      return stripeErrorResponse(err, 'Failed to create Stripe account')
-    }
-
-    try {
-      // Only fill an empty slot: two concurrent "Connect" clicks must not orphan an account.
-      const saved = await sql<{ stripe_account_id: string }[]>`
-        update events set stripe_account_id = ${accountId}, updated_at = now()
-        where id = ${event.id} and stripe_account_id is null
-        returning stripe_account_id
-      `
-      if (saved.length === 0) {
-        const [current] = await sql<{ stripe_account_id: string | null }[]>`select stripe_account_id from events where id = ${event.id}`
-        accountId = current?.stripe_account_id ?? accountId
-      }
-    } catch {
-      // The Stripe account now exists but we failed to persist its id; surface
-      // it so an operator can investigate; retrying uses the same idempotency key.
-      console.error('[stripe-connect] failed to persist the connected account id')
-      return NextResponse.json(
-        { error: 'Stripe account created but could not be saved', accountId },
-        { status: 500 },
-      )
-    }
+  // `connectMerchantAccount` owns the idempotency-key rule: two concurrent clicks collapse to one
+  // account, and a failed create bumps `events.stripe_connect_attempts` so the next click is a
+  // fresh request rather than Stripe's cached copy of the same error.
+  const connected = await connectMerchantAccount(gateway, event, viewer.email)
+  if (connected.status === 'create_failed') {
+    return stripeErrorResponse(connected.error, 'Failed to create Stripe account')
   }
+  if (connected.status === 'save_failed') {
+    // The Stripe account now exists but we failed to persist its id; surface it so an operator
+    // can investigate. Retrying reuses the same key, so it returns that same account.
+    console.error('[stripe-connect] failed to persist the connected account id')
+    return NextResponse.json(
+      { error: 'Stripe account created but could not be saved', accountId: connected.accountId },
+      { status: 500 },
+    )
+  }
+  const accountId = connected.accountId
+  if (connected.created) console.info(`[stripe-connect] created a merchant account via Accounts ${connected.api}`)
 
   const origin = appOrigin(request)
   const base = `${origin}/e/${encodeURIComponent(event.slug)}/admin/tickets`

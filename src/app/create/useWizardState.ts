@@ -1,6 +1,6 @@
 'use client';
 
-import { validPlatformFeePercent } from '@/lib/payments/format';
+import { validContributionPercent } from '@/lib/payments/format';
 import { useReducer, useCallback } from 'react';
 import type { EventVisibility } from '@/types/event';
 import { DEFAULT_POLICY_THRESHOLDS, type GatheringPolicyThresholds } from '@/lib/events/policy';
@@ -370,8 +370,8 @@ export function getStepValidationErrors(state: WizardState, step: number): strin
       break;
 
     case 'participation':
-      if (!validPlatformFeePercent(state.basics.platformFeePercent ?? 1)) {
-        errors.push('Choose a platform contribution between 1% and 100%');
+      if (!validContributionPercent(state.basics.platformFeePercent ?? 1)) {
+        errors.push('Choose a platform contribution between 1% and 50%');
       }
       if (state.voting.maxProposalsPerUser < 0) {
         errors.push('The proposal limit cannot be negative');

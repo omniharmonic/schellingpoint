@@ -5,6 +5,8 @@
  *            platform_stripe_configured, webhook_configured,
  *            payments_ready, payments_blocked_code, payments_blocked_reason }
  *   POST { ticketing_enabled?: boolean, platform_fee_percent?: number } → same shape
+ *          (the contribution is 1–50%: above half the ticket the organizer gives away more than
+ *          they keep, and Stripe itself enforces no ceiling at all)
  *
  * Turning ticket sales *on* while the gathering has a paid tier is refused (409) until the
  * organizer's merchant account can actually take the charge and receive the payout. The
@@ -13,7 +15,7 @@
  */
 import { assertSameOrigin, requireEventRole } from '@/lib/auth/viewer'
 import { sql } from '@/lib/db'
-import { validPlatformFeePercent } from '@/lib/payments/format'
+import { MAX_CONTRIBUTION_PERCENT, validContributionPercent } from '@/lib/payments/format'
 import { paidSalesBlock, type PaidSalesBlock } from '@/lib/payments/merchant'
 import { cachedMerchantStatus } from '@/lib/payments/merchant-status'
 import { isPaymentsActivated, isPlatformChargeFallbackAllowed, readMerchantReadiness, stripeMerchantGateway } from '@/lib/payments/stripe'
@@ -91,7 +93,11 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
   // Account association is managed by the audited Connect flow, never a pasted account ID.
   if (body.stripe_account_id !== undefined) return jsonError(400, 'Use Stripe Connect to manage the payout account')
   const setFee = body.platform_fee_percent !== undefined
-  if (setFee && !validPlatformFeePercent(body.platform_fee_percent)) return jsonError(400, 'Choose a contribution from 1% to 100%, with up to two decimal places', { field: 'platform_fee_percent' })
+  // The ceiling is ours to keep: Stripe accepts an application fee equal to the charge, and even
+  // one larger than it, without complaint (see docs/STRIPE_ACTIVATION.md).
+  if (setFee && !validContributionPercent(body.platform_fee_percent)) {
+    return jsonError(400, `Choose a contribution from 1% to ${MAX_CONTRIBUTION_PERCENT}%, with up to two decimal places`, { field: 'platform_fee_percent' })
+  }
   if (!setEnabled && !setFee) return jsonError(400, 'No updates provided')
   const enabled = setEnabled ? (body.ticketing_enabled as boolean) : null
   const fee = setFee ? body.platform_fee_percent as number : null

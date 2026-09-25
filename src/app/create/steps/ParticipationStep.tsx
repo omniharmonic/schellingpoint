@@ -2,6 +2,7 @@
 
 import * as React from 'react';
 import { Plus } from 'lucide-react';
+import { MAX_CONTRIBUTION_PERCENT } from '@/lib/payments/format';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -116,7 +117,7 @@ export function ParticipationStep({ state, dispatch }: ParticipationStepProps) {
               type="number"
               inputMode="decimal"
               min={1}
-              max={100}
+              max={MAX_CONTRIBUTION_PERCENT}
               step={0.01}
               value={basics.platformFeePercent ?? 1}
               className="max-w-[200px]"

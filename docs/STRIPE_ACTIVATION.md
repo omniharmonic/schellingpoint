@@ -71,9 +71,9 @@ real Stripe, `stripe listen` forwarding real deliveries):
   Other currencies remain unchecked.
 - **A 100% contribution is accepted by Stripe at session-create time — and so is a fee *larger*
   than the charge** (2501 on a 2500 session). Stripe does not enforce the ceiling at create; the
-  application's own `calculatePlatformFee` clamp is what does. Neither was paid, so what happens
-  at capture is still unverified; at 100% the merchant would owe Stripe's processing fee out of
-  pocket, which is worth a product decision before anyone sets it.
+  application's own clamp is what does. Neither was paid, so what happens at capture is still
+  unverified — and now cannot be reached from the product: **the contribution is capped at 50%**
+  (see "The fee model"), so the merchant always keeps at least half of every ticket.
 
 ### Two defects found and fixed while doing this
 
@@ -90,15 +90,19 @@ real Stripe, `stripe listen` forwarding real deliveries):
    (`StripeConnectionError`, `StripeAPIError`, `StripeRateLimitError`, `StripeAuthenticationError`)
    keep their own types and still reach the organizer. Covered by a test built from the real error
    shapes.
-2. **A failed merchant creation locks the organizer out for 24 hours.** `createMerchantAccountV1`
-   keys its idempotency on the event id alone (`unconference-merchant-v1-<eventId>`). When the
+2. **A failed merchant creation locked the organizer out for 24 hours.** `createMerchantAccountV1`
+   keyed its idempotency on the event id alone (`unconference-merchant-v1-<eventId>`). When the
    first attempt failed for an environmental reason — Connect not yet enabled — Stripe cached that
    400 and replayed it verbatim for every retry, so the organizer could not connect even after the
    platform was fixed. Verified directly: the same key still replays the stale error while a fresh
-   key creates an account immediately. **Not fixed**, because the key is also what stops two
-   "Connect" clicks orphaning two accounts, and the trade-off is a product decision: scoping the
-   key to a coarse time bucket would let retries through at the cost of a rare orphaned,
-   un-onboarded, zero-balance account.
+   key creates an account immediately. **Fixed**, without giving up the property the key existed
+   for. `events.stripe_connect_attempts` (migration 0040) counts *failed* creates and is the last
+   component of the key — `unconference-merchant-v1-<eventId>-<attempts>`. A create that Stripe
+   refuses increments it in the same request, so the organizer's next click is a fresh request;
+   a success leaves it alone; and two clicks inside one attempt still send the same key, so they
+   still collapse to one account rather than orphaning a second. The rule lives in
+   `src/lib/payments/connect.ts` (`connectMerchantAccount`), apart from the route so it can be
+   tested against the real database with no Stripe key.
 
 The code no longer creates Express accounts or destination charges. It creates merchant accounts
 through Accounts v2 where available, falling back to the v1 `controller` equivalent, and charges
@@ -115,8 +119,20 @@ processing fees from the organizer's balance, and unconference receives the cont
 nothing else. A 1% contribution on a $25 ticket is 25 cents of platform revenue, and cannot be
 a platform loss — which was the defect in the destination-charge implementation this replaces.
 
+**The contribution is 1% to 50%, and 50% is enforced three times over.** Stripe accepts an
+application fee equal to the charge and even one larger than it (confirmed against the sandbox:
+2501 on a 2500 session), so the ceiling is entirely ours to keep. The ticketing-settings route
+refuses anything above 50 with a 400, the admin form offers no more than 50, and
+`calculatePlatformFee` clamps to `maxPlatformFeeCents` — half the price, rounded *down*, so the
+share cannot tip past half on an odd number of cents — with `buildCheckoutSessionParams` clamping
+again on the way out. A row stored above the ceiling (the column still permits 1–100, migration
+0014) is charged as 50% and the admin page asks the organizer to lower it; nothing about it is
+an error at charge time. The organizer therefore always keeps at least half of every ticket
+before Stripe's processing fee, and never owes money on the price alone.
+
 There is no fixed surcharge and nothing is added to the buyer's price. Organizer-facing copy
-says plainly that the contribution is separate from Stripe's processing fees.
+says plainly that the contribution is separate from Stripe's processing fees: the form reads
+"Up to 50%. This is separate from Stripe's processing fees."
 
 ## Implemented
 
@@ -137,6 +153,9 @@ says plainly that the contribution is separate from Stripe's processing fees.
    this fired three times on 25 September 2026, with a different code each time.
    `STRIPE_ACCOUNTS_API=v1` forces the fallback. Readiness reads `charges_enabled`
    and `payouts_enabled` (v1) or the merchant/recipient configuration statuses (v2).
+   The create call's idempotency key is `unconference-merchant-<api>-<eventId>-<attempts>`, where
+   `attempts` is `events.stripe_connect_attempts`: incremented only by a failed create, so a
+   retry is a fresh request while a double-click is still the same one.
 2. **Direct charges.** Sessions are created, retrieved and expired in the connected account's
    context. Refunds too. Sessions written by an older release carry `model: 'destination'` on
    their reference and are still settled under their original, platform-scoped rules — there
@@ -214,7 +233,7 @@ says plainly that the contribution is separate from Stripe's processing fees.
 
 ## Tests
 
-`tests/payments-direct.spec.ts` (17 cases) and the payment cases in `tests/ticket-audit.spec.ts`
+`tests/payments-direct.spec.ts` (20 cases) and the payment cases in `tests/ticket-audit.spec.ts`
 run against the real local database with Stripe substituted only at the application's own seams
 (`CheckoutGateway`, `MerchantGateway`, `RefundGateway` — the fakes live in `tests/helpers/payments.ts`,
 so no pretend-Stripe code ships). They cover: $25 at 1% producing a 25-cent application fee with
@@ -229,8 +248,12 @@ event id dispatching exactly once; automatic
 refund of a seatless payment in the merchant context; organizer full and partial refunds;
 `account.updated` pausing and resuming paid sales with a single notification; the readiness gate
 at every stage; the Accounts v2 → v1 fallback firing on every unclassifiable v2 answer the
-sandbox actually returned while outages, throttles and bad keys are still rethrown; and the
-90-day holder anonymisation.
+sandbox actually returned while outages, throttles and bad keys are still rethrown; a failed
+merchant create incrementing `stripe_connect_attempts` and the next click succeeding on a fresh
+idempotency key while the stale key still replays Stripe's cached error, a success leaving the
+counter alone, and two clicks inside one attempt collapsing to one account; the 50% contribution
+ceiling in validation, in `calculatePlatformFee` and in `buildCheckoutSessionParams`, including a
+stored percentage above it being charged as 50%; and the 90-day holder anonymisation.
 Database-boundary rules are in `tests/sql/db-rules.sql`.
 
 ## Still pending — needs a human
@@ -254,14 +277,12 @@ repository and has **not** been done:
   `STRIPE_WEBHOOK_SECRET` / `STRIPE_WEBHOOK_SECRET_CONNECT`. Do not deploy short-lived CLI
   credentials. The livemode *refusal* path (a live delivery hitting a test deployment) cannot be
   exercised without a live key.
-- **A decision on the merchant-creation idempotency key.** See defect 2 in the status section: a
-  merchant creation that fails for an environmental reason locks that gathering out of Connect for
-  24 hours, and the organizer sees a stale error with no way forward. Left as-is deliberately;
-  someone should choose between that and a rare orphaned account.
-- **A decision on the contribution ceiling.** Stripe accepts an application fee of 100% — and even
-  one larger than the charge — at session-create time, so the only guard is ours. At 100% the
-  merchant nets less than zero once Stripe's processing fee is taken. Neither case was paid, so
-  the behaviour at capture is unverified.
+- ~~**A decision on the merchant-creation idempotency key.**~~ Taken: the key carries a
+  failed-attempt counter (defect 2 above). A retry after a failure goes through, and a
+  double-click still produces one account.
+- ~~**A decision on the contribution ceiling.**~~ Taken: 50%, enforced in the route, the form and
+  the fee arithmetic (see "The fee model"). What Stripe does at *capture* with a fee at or above
+  the charge is still unverified, and is now unreachable from the product.
 - **Currency minimums beyond usd.** usd is confirmed at $0.50; no other currency has been checked.
 - **A live test purchase.** Not authorized and not performed. A real-money test needs explicit
   authorization for that transaction.

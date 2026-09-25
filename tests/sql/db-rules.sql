@@ -490,6 +490,22 @@ BEGIN
   EXCEPTION WHEN check_violation THEN NULL;
   END;
 
+  -- Migration 0040. The merchant-create idempotency key is scoped by this counter, so a failed
+  -- create can be retried at once instead of being handed Stripe's cached error for 24 hours.
+  -- It counts failures: a gathering that has never tried starts at zero, and it never goes back.
+  SELECT count(*) INTO n FROM information_schema.columns
+   WHERE table_schema = 'public' AND table_name = 'events' AND column_name = 'stripe_connect_attempts'
+     AND is_nullable = 'NO' AND column_default = '0';
+  IF n <> 1 THEN RAISE EXCEPTION 'events.stripe_connect_attempts must exist, be NOT NULL and default to 0'; END IF;
+  IF (SELECT stripe_connect_attempts FROM public.events WHERE id = eid) <> 0 THEN
+    RAISE EXCEPTION 'a new gathering must start with no failed Connect attempts';
+  END IF;
+  BEGIN
+    UPDATE public.events SET stripe_connect_attempts = -1 WHERE id = eid;
+    RAISE EXCEPTION 'a negative Connect attempt count was accepted';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+
   -- Money facts keep no holder: deleting the person detaches the ticket, it does not delete it.
   SELECT count(*) INTO n FROM information_schema.columns
    WHERE table_schema = 'public' AND table_name = 'tickets' AND column_name = 'user_id' AND is_nullable = 'YES';

@@ -1,4 +1,4 @@
-import { validPlatformFeePercent } from '@/lib/payments/format';
+import { validContributionPercent } from '@/lib/payments/format';
 import { parseTimeInTimezone } from './timezone';
 import type { WizardState } from '@/app/create/useWizardState';
 import { isValidSlugFormat } from '@/lib/utils/slug';
@@ -22,7 +22,7 @@ export function validateWizardState(input: unknown): { valid: boolean; error?: s
   if (!/^[a-z0-9](?:[a-z0-9-]{1,30}[a-z0-9])?$/.test(state.basics.slug)) return fail('Use 3–32 lowercase letters, numbers and hyphens for the event URL');
   if (!['public', 'private', 'unlisted'].includes(state.basics.visibility)) return fail('Choose an event visibility');
   if (state.basics.ticketingEnabled !== undefined && typeof state.basics.ticketingEnabled !== 'boolean') return fail('Choose an admission option');
-  if (!validPlatformFeePercent(state.basics.platformFeePercent ?? 1)) return fail('Choose a platform contribution between 1% and 100%, with up to two decimal places');
+  if (!validContributionPercent(state.basics.platformFeePercent ?? 1)) return fail('Choose a platform contribution between 1% and 50%, with up to two decimal places');
   if (!date(state.dates.startDate) || !date(state.dates.endDate)) return fail('Choose valid start and end dates', 1);
   if (state.dates.endDate < state.dates.startDate) return fail('End date must be on or after the start date', 1);
   try { if (!text(state.dates.timezone) || !state.dates.timezone) throw Error(); new Intl.DateTimeFormat('en', { timeZone: state.dates.timezone }); } catch { return fail('Choose a valid timezone', 1); }

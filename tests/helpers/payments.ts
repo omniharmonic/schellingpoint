@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type Stripe from 'stripe'
 import type { CheckoutGateway } from '../../src/lib/tickets'
-import type { MerchantGateway, MerchantReadiness } from '../../src/lib/payments/merchant'
+import { merchantIdempotencyKey, type MerchantGateway, type MerchantReadiness } from '../../src/lib/payments/merchant'
 
 /**
  * The payment fakes. Nothing here ships: the application defines the seams
@@ -59,11 +59,29 @@ export function fakeCheckoutGateway(opts: { fail?: boolean; expireResult?: 'expi
   return { gateway, created, expired }
 }
 
+export interface FakeMerchantCreateCall {
+  eventId: string
+  /** `events.stripe_connect_attempts` as the caller passed it. */
+  attempt: number
+  /** The Stripe idempotency key this call would carry — built by the shipped code's own rule. */
+  idempotencyKey: string
+  /** `replayed`: Stripe answers a repeated key from its cache instead of creating anything. */
+  outcome: 'created' | 'replayed' | 'failed'
+  accountId: string | null
+}
+
 /**
  * A merchant gateway whose accounts start un-onboarded and become ready when the test says so.
  * `createAccount` reports `v2`, matching the Accounts v2 path the real gateway prefers.
+ *
+ * It behaves like Stripe about idempotency keys, because that is the property under test: a
+ * repeated key returns the first answer without creating a second account, and `failCreates`
+ * makes the first N calls fail the way a platform without Connect enabled does.
  */
-export function fakeMerchantGateway(initial: Record<string, Partial<MerchantReadiness>> = {}) {
+export function fakeMerchantGateway(
+  initial: Record<string, Partial<MerchantReadiness>> = {},
+  opts: { failCreates?: number } = {},
+) {
   const accounts = new Map<string, MerchantReadiness>()
   const set = (accountId: string, patch: Partial<MerchantReadiness>) => {
     accounts.set(accountId, {
@@ -79,11 +97,43 @@ export function fakeMerchantGateway(initial: Record<string, Partial<MerchantRead
   }
   for (const [id, patch] of Object.entries(initial)) set(id, patch)
 
+  const creates: FakeMerchantCreateCall[] = []
+  let failuresLeft = opts.failCreates ?? 0
+  // Stripe's idempotency cache: whatever a key answered first, it answers again for 24 hours —
+  // an error included. That replayed error is the defect the attempt counter exists to escape.
+  const byKey = new Map<string, { account: { accountId: string; api: 'v2' } } | { error: Error }>()
+
   const gateway: MerchantGateway = {
-    createAccount: async () => {
+    createAccount: async (input) => {
+      const attempt = input.attempt ?? 0
+      const idempotencyKey = merchantIdempotencyKey('v2', input.eventId, attempt)
+      const cached = byKey.get(idempotencyKey)
+      if (cached) {
+        const replayed = 'error' in cached
+        creates.push({
+          eventId: input.eventId,
+          attempt,
+          idempotencyKey,
+          outcome: replayed ? 'failed' : 'replayed',
+          accountId: replayed ? null : cached.account.accountId,
+        })
+        if ('error' in cached) throw cached.error
+        return cached.account
+      }
+      if (failuresLeft > 0) {
+        failuresLeft -= 1
+        // What Stripe answered when the platform had no Connect enabled.
+        const error = new Error('non_connect_platform_accounts_v2_access_blocked')
+        byKey.set(idempotencyKey, { error })
+        creates.push({ eventId: input.eventId, attempt, idempotencyKey, outcome: 'failed', accountId: null })
+        throw error
+      }
       const accountId = `acct_test_${randomUUID().replace(/-/g, '').slice(0, 16)}`
       set(accountId, { requirementsDue: ['identity.individual.first_name'] })
-      return { accountId, api: 'v2' }
+      const account = { accountId, api: 'v2' as const }
+      byKey.set(idempotencyKey, { account })
+      creates.push({ eventId: input.eventId, attempt, idempotencyKey, outcome: 'created', accountId })
+      return account
     },
     onboardingLink: async ({ accountId }) => `https://connect.stripe.test/onboard/${accountId}`,
     readiness: async (accountId) => {
@@ -96,6 +146,10 @@ export function fakeMerchantGateway(initial: Record<string, Partial<MerchantRead
 
   return {
     gateway,
+    /** Every create call, in order: the attempt, the key it carried and what Stripe did with it. */
+    creates,
+    /** Genuine account creations — a key Stripe replayed from its cache created nothing. */
+    created: () => creates.filter((call) => call.outcome === 'created'),
     /** Finish onboarding: charges and payouts both live. */
     complete(accountId: string) {
       set(accountId, { chargesEnabled: true, payoutsEnabled: true, detailsSubmitted: true })

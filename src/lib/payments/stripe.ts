@@ -1,6 +1,8 @@
 import 'server-only'
 import Stripe from 'stripe'
+import { maxPlatformFeeCents } from './format'
 import {
+  merchantIdempotencyKey,
   NOT_CONNECTED_STATUS,
   type CreateMerchantInput,
   type CreateMerchantResult,
@@ -25,7 +27,7 @@ import type { RefundGateway } from './refunds'
  * collects its processing fees from the organizer, not from the platform. A 1% contribution
  * is therefore 1% of revenue to the platform, never a loss.
  */
-export { formatPrice, calculatePlatformFee } from './format'
+export { formatPrice, calculatePlatformFee, maxPlatformFeeCents, MAX_CONTRIBUTION_PERCENT } from './format'
 export { NOT_CONNECTED_STATUS } from './merchant'
 export type { MerchantReadiness, MerchantGateway } from './merchant'
 
@@ -107,21 +109,27 @@ export interface CheckoutSessionInput {
  * contribution into a loss; it must never appear here.
  *
  * `expiresAt` is the hold's expiry, so the session cannot be paid after the seat is released.
+ *
+ * The fee is clamped to `maxPlatformFeeCents` here as well as where it is computed. Stripe will
+ * happily accept a fee equal to — or larger than — the charge, so this is the last place the
+ * promise "the contribution can never exceed half the ticket" can be kept, whatever a stored
+ * percentage or a caller's arithmetic says.
  */
 export function buildCheckoutSessionParams(input: CheckoutSessionInput): Stripe.Checkout.SessionCreateParams {
+  const applicationFeeCents = Math.min(input.platformFeeCents, maxPlatformFeeCents(input.priceCents))
   const metadata = {
     ticket_id: input.ticketId,
     event_id: input.eventId,
     tier_id: input.tierId,
     holder_id: input.holderId,
-    platform_fee_cents: String(input.platformFeeCents),
+    platform_fee_cents: String(applicationFeeCents),
   }
 
   const paymentIntentData: Stripe.Checkout.SessionCreateParams.PaymentIntentData = { metadata }
-  if (input.stripeAccountId && input.platformFeeCents > 0) {
+  if (input.stripeAccountId && applicationFeeCents > 0) {
     // Direct charge: the organizer's account is the merchant of record and pays Stripe's
     // processing fees; the platform's cut is this fee and nothing else.
-    paymentIntentData.application_fee_amount = input.platformFeeCents
+    paymentIntentData.application_fee_amount = applicationFeeCents
   }
 
   return {
@@ -354,7 +362,7 @@ async function createMerchantAccountV2(input: CreateMerchantInput): Promise<Crea
       },
       metadata: { event_id: input.eventId, event_slug: input.eventSlug },
     },
-    { idempotencyKey: `unconference-merchant-v2-${input.eventId}` },
+    { idempotencyKey: merchantIdempotencyKey('v2', input.eventId, input.attempt ?? 0) },
   )
   return { accountId: account.id, api: 'v2' }
 }
@@ -374,7 +382,7 @@ async function createMerchantAccountV1(input: CreateMerchantInput): Promise<Crea
       capabilities: { card_payments: { requested: true }, transfers: { requested: true } },
       metadata: { event_id: input.eventId, event_slug: input.eventSlug },
     },
-    { idempotencyKey: `unconference-merchant-v1-${input.eventId}` },
+    { idempotencyKey: merchantIdempotencyKey('v1', input.eventId, input.attempt ?? 0) },
   )
   return { accountId: account.id, api: 'v1' }
 }

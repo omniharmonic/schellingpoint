@@ -33,7 +33,7 @@ import { PageHeader } from '@/components/PageHeader'
 import { useEvent, useEventRole } from '@/contexts/EventContext'
 import { cn } from '@/lib/utils'
 import { apiFetch, ApiError } from '@/lib/api/client'
-import { formatPrice } from '@/lib/payments/format'
+import { formatPrice, MAX_CONTRIBUTION_PERCENT } from '@/lib/payments/format'
 
 interface TicketTier {
   id: string
@@ -583,12 +583,22 @@ function AdminTicketsPageInner() {
                     platform surcharge and nothing added to the buyer&apos;s price. Free tickets stay free.
                   </p>
                   <p className="text-sm text-muted-foreground">
-                    This is separate from Stripe&apos;s processing fees. Ticket money is charged on your own Stripe
-                    account: Stripe takes its processing fee there, and unconference takes only the percentage you set
-                    here. On a $25 ticket at 1% the contribution is $0.25.
+                    Up to {MAX_CONTRIBUTION_PERCENT}%. This is separate from Stripe&apos;s processing fees. Ticket money
+                    is charged on your own Stripe account: Stripe takes its processing fee there, and unconference takes
+                    only the percentage you set here. On a $25 ticket at 1% the contribution is $0.25.
                   </p>
+                  {settings.platform_fee_percent > MAX_CONTRIBUTION_PERCENT && (
+                    <Alert>
+                      <AlertTriangle className="h-4 w-4" />
+                      <AlertDescription>
+                        This gathering is set to {settings.platform_fee_percent}%, above the {MAX_CONTRIBUTION_PERCENT}%
+                        ceiling. New checkouts contribute {MAX_CONTRIBUTION_PERCENT}% of the ticket price; lower it to
+                        the figure you mean.
+                      </AlertDescription>
+                    </Alert>
+                  )}
                   <div className="flex flex-wrap items-center gap-3">
-                    <Input key={settings.platform_fee_percent} id="platform-contribution" name="contribution" type="number" min="1" max="100" step="0.01" required defaultValue={settings.platform_fee_percent} className="w-24" />
+                    <Input key={settings.platform_fee_percent} id="platform-contribution" name="contribution" type="number" min="1" max={MAX_CONTRIBUTION_PERCENT} step="0.01" required defaultValue={settings.platform_fee_percent} className="w-24" />
                     <span className="text-sm">% of ticket sales</span>
                     <Button type="submit" variant="outline" disabled={isSaving}>Save contribution</Button>
                   </div>

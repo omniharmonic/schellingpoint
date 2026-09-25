@@ -13,14 +13,24 @@ for (const value of [process.env.DATABASE_MIGRATION_URL, process.env.PDS_INTERNA
 // Real local database, PDS identities and HTTP routes. Only the payment gateway is substituted:
 // these cases exercise entitlement and webhook ordering without moving money.
 test.describe('ticket admission audit', () => {
-  test('platform contributions are percentage-only and cannot fall below one percent', async () => {
-    const { calculatePlatformFee } = require('../src/lib/payments/format')
+  test('platform contributions are percentage-only, never below 1% and never above half the ticket', async () => {
+    const { calculatePlatformFee, validContributionPercent, MAX_CONTRIBUTION_PERCENT } = require('../src/lib/payments/format')
     expect(calculatePlatformFee(2500, 1)).toBe(25)
     expect(calculatePlatformFee(2500, 3.5)).toBe(88)
     expect(calculatePlatformFee(50, 1)).toBe(1)
     expect(calculatePlatformFee(0, 1)).toBe(0)
     expect(() => calculatePlatformFee(2500, 0.5)).toThrow()
     expect(() => calculatePlatformFee(2500, 101)).toThrow()
+
+    // The ceiling: 50% is the most an organizer may choose, and the most that can ever be
+    // charged. A row stored above it (the column still allows one) is charged as 50%.
+    expect(MAX_CONTRIBUTION_PERCENT).toBe(50)
+    expect(validContributionPercent(50)).toBe(true)
+    expect(validContributionPercent(50.01)).toBe(false)
+    expect(validContributionPercent(100)).toBe(false)
+    expect(calculatePlatformFee(2500, 50)).toBe(1250)
+    expect(calculatePlatformFee(2500, 60)).toBe(1250)
+    expect(calculatePlatformFee(2500, 100)).toBe(1250)
   })
 
   test('a session proposal cannot bypass paid admission or a tier without proposal rights', async () => {
@@ -152,6 +162,13 @@ test.describe('ticket admission audit', () => {
       })
       expect((await save({ platform_fee_percent: 0.9 })).status).toBe(400)
       expect((await save({ stripe_account_id: 'acct_someoneelse' })).status).toBe(400)
+      // The ceiling is the route's, not the browser's: half the ticket is the most the platform
+      // may be given, because Stripe itself would accept a fee as large as the charge.
+      const tooMuch = await save({ platform_fee_percent: 51 })
+      expect(tooMuch.status).toBe(400)
+      expect((await tooMuch.json()).error).toBe('Choose a contribution from 1% to 50%, with up to two decimal places')
+      expect((await save({ platform_fee_percent: 100 })).status).toBe(400)
+      expect((await save({ platform_fee_percent: 50 })).status).toBe(200)
       expect((await save({ platform_fee_percent: 3.5 })).status).toBe(200)
       const [tier] = await db`insert into ticket_tiers (event_id, name, price_cents) values (${event.id}, 'Admission', 2500) returning id`
       const tickets = await withServerOnlyShim(() => require('../src/lib/tickets') as typeof import('../src/lib/tickets'))

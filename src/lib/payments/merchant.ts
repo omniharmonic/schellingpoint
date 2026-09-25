@@ -45,6 +45,28 @@ export interface CreateMerchantInput {
   eventName: string
   /** Contact address for Stripe's own correspondence with the merchant. Never attested as a business detail. */
   email?: string | null
+  /**
+   * How many create calls for this gathering have already failed
+   * (`events.stripe_connect_attempts`). It scopes the Stripe idempotency key, so a retry after a
+   * failure is a fresh request while two clicks inside one attempt still collapse to one account.
+   * Defaults to 0 when a caller does not care.
+   */
+  attempt?: number
+}
+
+/**
+ * The Stripe idempotency key for one merchant-create attempt.
+ *
+ * Stripe caches the *answer* against a key for 24 hours, a failure included, and replays it
+ * verbatim. Keying on the event id alone therefore locked a gathering out of Connect for a day
+ * whenever the first attempt failed for an environmental reason. The attempt counter is bumped
+ * only by a failure (see `connectMerchantAccount`), which keeps both properties: a retry is a new
+ * request, and a double-click within one attempt is the same one.
+ *
+ * Exported so the fakes and the tests can name the same key the shipped code does.
+ */
+export function merchantIdempotencyKey(api: MerchantApi, eventId: string, attempt: number = 0): string {
+  return `unconference-merchant-${api}-${eventId}-${attempt}`
 }
 
 export interface CreateMerchantResult {

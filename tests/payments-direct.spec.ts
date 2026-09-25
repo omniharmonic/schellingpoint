@@ -27,6 +27,7 @@ type Webhook = typeof import('../src/lib/payments/webhook')
 type References = typeof import('../src/lib/payments/references')
 type StripeLib = typeof import('../src/lib/payments/stripe')
 type Merchant = typeof import('../src/lib/payments/merchant')
+type Connect = typeof import('../src/lib/payments/connect')
 type MerchantStatus = typeof import('../src/lib/payments/merchant-status')
 type Refunds = typeof import('../src/lib/payments/refunds')
 
@@ -405,6 +406,122 @@ test.describe('direct charges', () => {
     const badParam = Stripe.errors.StripeError.generate({ type: 'invalid_request_error', code: 'account_invalid', message: 'nope' } as never)
     expect(stripeLib.isV2Unavailable(badParam)).toBe(false)
     expect(stripeLib.isV2Unavailable(new Error('network down'))).toBe(false)
+  })
+
+  test('the contribution is capped at half the ticket, however high the stored percentage is', async () => {
+    const stripe = await load<StripeLib>('../src/lib/payments/stripe')
+    const { calculatePlatformFee, maxPlatformFeeCents, MAX_CONTRIBUTION_PERCENT } = stripe
+
+    // Stripe accepts an application fee equal to the charge, and even one larger than it, at
+    // session-create time (verified against the sandbox on 2026-09-25: 2501 on a 2500 session).
+    // Ours is the only ceiling there is, so it holds in the arithmetic, not just in the form.
+    expect(MAX_CONTRIBUTION_PERCENT).toBe(50)
+    expect(calculatePlatformFee(2500, 50)).toBe(1250)
+    // A row written before the ceiling existed is charged as 50%, not as what it says.
+    expect(calculatePlatformFee(2500, 75)).toBe(1250)
+    expect(calculatePlatformFee(2500, 100)).toBe(1250)
+    // Rounded down, so an odd number of cents cannot tip the share past half.
+    expect(maxPlatformFeeCents(25)).toBe(12)
+    expect(calculatePlatformFee(25, 50)).toBe(12)
+    expect(calculatePlatformFee(1, 50)).toBe(0)
+
+    // And the session builder clamps whatever it is handed: a fee larger than the charge is
+    // exactly what Stripe would have taken without complaint.
+    const params = stripe.buildCheckoutSessionParams({
+      ticketId: randomUUID(),
+      tierId: randomUUID(),
+      holderId: randomUUID(),
+      expiresAt: new Date(Date.now() + 60_000),
+      tierName: 'Admission',
+      priceCents: 2500,
+      platformFeeCents: 2501,
+      currency: 'usd',
+      eventId: randomUUID(),
+      eventName: 'Ceiling check',
+      stripeAccountId: 'acct_merchant_ceiling',
+      successUrl: 'https://example.test/ok',
+      cancelUrl: 'https://example.test/no',
+    })
+    expect(params.payment_intent_data!.application_fee_amount).toBe(1250)
+    // The metadata the organizer reads in their dashboard says the same number.
+    expect(params.metadata!.platform_fee_cents).toBe('1250')
+  })
+
+  test('a failed merchant creation can be retried at once, with a fresh idempotency key', async () => {
+    const sql = db()
+    const event = await createTestGathering(sql, { tag: 'connect-retry' })
+    try {
+      const connect = await load<Connect>('../src/lib/payments/connect')
+      // The first create fails the way the sandbox did on 2026-09-25 (Connect not enabled), and
+      // the fake caches that error against its key exactly as Stripe does for 24 hours.
+      const fake = fakeMerchantGateway({}, { failCreates: 1 })
+      const gathering = { id: event.id, slug: event.slug, name: event.name, stripe_account_id: null }
+
+      const failed = await connect.connectMerchantAccount(fake.gateway, gathering, 'organizer@example.test')
+      expect(failed).toMatchObject({ status: 'create_failed', attempts: 1 })
+      const attemptsAfterFailure = await sql`select stripe_account_id, stripe_connect_attempts from events where id = ${event.id}`
+      expect(attemptsAfterFailure[0]).toMatchObject({ stripe_account_id: null, stripe_connect_attempts: 1 })
+
+      // The old key is still poisoned — that is the 24-hour lockout this counter escapes.
+      await expect(
+        fake.gateway.createAccount({ eventId: event.id, eventSlug: event.slug, eventName: event.name, attempt: 0 }),
+      ).rejects.toThrow('non_connect_platform_accounts_v2_access_blocked')
+
+      // The organizer's next click is a new request, and it connects.
+      const connected = await connect.connectMerchantAccount(fake.gateway, gathering, 'organizer@example.test')
+      expect(connected).toMatchObject({ status: 'connected', created: true, api: 'v2' })
+      const succeeded = fake.created()
+      expect(succeeded).toHaveLength(1)
+      expect(succeeded[0]).toMatchObject({ attempt: 1, idempotencyKey: `unconference-merchant-v2-${event.id}-1` })
+      expect(fake.creates[0].idempotencyKey).not.toBe(succeeded[0].idempotencyKey)
+
+      // A success counts nothing: the column counts failures, not accounts.
+      const after = await sql`select stripe_account_id, stripe_connect_attempts from events where id = ${event.id}`
+      expect(after[0]).toMatchObject({ stripe_account_id: succeeded[0].accountId, stripe_connect_attempts: 1 })
+
+      // And a gathering that already has an account never creates a second one.
+      const again = await connect.connectMerchantAccount(
+        fake.gateway,
+        { ...gathering, stripe_account_id: succeeded[0].accountId },
+        'organizer@example.test',
+      )
+      expect(again).toMatchObject({ status: 'connected', created: false })
+      expect(fake.created()).toHaveLength(1)
+    } finally {
+      await event.cleanup()
+      await sql.end()
+    }
+  })
+
+  test('two Connect clicks inside one attempt still collapse to a single merchant account', async () => {
+    const sql = db()
+    const event = await createTestGathering(sql, { tag: 'connect-double' })
+    try {
+      const connect = await load<Connect>('../src/lib/payments/connect')
+      const fake = fakeMerchantGateway()
+      const gathering = { id: event.id, slug: event.slug, name: event.name, stripe_account_id: null }
+
+      const [first, second] = await Promise.all([
+        connect.connectMerchantAccount(fake.gateway, gathering, 'organizer@example.test'),
+        connect.connectMerchantAccount(fake.gateway, gathering, 'organizer@example.test'),
+      ])
+
+      // Both calls carried the same key, because neither attempt had failed: Stripe answered the
+      // second from its cache, so there is one account and no orphan.
+      expect(fake.creates).toHaveLength(2)
+      expect(new Set(fake.creates.map((call) => call.idempotencyKey)).size).toBe(1)
+      expect(fake.created()).toHaveLength(1)
+      expect(fake.creates.every((call) => call.attempt === 0)).toBe(true)
+
+      const accountId = fake.created()[0].accountId
+      expect(first).toMatchObject({ status: 'connected', accountId })
+      expect(second).toMatchObject({ status: 'connected', accountId })
+      const [row] = await sql`select stripe_account_id, stripe_connect_attempts from events where id = ${event.id}`
+      expect(row).toMatchObject({ stripe_account_id: accountId, stripe_connect_attempts: 0 })
+    } finally {
+      await event.cleanup()
+      await sql.end()
+    }
   })
 
   test('the readiness gate refuses paid sales until charges and payouts are both live', async () => {
