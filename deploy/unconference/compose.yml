@@ -112,13 +112,19 @@ services:
       ATPROTO_JETSTREAM_URL: ${ATPROTO_JETSTREAM_URL:-wss://jetstream2.us-east.bsky.network/subscribe}
       TICKET_QR_SECRET: ${TICKET_QR_SECRET:?Set TICKET_QR_SECRET}
       CRON_SECRET: ${CRON_SECRET:?Set CRON_SECRET}
+      # Seals the credentials organizers paste into the app (today: a gathering's own answer-model
+      # key, `event_ai_settings`). 32 bytes base64 — `openssl rand -base64 32`. Required: without it
+      # a gathering cannot store a key and the Knowledge page says secret storage is not configured.
+      APP_SECRETS_KEY: ${APP_SECRETS_KEY:?Set APP_SECRETS_KEY}
       RESEND_API_KEY: ${RESEND_API_KEY:?Set RESEND_API_KEY}
       MAIL_FROM: ${MAIL_FROM:-Unconference <hello@unconference.events>}
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
       ENS_RPC_URL: ${ENS_RPC_URL:-}
       # Knowledge harvest (design §10.3). Embeddings default to the on-box model baked into the
-      # image at /models — no key, no outbound request. Answers still need ANTHROPIC_API_KEY.
+      # image at /models — no key, no outbound request. Answers use a gathering's own key when its
+      # organizers set one (Knowledge → Answers); ANTHROPIC_API_KEY is the fallback for every
+      # gathering that has none.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       AI_CHAT_MODEL: ${AI_CHAT_MODEL:-}
       EMBEDDINGS_PROVIDER: ${EMBEDDINGS_PROVIDER:-}

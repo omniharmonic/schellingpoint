@@ -21,8 +21,13 @@ import 'server-only'
  *  - `https:` to a public unicast address.
  *  - `http:` ONLY outside production AND when the origin exactly equals a configured local service
  *    (`PDS_URL`, `PDS_INTERNAL_URL`, `ATPROTO_DEFAULT_PDS_URL`, `ATPROTO_PLC_URL`,
- *    `ATPROTO_HANDLE_RESOLVER`). Those origins also skip the public-address rule (they are
- *    localhost in development). Nothing is exempt in production.
+ *    `ATPROTO_HANDLE_RESOLVER`, `AI_TEST_BASE_ORIGIN`). Those origins also skip the public-address
+ *    rule (they are localhost in development). Nothing is exempt in production.
+ *
+ *  `AI_TEST_BASE_ORIGIN` exists for the tests only: it names one origin (e.g.
+ *  `http://127.0.0.1:41234`) that may stand in for an organizer-supplied OpenAI-compatible answer
+ *  provider, so no test ever calls a real model. It is unset by default, ignored in production,
+ *  and the ai-key route refuses any other non-https base URL.
  *
  * Code that talks to OUR PDS through `PDS_INTERNAL_URL` does not use this: that URL is operator
  * configuration, not attacker input (see `src/lib/atproto/service-url.ts`).
@@ -179,7 +184,7 @@ function originOf(value: string | undefined): string | null {
 
 /** Origins of our own configured local services (only honoured outside production). */
 export function localServiceOrigins(): Set<string> {
-  const names = ['PDS_URL', 'PDS_INTERNAL_URL', 'ATPROTO_DEFAULT_PDS_URL', 'ATPROTO_PLC_URL', 'ATPROTO_HANDLE_RESOLVER']
+  const names = ['PDS_URL', 'PDS_INTERNAL_URL', 'ATPROTO_DEFAULT_PDS_URL', 'ATPROTO_PLC_URL', 'ATPROTO_HANDLE_RESOLVER', 'AI_TEST_BASE_ORIGIN']
   return new Set(names.map((n) => originOf(process.env[n])).filter((o): o is string => Boolean(o)))
 }
 

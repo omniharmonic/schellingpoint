@@ -5,7 +5,8 @@ import 'server-only'
  * what the transcripts say goes in; the prompts forbid inventing content.
  */
 import { sql } from '@/lib/db'
-import { chatConfig, completeText, type ChatConfig } from './anthropic'
+import { completeText, resolveChatConfig, type ChatConfig } from './chat-provider'
+import { tierPredicate } from './rank'
 
 /** Longest transcript slice sent for a summary (≈ 100k tokens). */
 const SUMMARY_INPUT_CHARS = 400_000
@@ -74,11 +75,25 @@ function parseThemes(text: string, knownIds: Set<string>): ThemeEntry[] {
   return themes
 }
 
+/**
+ * The gathering's themes, from the transcripts A MEMBER MAY READ.
+ *
+ * `events.themes` is member-facing by definition — the admin page publishes it and the Ask page
+ * renders it to every member — so it is built at the members tier only: `tierPredicate('members')`
+ * (the gathering's setting AND the transcript's own visibility must both be 'members'), and never
+ * from a session hidden by moderation (0033), exactly as ranking does in `rank.ts`. An
+ * organizers-only transcript therefore never reaches an attendee through a theme. With nothing a
+ * member may read there are no themes at all, rather than organizer-only ones.
+ */
 export async function generateEventThemes(cfg: ChatConfig, eventId: string): Promise<EventThemes | null> {
   const rows = await sql<{ session_id: string; title: string; summary: string | null; excerpt: string }[]>`
     select t.session_id, s.title, t.summary, left(t.content, ${THEME_EXCERPT_CHARS}) as excerpt
-    from session_transcripts t join sessions s on s.id = t.session_id
+    from session_transcripts t
+    join sessions s on s.id = t.session_id
+    join events e on e.id = t.event_id
     where t.event_id = ${eventId} and t.replaced_at is null and t.status = 'ready'
+      and not coalesce(s.hidden_by_moderation, false)
+      ${tierPredicate('members')}
     order by s.title
   `
   if (!rows.length) return null
@@ -98,7 +113,8 @@ export async function generateEventThemes(cfg: ChatConfig, eventId: string): Pro
  * gathering's themes. Returns `done: false` when the deadline passed with work left.
  */
 export async function runSummaries(eventId: string, deadline: number): Promise<{ done: boolean; processed: number }> {
-  const cfg = chatConfig()
+  // The gathering's own key first, then the deployment's (design 2026-09-25 §2.1).
+  const cfg = await resolveChatConfig(eventId)
   if (!cfg) return { done: true, processed: 0 } // no answer model: a clean no-op
   let processed = 0
   const pending = await sql<{ id: string }[]>`
@@ -112,6 +128,7 @@ export async function runSummaries(eventId: string, deadline: number): Promise<{
     processed += 1
   }
   if (Date.now() >= deadline) return { done: false, processed }
+  // The themes pass is one run over the gathering, not a transcript: it does not add to the count.
   await generateEventThemes(cfg, eventId)
-  return { done: true, processed: processed + 1 }
+  return { done: true, processed }
 }

@@ -10,7 +10,7 @@ import type { EventRoleName } from '@/types/event'
 import { chunkParagraphs } from './chunk'
 import type { NormalizedTranscript, TranscriptFormat } from './normalize'
 import { embeddingsConfig, localModelState, type EmbeddingsConfig } from './embeddings'
-import { chatConfig } from './anthropic'
+import { resolveChatConfig, type ChatConfig } from './chat-provider'
 import { enqueueKnowledgeJob } from './jobs'
 
 export const ORGANIZER_ROLES: readonly EventRoleName[] = ['owner', 'admin', 'moderator']
@@ -142,10 +142,20 @@ export async function editSummary(input: { sessionId: string; summary: string | 
 }
 
 /**
- * Is there at least one ready transcript THIS VIEWER may read? The workspace sidebar shows "Ask"
- * only then (design §10.2; inventory 17.7). One indexed count, computed server-side per render:
- * a member sees it when a members-tier transcript exists, an organizer whenever any does, and a
- * non-member never.
+ * Are transcripts turned on for this gathering? The workspace sidebar shows "Ask" whenever they
+ * are (design 2026-09-25 §2.2): the page itself explains what is still missing — no transcripts
+ * yet, no answer key — rather than the navigation item disappearing and taking the explanation
+ * with it.
+ */
+export async function transcriptsEnabled(eventId: string): Promise<boolean> {
+  const [event] = await sql<{ transcripts_enabled: boolean }[]>`select transcripts_enabled from events where id = ${eventId}`
+  return event?.transcripts_enabled ?? false
+}
+
+/**
+ * Is there at least one ready transcript THIS VIEWER may read? One indexed count, per tier: a
+ * member counts members-tier transcripts, an organizer all of them, a non-member none. Used for
+ * "is there anything to answer from", not for the navigation.
  */
 export async function hasReadableTranscripts(eventId: string, role: EventRoleName | null | undefined): Promise<boolean> {
   const tier = readTier(role)
@@ -175,7 +185,9 @@ export interface ProviderStatus {
   embeddings:
     | { configured: true; provider: string; model: string; label: string; local: boolean; error: string | null }
     | { configured: false }
-  chat: { configured: true; model: string } | { configured: false }
+  chat:
+    | { configured: true; model: string; provider: ChatConfig['provider']; source: ChatConfig['source'] }
+    | { configured: false }
 }
 
 /** What the operator reads on the Knowledge page: `local (bge-small-en-v1.5)`, `voyage · voyage-3`. */
@@ -183,9 +195,13 @@ export function embeddingsLabel(cfg: EmbeddingsConfig): string {
   return cfg.provider === 'local' ? `local (${cfg.model.split('/').pop()})` : `${cfg.provider} · ${cfg.model}`
 }
 
-export function providerStatus(): ProviderStatus {
+/**
+ * `eventId` resolves the answer key the way answers do — the gathering's own first, the
+ * deployment's second (design 2026-09-25 §2.1) — so the Knowledge page says which one is in use.
+ */
+export async function providerStatus(eventId: string): Promise<ProviderStatus> {
   const e = embeddingsConfig()
-  const c = chatConfig()
+  const c = await resolveChatConfig(eventId)
   return {
     embeddings: e
       ? {
@@ -198,7 +214,7 @@ export function providerStatus(): ProviderStatus {
           error: e.provider === 'local' ? localModelState().error : null,
         }
       : { configured: false },
-    chat: c ? { configured: true, model: c.model } : { configured: false },
+    chat: c ? { configured: true, model: c.model, provider: c.provider, source: c.source } : { configured: false },
   }
 }
 
@@ -313,6 +329,6 @@ export async function coverage(eventId: string): Promise<Coverage> {
     jobs,
     themes: event?.themes ?? null,
     themes_edited_at: event?.themes_edited_at ?? null,
-    providers: providerStatus(),
+    providers: await providerStatus(eventId),
   }
 }

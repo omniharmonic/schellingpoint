@@ -41,6 +41,30 @@ change them casually; moving hosts is a PLC operation per account (see Free Scho
 only there (`~/.config/unconference/backup-age.key`), never on the server. The PLC rotation key is the
 one secret that cannot be regenerated.
 
+### `APP_SECRETS_KEY` (required)
+
+Seals the credentials organizers paste into the app — today a gathering's own answer-model key
+(`event_ai_settings`, migration 0037): AES-256-GCM, a fresh nonce per key, the gathering's id as
+associated data, so a sealed key is bound to the gathering it belongs to. Generate one and add it to
+the env before the release that carries this wave:
+
+```sh
+openssl rand -base64 32
+# → APP_SECRETS_KEY=<paste>   in deploy/unconference/.env
+```
+
+Compose refuses to start the app without it (`${APP_SECRETS_KEY:?…}`, like `CRON_SECRET`). The app
+fails closed rather than storing anything in the clear: with the variable missing or not 32
+base64-encoded bytes, the server logs `[secrets] APP_SECRETS_KEY is not usable …` once, every write
+of a key answers 503 `SecretsUnavailable`, and the Knowledge page tells organizers the operator has
+not configured secret storage. Answers still work for gatherings covered by the deployment-wide
+`ANTHROPIC_API_KEY`.
+
+**Rotation destroys stored keys.** Nothing re-encrypts them: after a change every row in
+`event_ai_settings` fails to open (logged once per gathering, answers fall back to the deployment
+key) and organizers must paste their key again. If you must rotate, tell the organizers first, or
+`delete from event_ai_settings;` so the UI shows "no key" rather than a key that cannot be read.
+
 ## First deploy
 
 ```sh
@@ -181,9 +205,15 @@ verification.
   - `EMBEDDINGS_PROVIDER=none` switches embeddings off entirely (export still works).
     `voyage`/`openai` stay opt-in and need `EMBEDDINGS_MODEL` + `EMBEDDINGS_API_KEY`; those do send
     transcript text off the box, which the Participation settings disclose.
-- **Knowledge — answers**: `ANTHROPIC_API_KEY` (+ `AI_CHAT_MODEL`, default `claude-sonnet-5`) for
-  "Ask the gathering", summaries and themes. Without it the Knowledge page reads
-  `Answers: not configured` and those buttons stay disabled; search and the export are unaffected.
+- **Knowledge — answers**: resolved per gathering (design 2026-09-25 §2.1) — the gathering's own key
+  first, then this deployment's `ANTHROPIC_API_KEY` (+ `AI_CHAT_MODEL`, default `claude-sonnet-5`),
+  then none. Owners and admins set their own under **Knowledge → Answers**: Anthropic (model chosen
+  from a list) or any OpenAI-compatible server at an https `base_url` (OpenAI, OpenRouter, Together,
+  self-hosted), with a "Test connection" button that sends one token and reports what the provider
+  said. The key is sealed under `APP_SECRETS_KEY`, returned to nobody, and shown only as its last
+  four characters. With no key at all the Knowledge page reads `Answers: not configured`, those
+  buttons stay disabled and the members' Ask page explains what is missing; search and the export are
+  unaffected. Embeddings are never per gathering — they stay the operator's setting and run on the box.
 
 ## Remote MCP server (members' own AI assistants)
 

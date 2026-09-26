@@ -26,6 +26,7 @@ import { PageHeader } from '@/components/PageHeader'
 import { useAuth, viewerDisplayName } from '@/hooks/useAuth'
 import { useVoting } from '@/hooks/useVoting'
 import { useEvent, useEventRole, JoinGatheringButton } from '@/contexts/EventContext'
+import { AssistantCard } from '@/components/knowledge/AssistantCard'
 import { isParticipationOpen } from '@/lib/events/lifecycle'
 import { sessionStatusBadge } from '@/lib/labels'
 import { plural, SEPARATOR } from '@/lib/format'
@@ -518,6 +519,9 @@ function Dashboard({ data }: { data: DashboardData }) {
           </CardContent>
         </Card>
       )}
+
+      {/* Discoverability (design 2026-09-25 §2.3a): members can point their own assistant here. */}
+      {user && isMember && <AssistantCard gatheringName={event.name} />}
 
       {data.isOrganizer && data.stats.pending !== null && data.stats.pending > 0 && (
         <Card className="border-signal-amber/30 bg-signal-amber/5">

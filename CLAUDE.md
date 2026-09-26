@@ -36,7 +36,11 @@ hosted Supabase, schellingpoint.app) lives on `main`; do not merge this branch i
 - **Scheduling** (`src/lib/scheduling`): greedy seed + hill-climb over ballot-token overlap (k-suppressed),
   quality score, audience-clusters and schedule-quality endpoints; the builder shows keep-apart pairs.
 - **Knowledge** (`src/lib/knowledge`): transcripts are members-only rows, never records; corpus export
-  (zip) needs no provider; embeddings/ask/summaries run only with `EMBEDDINGS_*`/`ANTHROPIC_API_KEY` set.
+  (zip) needs no provider; embeddings run on the box by default (`EMBEDDINGS_*`). Answers (ask,
+  summaries, themes) resolve a key per gathering — `event_ai_settings` (sealed with AES-256-GCM under
+  `APP_SECRETS_KEY`, `src/lib/secrets/aead.ts`) → `ANTHROPIC_API_KEY` → none — behind one streaming
+  interface with two adapters (`chat-provider.ts`: Anthropic, OpenAI-compatible). The key is never
+  returned, logged or echoed; only its last four characters are shown.
 
 ## Rules that are easy to break
 - Never put a DID, name or handle into a public record unless its holder wrote that record

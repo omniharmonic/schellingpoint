@@ -152,6 +152,13 @@ BEGIN
     RAISE EXCEPTION 'A signed-in account could read gathering credentials';
   EXCEPTION WHEN insufficient_privilege THEN NULL;
   END;
+  -- Migration 0037: the gathering's sealed answer-model key is the AppView's alone. Even its
+  -- ciphertext must be out of reach of a signed-in account.
+  BEGIN
+    PERFORM 1 FROM public.event_ai_settings LIMIT 1;
+    RAISE EXCEPTION 'A signed-in account could read a gathering''s AI settings';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
   -- Migration 0031: merge offers and round controls are server-only.
   BEGIN
     PERFORM 1 FROM public.session_merge_requests LIMIT 1;

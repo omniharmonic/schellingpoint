@@ -6,7 +6,7 @@ import 'server-only'
  * Everything stays inside the members boundary: the provider sees the question and the chunks.
  */
 import { sql } from '@/lib/db'
-import { chatConfig, streamText, type StreamEvent } from './anthropic'
+import { resolveChatConfig, streamText, type StreamEvent } from './chat-provider'
 import { embedTexts, embeddingsConfig } from './embeddings'
 import { markerLabel } from './normalize'
 import { rankEventChunks, tierPredicate, type RankedChunk, type ReadTier } from './rank'
@@ -14,19 +14,37 @@ import { rankEventChunks, tierPredicate, type RankedChunk, type ReadTier } from 
 export const MAX_QUESTION_CHARS = 1000
 const EXCERPT_CHARS = 240
 
-export type AskUnavailableReason = 'chat' | 'embeddings' | 'no-transcripts' | 'no-embeddings'
+export type AskUnavailableReason = 'disabled' | 'chat' | 'embeddings' | 'no-transcripts' | 'no-embeddings'
+
+/** A theme the organizers stand behind, offered on the Ask page as a starting point. */
+export interface AskTheme {
+  title: string
+  summary: string
+}
 
 export interface AskAvailability {
   available: boolean
   reason: AskUnavailableReason | null
   ready_transcripts: number
   embedded_chunks: number
+  /** Whether the gathering has transcripts turned on at all (the nav item follows this). */
+  transcripts_enabled: boolean
+  /** Where the answering key came from, so organizer copy can name what is missing. Never the key. */
+  chat_source: 'gathering' | 'deployment' | null
+  /** Organizer-curated themes, members-only like everything else here. Rendered as starter chips. */
+  themes: AskTheme[]
 }
 
 /** Whether the viewer (at `tier`) can ask right now, and why not otherwise. Counts only what the tier may read. */
 export async function askAvailability(eventId: string, tier: ReadTier): Promise<AskAvailability> {
-  const chat = chatConfig()
+  const chat = await resolveChatConfig(eventId)
   const embeddings = embeddingsConfig()
+  const [settings] = await sql<{ transcripts_enabled: boolean; themes: { themes?: AskTheme[] } | null }[]>`
+    select transcripts_enabled, themes from events where id = ${eventId}
+  `
+  const stored = (settings?.themes?.themes ?? [])
+    .filter((t): t is AskTheme => Boolean(t && typeof t.title === 'string' && typeof t.summary === 'string'))
+    .map((t) => ({ title: t.title, summary: t.summary }))
   const [counts] = await sql<{ transcripts: number; embedded: number }[]>`
     select (select count(*) from session_transcripts t join events e on e.id = t.event_id
               where t.event_id = ${eventId} and t.replaced_at is null and t.status = 'ready' ${tierPredicate(tier)}) as transcripts,
@@ -35,7 +53,20 @@ export async function askAvailability(eventId: string, tier: ReadTier): Promise<
               join events e on e.id = c.event_id
               where c.event_id = ${eventId} and c.embedding is not null and c.embedding_model = ${embeddings?.storedModel ?? null} ${tierPredicate(tier)}) as embedded
   `
-  const base = { ready_transcripts: counts?.transcripts ?? 0, embedded_chunks: counts?.embedded ?? 0 }
+  const readyTranscripts = counts?.transcripts ?? 0
+  // `events.themes` is generated from member-visible transcripts only (see `generateEventThemes`).
+  // A member with nothing readable left — the gathering was narrowed to organizers, or the
+  // transcripts the themes came from were withdrawn — sees no themes either, rather than a summary
+  // of material that is no longer theirs to read. Organizers always see what is stored.
+  const themes = tier === 'members' && readyTranscripts === 0 ? [] : stored
+  const base = {
+    ready_transcripts: readyTranscripts,
+    embedded_chunks: counts?.embedded ?? 0,
+    transcripts_enabled: settings?.transcripts_enabled ?? false,
+    chat_source: chat?.source ?? null,
+    themes,
+  }
+  if (!base.transcripts_enabled) return { available: false, reason: 'disabled', ...base }
   if (!chat) return { available: false, reason: 'chat', ...base }
   if (!embeddings) return { available: false, reason: 'embeddings', ...base }
   if (!base.ready_transcripts) return { available: false, reason: 'no-transcripts', ...base }
@@ -98,7 +129,7 @@ export function validateQuestion(value: unknown): string | null {
 
 /** Rank the sources the viewer's `tier` may read; `run` streams the answer over them. */
 export async function prepareAsk(event: { id: string; name: string; slug: string }, question: string, tier: ReadTier): Promise<PreparedAsk> {
-  const chat = chatConfig()
+  const chat = await resolveChatConfig(event.id)
   const embeddings = embeddingsConfig()
   if (!chat) return { status: 'unavailable', reason: 'chat' }
   if (!embeddings) return { status: 'unavailable', reason: 'embeddings' }

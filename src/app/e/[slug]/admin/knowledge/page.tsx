@@ -8,7 +8,7 @@
 
 import * as React from 'react'
 import Link from 'next/link'
-import { Archive, BellRing, CheckCircle2, Cpu, Download, FileText, Loader2, RefreshCw, Sparkles, XCircle } from 'lucide-react'
+import { Archive, BellRing, Bot, Check, CheckCircle2, Copy, Cpu, Download, FileText, Loader2, RefreshCw, Sparkles, XCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -19,6 +19,7 @@ import { ConfirmInline } from '@/components/ui/confirm-inline'
 import { useToast } from '@/components/ui/toast'
 import { PageHeader } from '@/components/PageHeader'
 import { AskPanel } from '@/components/knowledge/AskPanel'
+import { AiKeyForm } from '@/components/knowledge/AiKeyForm'
 import { useEvent, useEventRole } from '@/contexts/EventContext'
 import { apiFetch } from '@/lib/api/client'
 import { plural } from '@/lib/format'
@@ -46,7 +47,7 @@ interface Coverage {
     embeddings:
       | { configured: true; provider: string; model: string; label: string; local: boolean; error: string | null }
       | { configured: false }
-    chat: { configured: true; model: string } | { configured: false }
+    chat: { configured: true; model: string; provider: 'anthropic' | 'openai-compatible'; source: 'gathering' | 'deployment' } | { configured: false }
   }
 }
 
@@ -71,6 +72,75 @@ function JobBadge({ job }: { job: Coverage['jobs'][number] | undefined }) {
       {job.processed > 0 && `${job.processed} processed`}
       {job.last_error && <span className="text-destructive">{job.last_error.slice(0, 120)}</span>}
     </span>
+  )
+}
+
+/**
+ * "AI access" (design 2026-09-25 §2.3b): what attendees can connect, the server URL, and a snippet
+ * organizers can paste into their announcement. Nothing here is a secret — the tokens members mint
+ * are personal and read only what they can already read.
+ */
+function AiAccessCard({ eventName, eventSlug }: { eventName: string; eventSlug: string }) {
+  const [copied, setCopied] = React.useState<string | null>(null)
+  const origin = typeof window === 'undefined' ? '' : window.location.origin
+  const mcpUrl = `${origin}/api/mcp`
+  const snippet = [
+    `You can point your own AI assistant at ${eventName}.`,
+    '',
+    `1. Open ${origin}/account?tab=identity and create a token under “Connect an AI assistant”.`,
+    `2. Add this MCP server to Claude, ChatGPT or Cursor: ${mcpUrl}`,
+    '3. Use the token as the bearer token.',
+    '',
+    'Your assistant then sees exactly what you see — sessions, the schedule, and the transcripts you are allowed to read — and can change nothing.',
+    `Step-by-step help: ${origin}/help/assistants`,
+  ].join('\n')
+
+  const copy = async (value: string, what: string) => {
+    try {
+      await navigator.clipboard.writeText(value)
+      setCopied(what)
+      window.setTimeout(() => setCopied((c) => (c === what ? null : c)), 2000)
+    } catch {
+      // The textarea below is selectable; copying by hand always works.
+    }
+  }
+
+  return (
+    <Card data-testid="ai-access-card">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-lg">
+          <Bot className="h-5 w-5 text-muted-foreground" aria-hidden />AI access for attendees
+        </CardTitle>
+        <CardDescription>
+          Members can connect their own assistant (Claude, ChatGPT, Cursor) to this app and ask it about the schedule, who is hosting
+          what, and the transcripts they are allowed to read. Each member mints their own token; an assistant can never write anything,
+          read messages or email addresses, or see votes. Members find it on the{' '}
+          <Link href={`/e/${eventSlug}/ask`} className="underline">Ask page</Link> and in Account → Identity.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="rounded-lg border bg-muted/30 px-3 py-2">
+          <p className="text-xs text-muted-foreground">Server URL</p>
+          <div className="flex items-center gap-2">
+            <code className="flex-1 break-all font-mono text-xs" data-testid="ai-access-url">{mcpUrl}</code>
+            <Button type="button" variant="ghost" size="sm" onClick={() => void copy(mcpUrl, 'url')} aria-label="Copy the server URL">
+              {copied === 'url' ? <Check className="h-4 w-4" aria-hidden /> : <Copy className="h-4 w-4" aria-hidden />}
+            </Button>
+          </div>
+        </div>
+        <div className="space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <Label htmlFor="ai-access-snippet">Announcement snippet</Label>
+            <Button type="button" variant="outline" size="sm" onClick={() => void copy(snippet, 'snippet')}>
+              {copied === 'snippet' ? <Check className="mr-1.5 h-4 w-4" aria-hidden /> : <Copy className="mr-1.5 h-4 w-4" aria-hidden />}
+              Copy
+            </Button>
+          </div>
+          <Textarea id="ai-access-snippet" readOnly rows={8} value={snippet} className="font-mono text-xs" />
+          <p className="text-xs text-muted-foreground">Paste it into your welcome email or announcement. Nothing in it is secret.</p>
+        </div>
+      </CardContent>
+    </Card>
   )
 }
 
@@ -214,7 +284,11 @@ export default function AdminKnowledgePage() {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-lg"><Cpu className="h-5 w-5 text-muted-foreground" aria-hidden />Search and answers</CardTitle>
-            <CardDescription>Configured by the server operator through environment variables; keys are never shown here. Embeddings run on this server by default, so nothing leaves it; if the operator switches to a hosted provider, transcript text is sent there — the consent checkbox and Participation settings say so. Answers need an Anthropic key.</CardDescription>
+            <CardDescription>
+            Embeddings are the server operator&apos;s setting and run on this box by default, so no transcript text leaves it; if the
+            operator switches to a hosted provider, text is sent there — the consent checkbox and Participation settings say so.
+            Answers use this gathering&apos;s own key when you set one below, otherwise the key the server is configured with.
+          </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <dl className="space-y-2 text-sm">
@@ -230,7 +304,17 @@ export default function AdminKnowledgePage() {
               <div className="flex items-start justify-between gap-3">
                 <dt className="text-muted-foreground">Answers</dt>
                 <dd className="flex items-center gap-1.5 text-right">
-                  {data.providers.chat.configured ? <><CheckCircle2 className="h-4 w-4 text-success" aria-hidden />{data.providers.chat.model}</> : <><XCircle className="h-4 w-4 text-muted-foreground" aria-hidden />Not configured</>}
+                  {data.providers.chat.configured ? (
+                    <>
+                      <CheckCircle2 className="h-4 w-4 text-success" aria-hidden />
+                      {data.providers.chat.model}
+                      <span className="text-xs text-muted-foreground">
+                        {data.providers.chat.source === 'gathering' ? '(this gathering’s key)' : '(the server’s key)'}
+                      </span>
+                    </>
+                  ) : (
+                    <><XCircle className="h-4 w-4 text-muted-foreground" aria-hidden />Not configured</>
+                  )}
                 </dd>
               </div>
             </dl>
@@ -246,9 +330,20 @@ export default function AdminKnowledgePage() {
               </Button>
               <JobBadge job={summariesJob} />
             </div>
+
+            {isAdmin ? (
+              <div className="border-t pt-4">
+                <p className="mb-3 text-sm font-medium">This gathering’s answer key</p>
+                <AiKeyForm eventSlug={event.slug} onChanged={() => void load()} />
+              </div>
+            ) : (
+              <p className="border-t pt-4 text-xs text-muted-foreground">Only the owner and admins can set the gathering’s answer key.</p>
+            )}
           </CardContent>
         </Card>
       </div>
+
+      <AiAccessCard eventName={event.name} eventSlug={event.slug} />
 
       <Card>
         <CardHeader>
@@ -372,7 +467,7 @@ export default function AdminKnowledgePage() {
 
       <section aria-labelledby="ask-heading" className="space-y-4">
         <h2 id="ask-heading" className="text-lg font-semibold">Ask the gathering</h2>
-        <AskPanel eventSlug={event.slug} variant="organizer" />
+        <AskPanel eventSlug={event.slug} variant="organizer" adminLink={false} />
       </section>
     </div>
   )

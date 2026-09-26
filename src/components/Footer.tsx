@@ -145,6 +145,7 @@ export function Footer({ className, variant = 'default', event }: FooterProps) {
           </div>
           <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm text-muted-foreground">
             <SocialLinks links={links} />
+            <Link href="/help" className="hover:text-foreground">Help</Link>
             <Link href="/codeofconduct" className="hover:text-foreground">Code of conduct</Link>
             <Link href="/privacy" className="hover:text-foreground">Privacy</Link>
             <Link href="/terms" className="hover:text-foreground">Terms</Link>
