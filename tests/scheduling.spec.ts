@@ -321,6 +321,84 @@ test.describe('scheduling library', () => {
   })
 })
 
+/* ───────────────── cluster matching on synthetic ballots ───────────────── */
+
+/**
+ * The property the PRD asks for, checked end to end on planted data: voters who want two of the
+ * same sessions should not have to choose. Four "tribes" of 50 voters each vote for four of their
+ * tribe's six sessions; nothing else links the sessions. A naive row-by-row placement forces
+ * every voter to miss something; the scheduler must let every voter attend everything they
+ * voted for when the grid allows it, and must beat naive placement when it does not.
+ */
+test.describe('cluster matching on synthetic ballots', () => {
+  function tribes(rows: number, rooms: number, crossTribe: boolean) {
+    const rowTimes = [['09:00', '10:00'], ['10:00', '11:00'], ['11:00', '12:00'], ['13:00', '14:00'], ['14:00', '15:00'], ['15:00', '16:00']].slice(0, rows)
+    const venues: SchedulerVenue[] = Array.from({ length: rooms }, (_, i) => ({ id: `v${i}`, name: `Room ${i}`, capacity: 60, features: [], is_primary: i === 0 }) as SchedulerVenue)
+    const slots: SchedulerTimeSlot[] = []
+    for (const [i, [s, e]] of rowTimes.entries()) for (const v of venues) slots.push({ id: `t${i}-${v.id}`, start_time: iso(s), end_time: iso(e), is_break: false, venue_id: v.id, day_date: DAY })
+    const sessions: SchedulerSession[] = Array.from({ length: 24 }, (_, i) => session(`s${i}`))
+    let seed = 42
+    const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff
+    const tokens = new Map<string, Set<string>>(sessions.map((x) => [x.id, new Set()]))
+    const voterSessions = new Map<string, string[]>()
+    for (let t = 0; t < 4; t++) {
+      for (let p = 0; p < 50; p++) {
+        const tok = `tok-${t}-${p}`
+        const pool = Array.from({ length: 6 }, (_, j) => `s${t * 6 + j}`)
+        if (crossTribe) pool.push(`s${((t + 1) % 4) * 6}`, `s${((t + 1) % 4) * 6 + 1}`)
+        const mine = pool.sort(() => rnd() - 0.5).slice(0, 4)
+        voterSessions.set(tok, mine)
+        for (const x of mine) tokens.get(x)!.add(tok)
+      }
+    }
+    const ballots: BallotInputs = new Map([...tokens].map(([id, set]) => [id, { votes: set.size, tokens: set }]))
+    const rowOf = (slotId: string) => slotId.split('-')[0]
+    const attendable = (assign: Map<string, string>) => {
+      let served = 0
+      for (const [, mine] of voterSessions) {
+        const used = new Set<string>()
+        for (const x of mine) { const r = rowOf(assign.get(x)!); if (!used.has(r)) { used.add(r); served++ } }
+      }
+      return served
+    }
+    const clashes = (assign: Map<string, string>) => {
+      let n = 0
+      for (let a = 0; a < 24; a++) for (let b = a + 1; b < 24; b++) {
+        const A = tokens.get(`s${a}`)!, B = tokens.get(`s${b}`)!
+        let sh = 0; for (const x of A) if (B.has(x)) sh++
+        if (sh / Math.min(A.size, B.size) >= 0.6 && rowOf(assign.get(`s${a}`)!) === rowOf(assign.get(`s${b}`)!)) n++
+      }
+      return n
+    }
+    const naive = new Map<string, string>(); sessions.forEach((x, i) => naive.set(x.id, slots[i].id))
+    return { sessions, slots, venues, ballots, naive, attendable, clashes, totalVotes: 800 }
+  }
+
+  test('when the grid allows it, every voter can attend everything they voted for', () => {
+    const w = tribes(6, 4, false)
+    expect(w.attendable(w.naive)).toBeLessThan(w.totalVotes / 2)
+    expect(w.clashes(w.naive)).toBeGreaterThan(0)
+    const result = autoSchedule(w.sessions, w.slots, w.venues, { ballots: w.ballots, timezone: TZ, k: 3 })
+    const assign = new Map(result.assignments.map((a) => [a.sessionId, a.slotId]))
+    expect(result.stats.assigned).toBe(24)
+    expect(w.clashes(assign)).toBe(0)
+    expect(w.attendable(assign)).toBe(w.totalVotes)
+    expect(result.quality.keepApartConflicts).toBe(0)
+  })
+
+  test('when it cannot be perfect, the search still beats the seed and the seed beats naive', () => {
+    const w = tribes(4, 6, true)
+    const seedOnly = autoSchedule(w.sessions, w.slots, w.venues, { ballots: w.ballots, timezone: TZ, k: 3, improve: false })
+    const full = autoSchedule(w.sessions, w.slots, w.venues, { ballots: w.ballots, timezone: TZ, k: 3 })
+    const seedAssign = new Map(seedOnly.assignments.map((a) => [a.sessionId, a.slotId]))
+    const fullAssign = new Map(full.assignments.map((a) => [a.sessionId, a.slotId]))
+    expect(w.clashes(fullAssign)).toBe(0)
+    expect(w.attendable(seedAssign)).toBeGreaterThan(w.attendable(w.naive))
+    expect(w.attendable(fullAssign)).toBeGreaterThanOrEqual(w.attendable(seedAssign))
+    expect(full.improvement.finalCost.total).toBeLessThanOrEqual(full.improvement.seedCost.total)
+  })
+})
+
 /* ───────────────────────────── API ───────────────────────────── */
 
 const base = process.env.TEST_BASE_URL || 'http://localhost:3001'
