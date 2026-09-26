@@ -125,10 +125,35 @@ export function OnboardingModal({ email, initialProfile, onComplete, suggestedTo
   const [interests, setInterests] = React.useState<string[]>(initialProfile?.interests ?? [])
   const [customInterest, setCustomInterest] = React.useState('')
   const [lookingFor, setLookingFor] = React.useState(initialProfile?.looking_for ?? '')
-  // The two per-gathering sharing switches (design §3.3). Defaults match migration 0038: the
-  // messaging handle is shared, the email address is not.
-  const [shareContact, setShareContact] = React.useState(true)
-  const [shareEmail, setShareEmail] = React.useState(false)
+
+  /**
+   * The two per-gathering sharing switches (design §3.3), and whether there is a membership to
+   * write them to at all. `null` means "no membership here": a visitor to a public gathering they
+   * have not joined, or onboarding outside a gathering. The switches are not rendered then —
+   * `share_contact` defaults ON, so offering a switch that cannot be saved would let someone turn
+   * sharing off and believe it.
+   */
+  const [sharing, setSharing] = React.useState<{ share_contact: boolean; share_email: boolean; has_email: boolean } | null>(null)
+
+  React.useEffect(() => {
+    if (!eventSlug) return
+    let cancelled = false
+    apiFetch<{ share_contact: boolean; share_email: boolean; has_email: boolean }>(
+      `/api/v1/events/${encodeURIComponent(eventSlug)}/participants/me`,
+      { cache: 'no-store' },
+    )
+      .then((res) => {
+        // Seed from the row, so the switches show what is actually stored rather than the default.
+        if (!cancelled) setSharing({ share_contact: res.share_contact, share_email: res.share_email, has_email: res.has_email })
+      })
+      .catch(() => {
+        // 401/403/404: not a member of this gathering. Nothing to offer.
+        if (!cancelled) setSharing(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [eventSlug])
 
   // Total steps: 4 intro slides + 3 profile steps = 7
   const introStepCount = slides.length
@@ -175,6 +200,26 @@ export function OnboardingModal({ email, initialProfile, onComplete, suggestedTo
     setIsSubmitting(true)
     setError(null)
     try {
+      // The sharing switches belong to this gathering's membership, not to the profile, so they go
+      // to the membership route — and they go FIRST, before the profile write that sets
+      // `onboarding_completed`. A failure here must be visible and must not be shrugged off: it
+      // would leave someone believing they had turned sharing off. Onboarding stays incomplete,
+      // the modal stays open with the error, and nothing about them is half-saved.
+      if (eventSlug && sharing) {
+        try {
+          await apiFetch(`/api/v1/events/${encodeURIComponent(eventSlug)}/participants/me`, {
+            method: 'PATCH',
+            json: { share_contact: sharing.share_contact, share_email: sharing.share_email },
+          })
+        } catch (err) {
+          setError(
+            err instanceof Error && err.message
+              ? `Could not save what you share here: ${err.message}`
+              : 'Could not save what you share at this gathering. Please try again.',
+          )
+          return
+        }
+      }
       await apiFetch('/api/me/profile', {
         method: 'PATCH',
         json: {
@@ -189,19 +234,6 @@ export function OnboardingModal({ email, initialProfile, onComplete, suggestedTo
           onboarding_completed: true,
         },
       })
-      // The sharing switches belong to this gathering's membership, not to the profile, so they
-      // go to the membership route. A viewer who is not a member of this gathering (or who
-      // onboarded outside one) has nothing to save; that failure must not lose the profile.
-      if (eventSlug) {
-        try {
-          await apiFetch(`/api/v1/events/${encodeURIComponent(eventSlug)}/participants/me`, {
-            method: 'PATCH',
-            json: { share_contact: shareContact, share_email: shareEmail },
-          })
-        } catch {
-          /* not a member here, or an older server: the profile is saved either way */
-        }
-      }
       onComplete()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not save your profile. Please try again.')
@@ -456,9 +488,10 @@ export function OnboardingModal({ email, initialProfile, onComplete, suggestedTo
             </p>
           </div>
 
-          {/* The two per-gathering sharing switches (design §3.3). Only meaningful inside a
-              gathering: outside one there is no membership row to write them to. */}
-          {eventSlug && (
+          {/* The two per-gathering sharing switches (design §3.3). Rendered only for a member of
+              this gathering: without a membership row there is nowhere to save them, and
+              `share_contact` defaults ON, so a switch that cannot be saved would fail open. */}
+          {sharing && (
             <div className="space-y-3 rounded-lg border p-3">
               <p className="text-sm font-medium">What fellow members here can see</p>
               <div className="flex items-start justify-between gap-4">
@@ -468,9 +501,13 @@ export function OnboardingModal({ email, initialProfile, onComplete, suggestedTo
                     Members of this gathering can message you there. You can change this any time.
                   </span>
                 </label>
-                <Switch id="onboarding-share-contact" checked={shareContact} onCheckedChange={setShareContact} />
+                <Switch
+                  id="onboarding-share-contact"
+                  checked={sharing.share_contact}
+                  onCheckedChange={(value) => setSharing({ ...sharing, share_contact: value })}
+                />
               </div>
-              {email && (
+              {sharing.has_email && (
                 <div className="flex items-start justify-between gap-4">
                   <label htmlFor="onboarding-share-email" className="text-sm cursor-pointer">
                     <span className="flex items-center gap-1.5">
@@ -478,10 +515,14 @@ export function OnboardingModal({ email, initialProfile, onComplete, suggestedTo
                       Show my email address
                     </span>
                     <span className="block text-xs text-muted-foreground mt-0.5">
-                      {email} — off unless you turn it on, and only for members of this gathering.
+                      {email ? `${email} — off` : 'Off'} unless you turn it on, and only for members of this gathering.
                     </span>
                   </label>
-                  <Switch id="onboarding-share-email" checked={shareEmail} onCheckedChange={setShareEmail} />
+                  <Switch
+                    id="onboarding-share-email"
+                    checked={sharing.share_email}
+                    onCheckedChange={(value) => setSharing({ ...sharing, share_email: value })}
+                  />
                 </div>
               )}
             </div>

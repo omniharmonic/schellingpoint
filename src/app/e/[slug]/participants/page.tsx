@@ -49,7 +49,15 @@ import {
   profileHref,
   type MemberCardData,
 } from '../people/shared'
-import { SORTS, defaultSort, isSortKey, sortParticipants, type SortKey } from '../people/sort'
+import {
+  SORTS,
+  defaultSort,
+  hasOwnInterests,
+  isSortKey,
+  overlapCounts,
+  sortParticipants,
+  type SortKey,
+} from '../people/sort'
 
 /** Shape of GET /api/v1/events/[slug]/participants → participants[]. */
 type Participant = MemberCardData
@@ -201,16 +209,15 @@ function ParticipantsContent() {
     })
   }, [participants, search, selectedInterests])
 
-  // Interest overlap with the viewer, as the server computed it: the input to the default sort.
-  const sharedCounts = React.useMemo(
-    () => new Map(shared.map((s) => [s.id, s.interests.length] as const)),
-    [shared],
-  )
-  const viewerHasInterests = React.useMemo(
-    () => (participants.find((p) => p.is_self)?.interests?.length ?? 0) > 0,
-    [participants],
-  )
-  const sort: SortKey = isSortKey(sortParam) ? sortParam : defaultSort(viewerHasInterests)
+  // Interest overlap with the viewer, over the WHOLE roster. The route's `sharedInterests` is
+  // capped at the six people it suggests on the card strip, so it cannot order a directory.
+  const sharedCounts = React.useMemo(() => overlapCounts(participants), [participants])
+  const viewerHasInterests = React.useMemo(() => hasOwnInterests(participants), [participants])
+  // A `?sort=shared` link is only meaningful to a viewer with interests of their own; for anyone
+  // else the option is disabled, so the URL falls back rather than selecting a dead option.
+  const requested = isSortKey(sortParam) ? sortParam : null
+  const sort: SortKey =
+    requested && (requested !== 'shared' || viewerHasInterests) ? requested : defaultSort(viewerHasInterests)
   const sorted = React.useMemo(() => sortParticipants(filtered, sort, sharedCounts), [filtered, sort, sharedCounts])
 
   const organizers = sorted.filter((p) => ORGANIZER_ROLES.includes(p.role))
@@ -273,7 +280,14 @@ function ParticipantsContent() {
           subtitle={`${plural(participants.length, 'person', 'people')} listed for ${event.name}. Visible only to members.`}
         />
 
-        {me && <DirectorySettings slug={event.slug} settings={me} onChange={(next) => { setMe(next); void load() }} />}
+        {me && (
+          <DirectorySettings
+            slug={event.slug}
+            name={event.name}
+            settings={me}
+            onChange={(next) => { setMe(next); void load() }}
+          />
+        )}
 
         {sharedPeople.length > 0 && !filtering && (
           <section aria-labelledby="shared-heading">
@@ -399,10 +413,12 @@ function ParticipantsContent() {
 
 function DirectorySettings({
   slug,
+  name,
   settings,
   onChange,
 }: {
   slug: string
+  name: string
   settings: MySettings
   onChange: (next: MySettings) => void
 }) {
@@ -451,8 +467,8 @@ function DirectorySettings({
             <span className="font-medium">List me in this directory</span>
             <span className="block text-xs text-muted-foreground mt-0.5">
               Other members of this gathering can see your name, photo, affiliation, interests and what you’re
-              looking for. Your messaging handle and your email address are separate switches, in Account →
-              Profile — your email is off unless you turn it on.
+              looking for. Your messaging handle and your email address have their own switches under
+              “What you share at {name}” in Account → Profile; your email is off unless you turn it on.
             </span>
           </label>
         </div>

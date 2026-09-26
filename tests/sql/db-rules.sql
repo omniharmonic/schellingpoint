@@ -228,6 +228,7 @@ DO $$
 DECLARE
   eid uuid := current_setting('test.event')::uuid;
   n integer;
+  col text;
 BEGIN
   UPDATE public.event_members SET role = 'volunteer' WHERE event_id = eid AND user_id = current_setting('test.host')::uuid;
   GET DIAGNOSTICS n = ROW_COUNT;
@@ -243,6 +244,30 @@ BEGIN
   DELETE FROM public.event_members WHERE event_id = eid AND user_id = current_setting('test.owner')::uuid;
   GET DIAGNOSTICS n = ROW_COUNT;
   IF n <> 0 THEN RAISE EXCEPTION 'Admin removed the owner'; END IF;
+
+  -- Migration 0038: what a member shares about themselves is consent, not administration. The
+  -- 0001 admin UPDATE policy is column-agnostic, so a trigger draws the line: an admin may
+  -- still set another member's role (asserted above) and may never touch these four columns.
+  FOR col IN SELECT unnest(ARRAY['share_email', 'share_contact', 'directory_listing', 'mention_in_posts']) LOOP
+    BEGIN
+      EXECUTE format(
+        'UPDATE public.event_members SET %I = NOT %I WHERE event_id = $1 AND user_id = $2', col, col
+      ) USING eid, current_setting('test.host')::uuid;
+      RAISE EXCEPTION 'Admin changed another member''s %', col;
+    EXCEPTION WHEN insufficient_privilege THEN
+      IF SQLERRM <> 'Only the member can change what they share' THEN RAISE; END IF;
+    END;
+  END LOOP;
+
+  -- The member themselves can, on their own row.
+  UPDATE public.event_members SET share_email = true, share_contact = false
+   WHERE event_id = eid AND user_id = current_setting('test.admin')::uuid;
+  GET DIAGNOSTICS n = ROW_COUNT;
+  IF n <> 1 THEN RAISE EXCEPTION 'A member could not change what they share about themselves'; END IF;
+  SELECT count(*) INTO n FROM public.event_members
+   WHERE event_id = eid AND user_id = current_setting('test.admin')::uuid
+     AND share_email AND NOT share_contact;
+  IF n <> 1 THEN RAISE EXCEPTION 'The member''s own sharing choice was not stored'; END IF;
 END $$;
 RESET ROLE;
 

@@ -14,7 +14,15 @@ import {
   ensRpcUrls,
 } from '../src/app/api/me/ens/ens'
 import { normalizeAvatarUrl, normalizeEnsName, normalizeTelegram, validateProfilePatch } from '../src/app/api/me/profile/validate'
-import { SORTS, defaultSort, isSortKey, sortParticipants, type SortKey } from '../src/app/e/[slug]/people/sort'
+import {
+  SORTS,
+  defaultSort,
+  hasOwnInterests,
+  isSortKey,
+  overlapCounts,
+  sortParticipants,
+  type SortKey,
+} from '../src/app/e/[slug]/people/sort'
 import type { MemberCardData } from '../src/app/e/[slug]/people/shared'
 
 // People, profiles, the members-only directory and the public AppView reads (work package G),
@@ -148,6 +156,56 @@ test.describe('people primitives', () => {
     expect(isSortKey('joined')).toBe(true)
     expect(isSortKey('votes')).toBe(false)
     expect(Object.keys(SORTS)).toEqual(['shared', 'name', 'joined', 'role'])
+  })
+
+  test('overlap is counted over the whole roster, not the six the route suggests', () => {
+    // The route's `sharedInterests` stops at six people (SHARED_INTERESTS_LIMIT), so the sort
+    // cannot be built from it: with ten overlapping members, four would land in a tie.
+    const person = (over: Partial<MemberCardData> & { id: string }): MemberCardData => ({
+      did: `did:plc:${over.id}`,
+      handle: null,
+      display_name: over.id,
+      avatar_url: null,
+      affiliation: null,
+      bio: null,
+      building: null,
+      interests: null,
+      telegram: null,
+      ens: null,
+      role: 'attendee',
+      is_self: false,
+      ...over,
+    })
+    const mine = ['Soil', 'Water', 'Compost', 'Commons']
+    const me = person({ id: 'me', display_name: 'Me', is_self: true, interests: mine })
+    // Ten people, each overlapping on a known number of the viewer's four interests.
+    const overlapping = Array.from({ length: 10 }, (_, i) => {
+      const n = (i % 4) + 1
+      return person({ id: `p${i}`, display_name: `Person ${i}`, interests: [...mine.slice(0, n), `Own ${i}`] })
+    })
+    const roster = [me, ...overlapping]
+
+    const counts = overlapCounts(roster)
+    expect(counts.size).toBe(10)
+    for (let i = 0; i < 10; i += 1) expect(counts.get(`p${i}`)).toBe((i % 4) + 1)
+    // The viewer is never counted against themselves.
+    expect(counts.has('me')).toBe(false)
+
+    const order = sortParticipants(roster, 'shared', counts).map((p) => counts.get(p.id) ?? 0)
+    // Descending, and every one of the ten is ranked — not just the first six.
+    expect(order.slice(0, 10)).toEqual([4, 4, 3, 3, 2, 2, 2, 1, 1, 1])
+    expect(order[10]).toBe(0) // the viewer, who overlaps with nobody
+
+    // Case and stray whitespace do not make two spellings of an interest different.
+    const loose = overlapCounts([
+      person({ id: 'a', is_self: true, interests: ['  Soil Carbon ', 'water'] }),
+      person({ id: 'b', interests: ['soil carbon', 'WATER', 'soil carbon'] }),
+    ])
+    expect(loose.get('b')).toBe(2)
+
+    expect(hasOwnInterests(roster)).toBe(true)
+    expect(hasOwnInterests([person({ id: 'x', is_self: true, interests: ['   '] })])).toBe(false)
+    expect(overlapCounts([person({ id: 'x', is_self: true, interests: null })]).size).toBe(0)
   })
 })
 

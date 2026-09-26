@@ -407,6 +407,123 @@ test.describe('a host name leads to their profile', () => {
     }
   })
 
+  test('?sort=shared falls back for a viewer with no interests of their own', async ({ browser }) => {
+    // The organizer lists no interests, so "Shares most interests with you" is disabled and a
+    // link carrying it must not select a dead option.
+    const { page, errors, close } = await pageAs(browser, viewer)
+    try {
+      await page.goto(`/e/${gathering.slug}/participants?sort=shared`)
+      const sort = page.getByLabel('Sort people')
+      await expect(sort).toHaveValue('name')
+      await expect(page.getByRole('option', { name: 'Shares most interests with you' })).toBeDisabled()
+      expect(errors).toEqual([])
+
+      // Robin does list interests, so for Robin it is both enabled and the default.
+      await close()
+      const asHost = await pageAs(browser, host)
+      try {
+        await asHost.page.goto(`/e/${gathering.slug}/participants`)
+        await expect(asHost.page.getByLabel('Sort people')).toHaveValue('shared')
+        expect(asHost.errors).toEqual([])
+      } finally {
+        await asHost.close()
+      }
+    } finally {
+      await close().catch(() => {})
+    }
+  })
+
+  test('onboarding keeps the modal open when the sharing switches cannot be saved', async ({ browser }) => {
+    const newcomer = await createTestAccount('profile-fail', { sql })
+    try {
+      await sql`insert into event_members (event_id, user_id, role) values (${gathering.id}, ${newcomer.id}, 'attendee')`
+      await sql`update profiles set onboarding_completed = false where id = ${newcomer.id}`
+      const { page, close } = await pageAs(browser, newcomer)
+      try {
+        // Let the GET through (the switches must render) and break only the PATCH.
+        await page.route('**/participants/me', async (route) => {
+          if (route.request().method() === 'PATCH') {
+            await route.fulfill({
+              status: 500,
+              contentType: 'application/json',
+              body: JSON.stringify({ error: 'the membership store is down' }),
+            })
+          } else {
+            await route.continue()
+          }
+        })
+        await page.goto(`/e/${gathering.slug}/participants`)
+        await page.getByRole('button', { name: 'Skip to your profile' }).click()
+        await page.getByLabel('Display name').fill('Will Not Save')
+        await page.getByRole('button', { name: 'Continue' }).click()
+        await page.getByRole('button', { name: 'Continue' }).click()
+        await page.getByRole('switch', { name: 'Show my messaging handle' }).click()
+        await page.getByRole('button', { name: 'Save profile' }).click()
+
+        // The failure is shown, the modal stays open, and onboarding is NOT marked done — so the
+        // person is never told their choice was saved when it was not.
+        await expect(page.getByRole('alert')).toContainText(/Could not save what you share here/)
+        await expect(page.getByText('Connecting with people here')).toBeVisible()
+        const [profile] = await sql<{ onboarding_completed: boolean; display_name: string | null }[]>`
+          select onboarding_completed, display_name from profiles where id = ${newcomer.id}
+        `
+        expect(profile.onboarding_completed).toBe(false)
+        expect(profile.display_name).not.toBe('Will Not Save')
+        const [membership] = await sql<{ share_contact: boolean }[]>`
+          select share_contact from event_members where event_id = ${gathering.id} and user_id = ${newcomer.id}
+        `
+        expect(membership.share_contact).toBe(true)
+
+        // With the route working again, the same button finishes the job.
+        await page.unroute('**/participants/me')
+        await page.getByRole('button', { name: 'Save profile' }).click()
+        await expect(page.getByText('Connecting with people here')).toBeHidden()
+        await expect
+          .poll(async () => {
+            const [row] = await sql<{ share_contact: boolean }[]>`
+              select share_contact from event_members where event_id = ${gathering.id} and user_id = ${newcomer.id}
+            `
+            return row.share_contact
+          }, { timeout: 10_000 })
+          .toBe(false)
+      } finally {
+        await close()
+      }
+    } finally {
+      await newcomer.cleanup()
+    }
+  })
+
+  test('a visitor who has not joined a public gathering is offered no sharing switches', async ({ browser }) => {
+    const visitor = await createTestAccount('profile-visitor', { sql })
+    try {
+      // Signed in, onboarding pending, and NOT a member: `share_contact` defaults on, so offering
+      // a switch here would let them turn sharing off and believe it.
+      await sql`update profiles set onboarding_completed = false where id = ${visitor.id}`
+      const { page, errors, close } = await pageAs(browser, visitor)
+      try {
+        // The gathering's landing page has no workspace shell; the schedule is public and does.
+        await page.goto(`/e/${gathering.slug}/schedule`)
+        await page.getByRole('button', { name: 'Skip to your profile' }).click()
+        await page.getByLabel('Display name').fill('Just Looking')
+        await page.getByRole('button', { name: 'Continue' }).click()
+        await page.getByRole('button', { name: 'Continue' }).click()
+        await expect(page.getByText('Connecting with people here')).toBeVisible()
+        await expect(page.getByText('What fellow members here can see')).toHaveCount(0)
+        await expect(page.getByRole('switch', { name: 'Show my messaging handle' })).toHaveCount(0)
+
+        // The profile still saves; there was simply no membership to write switches to.
+        await page.getByRole('button', { name: 'Save profile' }).click()
+        await expect(page.getByText('Connecting with people here')).toBeHidden()
+        expect(errors).toEqual([])
+      } finally {
+        await close()
+      }
+    } finally {
+      await visitor.cleanup()
+    }
+  })
+
   test('the gathering onboarding asks for interests, looking-for, handle and the switches, and can be skipped', async ({ browser }) => {
     const newcomer = await createTestAccount('profile-new', { sql })
     try {

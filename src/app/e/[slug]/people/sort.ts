@@ -36,14 +36,52 @@ export function defaultSort(viewerHasInterests: boolean): SortKey {
 /** Organizers first, then the other roles in the order the vocabulary lists them. */
 const ROLE_ORDER = Object.keys(MEMBER_ROLE)
 
+/** An interest as two spellings of it compare: trimmed, case-folded. */
+function interestKey(value: string): string {
+  return value.trim().toLowerCase()
+}
+
+/**
+ * How many of the viewer's interests each person also lists, keyed by account id.
+ *
+ * Computed here rather than read from the route's `sharedInterests`, which is truncated to the
+ * six people it suggests on the card strip — sorting a roster of fifty by a list of six would put
+ * the other forty-four in a tie. The payload already carries everyone's interests, so the full
+ * overlap costs one pass. Matching is case- and whitespace-insensitive, like the route's.
+ */
+export function overlapCounts(participants: readonly MemberCardData[]): Map<string, number> {
+  const mine = new Set((participants.find((p) => p.is_self)?.interests ?? []).map(interestKey))
+  mine.delete('')
+  const counts = new Map<string, number>()
+  if (!mine.size) return counts
+  for (const person of participants) {
+    if (person.is_self || !person.interests?.length) continue
+    let n = 0
+    const seen = new Set<string>()
+    for (const interest of person.interests) {
+      const key = interestKey(interest)
+      if (!key || seen.has(key)) continue
+      seen.add(key)
+      if (mine.has(key)) n += 1
+    }
+    if (n) counts.set(person.id, n)
+  }
+  return counts
+}
+
+/** Whether the viewer lists any interest of their own — what `defaultSort` turns on. */
+export function hasOwnInterests(participants: readonly MemberCardData[]): boolean {
+  return (participants.find((p) => p.is_self)?.interests ?? []).some((i) => interestKey(i) !== '')
+}
+
 function compareName(a: MemberCardData, b: MemberCardData): number {
   return nameOf(a).localeCompare(nameOf(b), undefined, { sensitivity: 'base' })
 }
 
 /**
  * `sharedCounts` is how many of the viewer's interests each person also lists, keyed by account
- * id — exactly what the route's `sharedInterests` says, so the sort and the "People who share
- * your interests" section can never disagree. Name breaks every tie, so the order is stable.
+ * id — `overlapCounts` over the whole roster, not the route's six suggestions. Name breaks every
+ * tie, so the order is stable.
  */
 export function sortParticipants<T extends MemberCardData>(
   list: readonly T[],

@@ -105,31 +105,22 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ sl
   const before = await load(event.id, viewer.accountId)
   if (!before) return jsonError(403, 'Forbidden')
 
-  if (listing !== null) {
+  // One statement for all four switches: coalesce leaves a field this request did not mention
+  // alone, so a partial PATCH stays partial without four round trips — and a request that turns
+  // sharing off and listing on can never land half-applied.
+  //
+  // Every one of these is the viewer's own switch, and the row is addressed by their own account
+  // id. `mention_in_posts` (R9) is re-read by the feed port for every post it writes, so turning
+  // it off takes effect on the next post; posts already made are not rewritten. `share_email` and
+  // `share_contact` are re-read by the directory projection on every read, so turning one off
+  // hides the value again immediately — neither ever reached a record.
+  if (listing !== null || shareContact !== null || shareEmail !== null || mention !== null) {
     await sql`
-      update event_members set directory_listing = ${listing}
-      where event_id = ${event.id} and user_id = ${viewer.accountId}
-    `
-  }
-  if (shareContact !== null) {
-    await sql`
-      update event_members set share_contact = ${shareContact}
-      where event_id = ${event.id} and user_id = ${viewer.accountId}
-    `
-  }
-  if (shareEmail !== null) {
-    // Their own switch only: the directory projection re-reads it on every read, so turning it
-    // off hides the address again immediately. It never reached a record to begin with.
-    await sql`
-      update event_members set share_email = ${shareEmail}
-      where event_id = ${event.id} and user_id = ${viewer.accountId}
-    `
-  }
-  if (mention !== null) {
-    // The viewer's own switch only (R9): the port re-reads it for every post it writes, so turning
-    // it off takes effect on the next post; posts already made are not rewritten.
-    await sql`
-      update event_members set mention_in_posts = ${mention}
+      update event_members set
+        directory_listing = coalesce(${listing}::boolean, directory_listing),
+        share_contact     = coalesce(${shareContact}::boolean, share_contact),
+        share_email       = coalesce(${shareEmail}::boolean, share_email),
+        mention_in_posts  = coalesce(${mention}::boolean, mention_in_posts)
       where event_id = ${event.id} and user_id = ${viewer.accountId}
     `
   }

@@ -77,7 +77,10 @@ type LoadState =
 
 export default function MemberProfilePage() {
   const params = useParams<{ did: string }>()
-  const did = typeof params?.did === 'string' ? decodeURIComponent(params.did) : ''
+  // Next has already decoded the segment; decoding again would mangle a DID that legitimately
+  // contains a percent (did:web allows them). The API's `decodeDidParam` handles the one case
+  // this cannot — a client that double-encoded the segment.
+  const did = typeof params?.did === 'string' ? params.did : ''
   const event = useEvent()
   const { user, isLoading: authLoading } = useAuth()
   const { isMember, isLoading: roleLoading } = useEventRole()
@@ -109,6 +112,12 @@ export default function MemberProfilePage() {
   }, [authLoading, roleLoading, user?.id, isMember, load])
 
   // The gatherings both people belong to (design §3.1: "shared gatherings from the members API").
+  // Cleared whenever the DID changes, so a client-side navigation between two profiles never
+  // shows the previous person's list while this one loads.
+  React.useEffect(() => {
+    setGatherings([])
+  }, [did])
+
   React.useEffect(() => {
     if (state.kind !== 'ready') return
     let cancelled = false

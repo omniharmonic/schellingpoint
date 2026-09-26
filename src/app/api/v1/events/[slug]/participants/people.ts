@@ -71,8 +71,10 @@ export type SqlFragment = ReturnType<typeof sql<any>>
  *
  * The gates are SQL, not booleans, so the directory can read `m.share_contact` from the
  * `event_members` row it is already joined to, while `GET /api/v1/members/[did]` — which spans
- * every gathering the two people share — can ask "in any of them" without a second query. Both
- * call sites also let a person see their own card in full.
+ * every gathering the two people share — can ask "in any of them" without a second query.
+ *
+ * There is no exception for the viewer's own card: a person looking at themselves is looking at
+ * what fellow members see, and both call sites pass the same gate for every row.
  */
 export function memberCardColumns(shareContact: SqlFragment, shareEmail: SqlFragment) {
   return sql`
