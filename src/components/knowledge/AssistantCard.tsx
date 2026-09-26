@@ -18,6 +18,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input'
 import { WarningBox } from '@/components/WarningBox'
 import { apiFetch } from '@/lib/api/client'
+import { HELP_PRIVACY, LEARN_MORE } from '@/lib/labels'
 import { cn } from '@/lib/utils'
 
 interface AssistantToken {
@@ -95,9 +96,11 @@ export function AssistantCard({ className, gatheringName }: { className?: string
           Your AI assistant
         </CardTitle>
         <CardDescription>
-          Connect Claude, ChatGPT or Cursor to {gatheringName ? `${gatheringName} and your other gatherings` : 'your gatherings'} and ask it
-          what is on, who is hosting what, or what was said in a session you missed. It sees exactly what you see and can change
-          nothing. <Link href="/help/assistants" className="underline">How to connect one</Link>.
+          Ask Claude, ChatGPT or Cursor what is on at {gatheringName || 'your gatherings'}, who is hosting what, or what
+          was said in a session you missed. It sees what you see, and can change nothing.{' '}
+          <Link href="/help/assistants" className="underline">How to connect one</Link>
+          {' · '}
+          <Link href={HELP_PRIVACY.assistants} className="underline">{LEARN_MORE}</Link>
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -114,8 +117,7 @@ export function AssistantCard({ className, gatheringName }: { className?: string
         {secret && (
           <WarningBox title="Copy this token now — it is shown once">
             <p className="text-xs text-muted-foreground">
-              We keep only a fingerprint of it, so we cannot show it again. Paste it into your assistant as the bearer token for the
-              server URL above.
+              Paste it into your assistant as the bearer token for the server URL above. It cannot be shown twice.
             </p>
             <div className="mt-3 flex items-center gap-2">
               <code className="flex-1 break-all rounded bg-background px-2 py-1 font-mono text-xs" data-testid="assistant-card-secret">{secret}</code>
@@ -161,7 +163,7 @@ export function AssistantCard({ className, gatheringName }: { className?: string
             <Link href="/account?tab=identity" className="underline">Account → Identity</Link>.
           </p>
         )}
-        {full && <p className="text-xs text-muted-foreground">You hold the most we allow. Revoke one in Account → Identity to add another.</p>}
+        {full && <p className="text-xs text-muted-foreground">You are at the limit. Revoke one in Account → Identity to add another.</p>}
         {error && <p className="text-xs text-destructive">{error}</p>}
       </CardContent>
     </Card>

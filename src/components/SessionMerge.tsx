@@ -167,7 +167,7 @@ export function SessionMerge({ eventSlug, sessionId, sessionTitle, isHost, canRe
             {r.message && <p className="italic text-muted-foreground">“{r.message}”</p>}
             <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
               <Info className="mt-px h-3.5 w-3.5 shrink-0" aria-hidden />
-              {MERGE_VOTE_COPY} Their co-hosts keep their own records; invite them yourself if you want them on stage.
+              {MERGE_VOTE_COPY} Their co-hosts do not come across; invite them yourself if you want them on stage.
             </p>
             {r.viewer.canDecide && (
               <div className="flex flex-wrap gap-2">
@@ -209,8 +209,8 @@ export function SessionMerge({ eventSlug, sessionId, sessionTitle, isHost, canRe
               </div>
               <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
                 <Info className="mt-px h-3.5 w-3.5 shrink-0" aria-hidden />
-                If they accept, this session leaves the lists and stops taking votes. {MERGE_VOTE_COPY} Your proposal record
-                stays in your own repository; only you can withdraw it.
+                If they accept, this session leaves the lists and stops taking votes. {MERGE_VOTE_COPY} The proposal
+                stays yours, and only you can withdraw it.
               </p>
               <div className="flex flex-wrap gap-2">
                 <Button

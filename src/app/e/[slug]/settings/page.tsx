@@ -13,6 +13,7 @@ import { PageHeader } from '@/components/PageHeader'
 import { useEvent, useEventRole } from '@/contexts/EventContext'
 import { useAuth } from '@/hooks/useAuth'
 import { apiFetch, ApiError } from '@/lib/api/client'
+import { HELP_PRIVACY, LEARN_MORE } from '@/lib/labels'
 
 interface MySettings {
   role: string
@@ -68,7 +69,7 @@ function FeedMentionsCard({ slug, eventName, handle }: { slug: string; eventName
           {settings && !settings.feed_posts ? <Badge variant="muted">This gathering is not posting yet</Badge> : null}
         </div>
         <p className="text-sm text-muted-foreground">
-          Let {eventName} mention <span className="font-mono">@{handle}</span> in its posts about the sessions you host. This choice is for this gathering only; other gatherings ask you separately. Off by default — until you switch it on, posts say “the host” and link to your session page instead.
+          Let {eventName} name <span className="font-mono">@{handle}</span> in its posts about the sessions you host. Off until you switch it on, and for this gathering only.
         </p>
         <div className="flex items-center gap-3 pt-1">
           <Switch id="mention-in-posts" checked={checked} disabled={state !== 'ready'} onCheckedChange={(on) => void toggle(on)} aria-describedby="mention-in-posts-hint" />
@@ -76,7 +77,10 @@ function FeedMentionsCard({ slug, eventName, handle }: { slug: string; eventName
         </div>
         {message ? <p className="text-sm text-muted-foreground" role="status">{message}</p> : null}
         {state === 'error' ? <p className="text-sm text-destructive" role="alert">Your settings for this gathering could not be loaded.</p> : null}
-        <p className="text-xs text-muted-foreground">Only you can change this. Turning it off applies to the next post; posts already made stay as they are.</p>
+        <p className="text-xs text-muted-foreground">
+          Only you can change this, and other gatherings ask you separately. Switching it off applies to the next post.{' '}
+          <Link href={HELP_PRIVACY.public} className="underline">{LEARN_MORE}</Link>
+        </p>
       </div>
     </CardContent>
   </Card>
@@ -113,8 +117,21 @@ function LeaveGatheringCard({ eventName }: { eventName: string }) {
       <div className="min-w-0 flex-1 space-y-2">
         <p className="font-medium">Leave this gathering</p>
         <p className="text-sm text-muted-foreground">
-          You stop being a member of {eventName}: you leave the roster, your RSVPs are cancelled and the seats go back to the rooms, and any co-host invitations you sent that nobody has accepted are withdrawn. Sessions you proposed stay where they are — they are your records, written in your own repository, and this gathering cannot take them down. You can join again later if it is open to you.
+          You leave the roster of {eventName} and your RSVPs are cancelled, so the seats go back to the rooms. The sessions you proposed stay where they are.
         </p>
+        <details className="text-xs text-muted-foreground">
+          <summary className="cursor-pointer font-medium text-foreground/80 hover:text-foreground">Details</summary>
+          <div className="mt-1.5 space-y-1.5 leading-relaxed">
+            <p>
+              Co-host invitations you sent that nobody has accepted are withdrawn. You can join again later if the
+              gathering is open to you.
+            </p>
+            <p>
+              Your proposals are yours, and this gathering cannot take them down.{' '}
+              <Link href={HELP_PRIVACY.identity} className="underline">{LEARN_MORE}</Link>
+            </p>
+          </div>
+        </details>
         {canLeave === false ? (
           <p className="text-sm text-muted-foreground">
             {isOwner

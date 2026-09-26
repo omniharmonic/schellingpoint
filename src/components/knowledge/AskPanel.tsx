@@ -342,8 +342,7 @@ export function AskPanel({ eventSlug, variant = 'member', showThemes = false, ad
         />
         <div className="flex flex-wrap items-center justify-between gap-2">
           <p className="text-xs text-muted-foreground">
-            Answers come only from this gathering’s transcripts and cite the session and moment. Nothing you ask is stored — this
-            conversation lives in this tab only.
+            Answers come from this gathering’s transcripts and cite the session and moment. Nothing you ask is stored.
           </p>
           <Button type="submit" loading={busy} disabled={question.trim().length < 3}>
             <Send className="mr-1.5 h-4 w-4" aria-hidden />

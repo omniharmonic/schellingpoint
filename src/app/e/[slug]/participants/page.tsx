@@ -38,7 +38,7 @@ import { useEvent, useEventRole, JoinGatheringButton } from '@/contexts/EventCon
 import { ReportButton } from '@/components/ReportButton'
 import { apiFetch, ApiError } from '@/lib/api/client'
 import { plural, truncate } from '@/lib/format'
-import { ORGANIZER_ROLES, memberRoleBadge } from '@/lib/labels'
+import { HELP_PRIVACY, LEARN_MORE, ORGANIZER_ROLES, memberRoleBadge } from '@/lib/labels'
 import { cn } from '@/lib/utils'
 import {
   BlueskyLink,
@@ -463,14 +463,26 @@ function DirectorySettings({
             disabled={busy !== null}
             onCheckedChange={(checked) => update('directory_listing', checked === true)}
           />
-          <label htmlFor={`${id}-listing`} className="cursor-pointer">
-            <span className="font-medium">List me in this directory</span>
-            <span className="block text-xs text-muted-foreground mt-0.5">
-              Other members of this gathering can see your name, photo, affiliation, interests and what you’re
-              looking for. Your messaging handle and your email address have their own switches under
-              “What you share at {name}” in Account → Profile; your email is off unless you turn it on.
-            </span>
-          </label>
+          <div>
+            <label htmlFor={`${id}-listing`} className="cursor-pointer">
+              <span className="font-medium">List me in this directory</span>
+              <span className="block text-xs text-muted-foreground mt-0.5">
+                Members of {name} can then see your name, photo, affiliation, interests and what you’re looking for.
+              </span>
+            </label>
+            <details className="mt-1 text-xs text-muted-foreground">
+              <summary className="cursor-pointer font-medium text-foreground/80 hover:text-foreground">Details</summary>
+              <div className="mt-1.5 space-y-1.5 leading-relaxed">
+                <p>
+                  Your messaging handle and your email address have their own switches under “What you share at {name}”
+                  in Account → Profile. Email is off unless you turn it on.
+                </p>
+                <p>
+                  <Link href={HELP_PRIVACY.members} className="underline">{LEARN_MORE}</Link>
+                </p>
+              </div>
+            </details>
+          </div>
         </div>
         <div className="flex items-start gap-3 text-sm">
           <Checkbox
@@ -480,14 +492,25 @@ function DirectorySettings({
             disabled={busy !== null}
             onCheckedChange={(checked) => update('public_role', checked === true)}
           />
-          <label htmlFor={`${id}-public-role`} className="cursor-pointer">
-            <span className="font-medium">Publicly list me as a host of this gathering</span>
-            <span className="block text-xs text-muted-foreground mt-0.5">
-              Publishes a public record on the open network saying you hosted at this gathering. It applies only if
-              you host a scheduled session and the organizers allow public role listings. Turning this off removes the
-              record, though copies may persist elsewhere.
-            </span>
-          </label>
+          <div>
+            <label htmlFor={`${id}-public-role`} className="cursor-pointer">
+              <span className="font-medium">Publicly list me as a host of this gathering</span>
+              <span className="block text-xs text-muted-foreground mt-0.5">
+                Anyone on the open network can then read that you hosted here. Nothing appears unless you host a
+                scheduled session.
+              </span>
+            </label>
+            <details className="mt-1 text-xs text-muted-foreground">
+              <summary className="cursor-pointer font-medium text-foreground/80 hover:text-foreground">Details</summary>
+              <div className="mt-1.5 space-y-1.5 leading-relaxed">
+                <p>
+                  The organizers also have to allow public role listings. Switching it off takes the listing down,
+                  though copies other services already took can remain.{' '}
+                  <Link href={HELP_PRIVACY.public} className="underline">{LEARN_MORE}</Link>
+                </p>
+              </div>
+            </details>
+          </div>
         </div>
         {busy && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" aria-label="Saving" />}
         {message && (

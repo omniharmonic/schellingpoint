@@ -14,9 +14,11 @@
  */
 
 import * as React from 'react'
+import Link from 'next/link'
 import { BarChart3, Loader2, Lock } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { apiFetch, ApiError } from '@/lib/api/client'
+import { HELP_PRIVACY, LEARN_MORE } from '@/lib/labels'
 
 interface HostAnalytics {
   sessionId: string
@@ -82,7 +84,8 @@ export function HostSessionAnalytics({ eventSlug, sessionId }: { eventSlug: stri
             </p>
           ) : (
             <p className="mt-1 text-sm text-muted-foreground">
-              No count yet. Either no round has closed, or fewer than {data.k} people voted for this session — below that, counts are withheld, because a number drawn from a handful of people names them.
+              No count yet: either no round has closed, or fewer than {data.k} people voted for this session.{' '}
+              <Link href={HELP_PRIVACY.never} className="underline">{LEARN_MORE}</Link>
             </p>
           )}
         </div>
@@ -96,11 +99,16 @@ export function HostSessionAnalytics({ eventSlug, sessionId }: { eventSlug: stri
               {data.feedback.wouldAttendAgain ? <> · {data.feedback.wouldAttendAgain.yes} would come again</> : null}.
             </p>
           ) : (
-            <p className="mt-1 text-sm text-muted-foreground">
-              {data.feedback.status === 'open'
-                ? 'The feedback window is open. Nothing is shown until it closes.'
-                : `Nothing to show: fewer than ${data.k} people left feedback, so the summary stays sealed. Feedback is anonymous even to organizers.`}
-            </p>
+            data.feedback.status === 'open' ? (
+              <p className="mt-1 text-sm text-muted-foreground">
+                The feedback window is open. Nothing is shown until it closes.
+              </p>
+            ) : (
+              <p className="mt-1 text-sm text-muted-foreground">
+                Fewer than {data.k} people left feedback, so there is no summary. Feedback is anonymous, to organizers
+                too.
+              </p>
+            )
           )}
         </div>
       </>}

@@ -84,8 +84,8 @@ export function AiKeyForm({ eventSlug, onChanged }: { eventSlug: string; onChang
       <div className="rounded-xl border border-signal-amber/40 bg-signal-amber/10 p-4 text-sm" data-testid="ai-key-secrets-missing">
         <p className="font-medium">This gathering cannot hold its own key yet</p>
         <p className="mt-1 text-muted-foreground">
-          The operator has not configured secret storage (<code className="font-mono text-xs">APP_SECRETS_KEY</code>), so there is nowhere
-          to encrypt a key. Answers still work if the server itself has a key configured.
+          The operator has not set up secret storage (<code className="font-mono text-xs">APP_SECRETS_KEY</code>). Answers
+          still work if the server has its own key.
         </p>
       </div>
     )
@@ -237,7 +237,7 @@ export function AiKeyForm({ eventSlug, onChanged }: { eventSlug: string; onChang
                   maxLength={300}
                   error={fieldError?.field === 'base_url'}
                 />
-                <p className="text-xs text-muted-foreground">https only. We call <code className="font-mono">/v1/chat/completions</code> under it.</p>
+                <p className="text-xs text-muted-foreground">https only. Answers are requested at <code className="font-mono">/v1/chat/completions</code> under it.</p>
               </div>
               <div className="space-y-1.5">
                 <Label htmlFor="ai-key-model-free">Model</Label>
@@ -267,8 +267,8 @@ export function AiKeyForm({ eventSlug, onChanged }: { eventSlug: string; onChang
               data-testid="ai-key-secret"
             />
             <p className="text-xs text-muted-foreground">
-              Encrypted on this server, used only for this gathering, and never shown again — afterwards you see only its last four
-              characters. The questions members ask and the transcript excerpts that answer them go to this provider.
+              Encrypted here, used only for this gathering, and shown to nobody again. Questions and the excerpts that
+              answer them go to this provider.
             </p>
           </div>
 

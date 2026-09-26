@@ -207,3 +207,30 @@ export function memberRoleBadge(role: string | null | undefined): string | undef
   if (!role || role === 'attendee') return undefined
   return (MEMBER_ROLE as Record<string, string>)[role]
 }
+
+// ── Where the explanation lives (design 2026-09-26 §6) ───────────────────────
+
+/**
+ * In-app copy says what happens now, in at most two sentences; the mechanism lives on
+ * `/help/privacy` and is reached with a "Learn more" link. One place for the anchors, so a
+ * renamed section is fixed once rather than in fifteen components.
+ *
+ *   <Link href={HELP_PRIVACY.never}>{LEARN_MORE}</Link>
+ */
+export const HELP_PRIVACY = {
+  /** The page itself. */
+  index: '/help/privacy',
+  /** What is public. */
+  public: '/help/privacy#public',
+  /** What members of a gathering see. */
+  members: '/help/privacy#members',
+  /** What is never stored or shown. */
+  never: '/help/privacy#never',
+  /** Your identity on the open network. */
+  identity: '/help/privacy#identity',
+  /** AI assistants and transcripts. */
+  assistants: '/help/privacy#assistants',
+} as const
+
+/** The one label used for every link into `/help`. Sentence case, never "Read more". */
+export const LEARN_MORE = 'Learn more'

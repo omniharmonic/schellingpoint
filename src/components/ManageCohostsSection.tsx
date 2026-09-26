@@ -33,7 +33,7 @@ interface ManageCohostsSectionProps {
 
 type Confirming = { kind: 'step-down' } | { kind: 'remove'; id: string; name: string } | { kind: 'revoke'; id: string }
 
-const WHAT_A_COHOST_IS = 'Co-hosts appear alongside you on the session and can manage its resources and chat group link. They join by accepting an invite link themselves; nobody is added on your say-so.'
+const WHAT_A_COHOST_IS = 'Co-hosts appear alongside you and can manage the session’s resources and chat link. They join by accepting an invite; nobody is added on your say-so.'
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
@@ -105,7 +105,7 @@ export function ManageCohostsSection({ sessionId, cohosts, isHost, isOrganizer, 
         title: created.emailed ? 'Invitation sent' : 'Invite link created',
         description: created.deliveryNote
           || (created.emailed
-            ? `We emailed the link to ${email}. Nothing happens until they accept it.`
+            ? `The link is on its way to ${email}. Nothing happens until they accept it.`
             : 'Copy it and send it to your co-host.'),
         variant: 'success',
       })
@@ -135,14 +135,14 @@ export function ManageCohostsSection({ sessionId, cohosts, isHost, isOrganizer, 
       <Card>
         <CardHeader className="pb-3">
           <CardTitle>Co-host</CardTitle>
-          <CardDescription>You co-host this session. Stepping down removes your co-host record from your repository.</CardDescription>
+          <CardDescription>You co-host this session. Stepping down takes your name off it.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
           {errorBox}
           {confirming?.kind === 'step-down' ? (
             <ConfirmInline
               destructive
-              message="Step down as co-host? Your co-host record is deleted from your repository."
+              message="Step down as co-host? Your name comes off this session."
               confirmLabel="Step down"
               loading={busyId === 'me'}
               onConfirm={() => run('me', async () => {
@@ -297,8 +297,8 @@ export function ManageCohostsSection({ sessionId, cohosts, isHost, isOrganizer, 
             disabled={isCreatingInvite}
           />
           <p className="text-xs text-muted-foreground">
-            We send them the link and nothing else. Leave it empty to get a link you can share yourself.
-            Either way, they are a co-host only once they accept.
+            They get the link and nothing else, and are a co-host only once they accept. Leave the address empty for a
+            link you share yourself.
           </p>
           <Button className="w-full" onClick={handleCreateInvite} loading={isCreatingInvite}>
             {!isCreatingInvite && (inviteEmail.trim() ? <Mail className="mr-2 h-4 w-4" aria-hidden /> : <Plus className="mr-2 h-4 w-4" aria-hidden />)}

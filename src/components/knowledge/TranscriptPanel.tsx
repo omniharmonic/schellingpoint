@@ -24,6 +24,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { useToast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api/client'
 import { plural } from '@/lib/format'
+import { HELP_PRIVACY, LEARN_MORE } from '@/lib/labels'
 import { MARKER_RE, MAX_TRANSCRIPT_BYTES } from '@/lib/knowledge/normalize'
 import { cn } from '@/lib/utils'
 
@@ -213,7 +214,7 @@ export function TranscriptPanel({ sessionId, eventSlug, sessionTitle, canManage 
         )}
         {!data.transcript && manage && (
           <p className="text-sm text-muted-foreground">
-            No transcript yet. Add one so members can search and revisit what was said. It stays inside this gathering — it is never published.
+            No transcript yet. Add one so members can search and revisit what was said; it stays inside this gathering.
           </p>
         )}
         {(data.transcript?.summary || (data.can_edit_summary && data.transcript)) && (
@@ -438,10 +439,14 @@ function AddTranscriptDialog({ open, onOpenChange, sessionId, sessionTitle, repl
             <span>
               {CONSENT_LABEL}
               <span className="block text-xs text-muted-foreground">
-                If the organizers turn on search and answers, the text is sent to their configured AI provider for indexing. It never leaves the members boundary otherwise.
+                Members of this gathering can read it, and nobody else. With search and answers on, the organizers&apos;
+                AI provider indexes the text.
               </span>
             </span>
           </label>
+          <p className="text-xs text-muted-foreground">
+            <Link href={HELP_PRIVACY.assistants} className="underline">{LEARN_MORE}</Link>
+          </p>
 
           {error && (
             <p className="rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive" role="alert">

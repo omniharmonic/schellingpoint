@@ -25,6 +25,7 @@ import { useEvent } from '@/contexts/EventContext'
 import { apiFetch, ApiError } from '@/lib/api/client'
 import { voteCost } from '@/lib/voting/mechanism'
 import { plural } from '@/lib/format'
+import { HELP_PRIVACY, LEARN_MORE } from '@/lib/labels'
 import { formatLabel } from '@/lib/sessions/constants'
 
 export default function MyVotesPage() {
@@ -108,7 +109,7 @@ function MyVotes() {
                 </p>
               )}
               <p className="mt-2 text-center text-xs text-muted-foreground">
-                Only you can see this. Organizers see no counts while voting is open, and when it closes your ballot is sealed.
+                Only you can see this. Nobody sees a count while voting is open, and nobody can see how you voted once it closes.
               </p>
             </CardContent>
           </Card>
@@ -199,11 +200,11 @@ function ClosedRound({ round, eventSlug }: { round: VotingRound; eventSlug: stri
         <CardContent className="flex items-start gap-4 p-4 pt-4 sm:p-6 sm:pt-6">
           <Lock className="mt-0.5 h-6 w-6 shrink-0 text-primary" aria-hidden />
           <div className="space-y-2">
-            <h2 className="font-semibold">Your ballot is sealed</h2>
+            <h2 className="font-semibold">Voting is closed</h2>
             <p className="text-sm text-muted-foreground">
-              Voting closed {formatWhen(round.finalizedAt ?? round.closesAt)}. Your votes were counted, and the record
-              that tied them to you was deleted in the same step — nobody, including you and the organizers, can
-              see how you voted any more.
+              Voting closed {formatWhen(round.finalizedAt ?? round.closesAt)} and your votes were counted. Nobody can
+              see how you voted any more — not you, not the organizers.{' '}
+              <Link href={HELP_PRIVACY.never} className="underline">{LEARN_MORE}</Link>
             </p>
           </div>
         </CardContent>
@@ -227,8 +228,8 @@ function ClosedRound({ round, eventSlug }: { round: VotingRound; eventSlug: stri
           {tally && (
             <>
               <p className="text-sm text-muted-foreground">
-                {plural(tally.ballotsCast, 'person', 'people')} voted. Sessions supported by fewer than {tally.k}{' '}
-                people show no numbers, so a single person’s choice is never published. Listed alphabetically — the tally is not a ranking.
+                {plural(tally.ballotsCast, 'person', 'people')} voted. Listed alphabetically, not ranked, and a session
+                supported by fewer than {tally.k} people shows no number.
               </p>
               {rows.length === 0 ? (
                 <div className="space-y-3">

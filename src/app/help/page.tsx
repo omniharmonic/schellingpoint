@@ -1,5 +1,5 @@
 import Link from 'next/link'
-import { Bot, ScrollText, ShieldCheck } from 'lucide-react'
+import { Bot, Eye, ScrollText, ShieldCheck } from 'lucide-react'
 import { SiteHeader } from '@/components/SiteHeader'
 import { Footer } from '@/components/Footer'
 
@@ -21,6 +21,13 @@ const helpPages = [
     title: 'Connect an AI assistant',
     description:
       'Point Claude, ChatGPT or Cursor at the gatherings you belong to: mint a token, add the server, and ask it about the schedule or what was said in a session you missed.',
+  },
+  {
+    href: '/help/privacy',
+    icon: Eye,
+    title: 'What is public and what is not',
+    description:
+      'What a gathering publishes, what its members see, what is never stored or shown, and what happens to your votes when a round closes.',
   },
 ]
 

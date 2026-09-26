@@ -44,6 +44,7 @@ import {
 import { WarningBox } from '@/components/WarningBox'
 import { useAuth } from '@/hooks/useAuth'
 import { apiFetch, ApiError } from '@/lib/api/client'
+import { HELP_PRIVACY, LEARN_MORE } from '@/lib/labels'
 import { cn } from '@/lib/utils'
 import { uploadAvatar } from '@/lib/storage/upload'
 
@@ -194,6 +195,21 @@ function Field({
       {children}
       {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
     </div>
+  )
+}
+
+/**
+ * One line says what happens now; whatever a curious person wants next sits behind this (design
+ * §6). Never the only place a fact people must act on appears — those stay in the visible line.
+ */
+function Details({ label = 'Details', children }: { label?: string; children: React.ReactNode }) {
+  return (
+    <details className="text-xs text-muted-foreground">
+      <summary className="cursor-pointer font-medium text-foreground/80 marker:text-muted-foreground hover:text-foreground">
+        {label}
+      </summary>
+      <div className="mt-1.5 space-y-1.5 leading-relaxed">{children}</div>
+    </details>
   )
 }
 
@@ -434,7 +450,7 @@ export function AccountPanel({ gathering, onDirtyChange, onCancel, active = true
         type: 'success',
         text: res.revealUrl
           ? 'Done. Open the reveal link below to see your new password once.'
-          : 'Done. We emailed you a single-use link that shows your new password once.',
+          : 'Done. A single-use link that shows your new password once is on its way to your inbox.',
       })
       await loadAtIdentity()
     } catch (err) {
@@ -751,23 +767,40 @@ export function AccountPanel({ gathering, onDirtyChange, onCancel, active = true
                 onCheckedChange={(checked) => handleAtPublishToggle(checked === true)}
                 disabled={atBusy}
               />
-              <label htmlFor={`${tabId}-publish-proposals`} className="cursor-pointer">
-                <span className="font-medium">Publish my proposals to my repo</span>
-                <span className="block text-xs text-muted-foreground mt-0.5">
-                  Proposals you submit are written to your own repository on the open network under this identity. They
-                  are public and may be copied by other services even after you delete them.
-                </span>
-              </label>
+              <div>
+                <label htmlFor={`${tabId}-publish-proposals`} className="cursor-pointer">
+                  <span className="font-medium">Publish my proposals to the open network</span>
+                  <span className="block text-xs text-muted-foreground mt-0.5">
+                    Anyone can then read a proposal you write, under this identity.
+                  </span>
+                </label>
+                <Details>
+                  <p>
+                    Deleting a proposal takes it off the network, but copies other services already took can outlive
+                    it.{' '}
+                    <Link href={HELP_PRIVACY.public} className="underline">
+                      {LEARN_MORE}
+                    </Link>
+                  </p>
+                </Details>
+              </div>
             </div>
 
             {atInfo.kind === 'custodial' && !atInfo.owned && (
               <WarningBox title="Publish my profile to the network" data-testid="publish-profile">
                 <p className="text-xs text-muted-foreground">
-                  Off by default. Turning this on writes your display name and bio as a profile record in your own
-                  repository on the open network, so anyone can read them and other services may keep copies even
-                  after you turn it off. Your photo, email and everything else stay here. Turning it off deletes the
-                  record from your repository.
+                  Off by default. Switching it on makes your display name and bio readable by anyone; your photo,
+                  email and everything else stay here.
                 </p>
+                <Details>
+                  <p>
+                    Switching it off removes them from the network again, though copies other services already took
+                    can remain.{' '}
+                    <Link href={HELP_PRIVACY.public} className="underline">
+                      {LEARN_MORE}
+                    </Link>
+                  </p>
+                </Details>
                 <div className="mt-3 flex items-start justify-between gap-4">
                   <label htmlFor={`${tabId}-publish-profile`} className="text-xs cursor-pointer">
                     <span className="font-medium text-foreground">
@@ -791,19 +824,26 @@ export function AccountPanel({ gathering, onDirtyChange, onCancel, active = true
 
             {atInfo.kind === 'custodial' && atInfo.owned && atInfo.publishProfile && (
               <p className="text-xs text-muted-foreground">
-                Your published profile record stays in your repository; since you own this identity now, manage it
-                from your PDS.
+                You own this identity now, so manage your published profile from your own data server.
               </p>
             )}
 
             {atInfo.kind === 'custodial' && !atInfo.owned && (
               <WarningBox title="Take ownership of this identity" data-testid="take-ownership">
                 <p className="text-xs text-muted-foreground">
-                  We will set a new password on your account and email you a link that shows it once. After that we no
-                  longer hold your password: you can sign in to your PDS yourself, change the password, export your
-                  repository, or move to another provider. Publishing from this app will then need you to sign in with
-                  this account through “an existing ATProto account”. This cannot be undone.
+                  You get a new password for this identity, emailed as a link that shows it once, and this app stops
+                  holding it. You cannot undo this.
                 </p>
+                <Details>
+                  <p>
+                    From then on the identity is yours to run: change the password, export everything you have
+                    written, or move to another provider. Publishing from this app will ask you to sign in with the
+                    account through “an existing ATProto account”.{' '}
+                    <Link href={HELP_PRIVACY.identity} className="underline">
+                      {LEARN_MORE}
+                    </Link>
+                  </p>
+                </Details>
                 <div className="mt-3 flex items-start gap-3 text-sm">
                   <Checkbox
                     id={`${tabId}-confirm-ownership`}
@@ -971,16 +1011,25 @@ function AssistantConnections({ active }: { active: boolean }) {
         Connect an AI assistant
       </h3>
       <p className="text-xs text-muted-foreground leading-relaxed">
-        Point your own assistant — Claude, ChatGPT, Cursor — at your gatherings, so you can ask it about the schedule
-        or what was said in a session. It sees exactly what you see and nothing more: the sessions and schedules of
-        gatherings you belong to, and the transcripts you are allowed to read. It cannot change anything, cannot read
-        other people&apos;s messages or email addresses, and cannot see votes. Your questions and the excerpts it
-        reads go to whoever runs that assistant.{' '}
-        <Link href="/help/assistants" className="underline">
-          How to connect one
-        </Link>
-        .
+        Ask your own assistant about the schedule, who is hosting what, or a session you missed. It sees exactly what
+        you see, and can change nothing.
       </p>
+      <Details>
+        <p>
+          It reads the sessions and schedules of gatherings you belong to and the transcripts you are allowed to read.
+          It cannot see votes, other people&apos;s messages or anyone&apos;s email address. Your questions and the
+          excerpts it reads go to whoever runs that assistant.
+        </p>
+        <p>
+          <Link href="/help/assistants" className="underline">
+            How to connect one
+          </Link>
+          {' · '}
+          <Link href={HELP_PRIVACY.assistants} className="underline">
+            {LEARN_MORE}
+          </Link>
+        </p>
+      </Details>
 
       <div className="rounded-lg border border-border bg-muted/30 px-3 py-2">
         <p className="text-xs text-muted-foreground">Server URL</p>
@@ -997,8 +1046,8 @@ function AssistantConnections({ active }: { active: boolean }) {
       {secret && (
         <WarningBox title="Copy this token now — it is shown once" data-testid="assistant-token-secret">
           <p className="text-xs text-muted-foreground">
-            We store only a fingerprint of it, so we cannot show it again. Paste it into your assistant as the bearer
-            token for the server URL above. If you lose it, revoke the token and make a new one.
+            Paste it into your assistant as the bearer token for the server URL above. Lose it and you revoke it here
+            and make another — it cannot be shown twice.
           </p>
           <div className="mt-3 flex items-center gap-2">
             <code className="text-xs font-mono break-all flex-1 rounded bg-background px-2 py-1">{secret}</code>
@@ -1039,7 +1088,7 @@ function AssistantConnections({ active }: { active: boolean }) {
       </div>
       {full && (
         <p className="text-xs text-muted-foreground">
-          You have {limit} connected assistants, the most we allow. Revoke one to add another.
+          You have {limit} connected assistants, the limit. Revoke one to add another.
         </p>
       )}
       {error && <p className="text-xs text-destructive">{error}</p>}
@@ -1508,23 +1557,39 @@ function SubjectRights({ active }: { active: boolean }) {
           </a>
         </Button>
         <p className="text-xs text-muted-foreground">
-          One JSON file with everything this app holds about you: your profile, the gatherings you belong to,
-          your proposals, RSVPs, saved sessions, tickets, transcripts you uploaded, notifications and the
-          assistants you have connected. Your <em>votes are not in it</em>, and cannot be: when a voting round
-          closes its key is destroyed and every entry becomes unlinkable, so there is no longer anything that
-          says which were yours. Records you wrote to your own repository are already yours — the file tells
-          you how to export the whole repository as a CAR.
+          One file with what this app holds about you: profile, memberships, proposals, RSVPs, saved sessions,
+          tickets and transcripts. Your <em>votes cannot be in it</em>.
         </p>
+        <Details>
+          <p>
+            Once a voting round closes, nothing left anywhere says which votes were yours — not to you, not to the
+            organizers.{' '}
+            <Link href={HELP_PRIVACY.never} className="underline">
+              {LEARN_MORE}
+            </Link>
+          </p>
+          <p>
+            What you published on the open network is already yours. The file tells you how to download all of it in
+            one archive.
+          </p>
+        </Details>
       </div>
 
       <WarningBox title="Delete my account" data-testid="delete-account">
         <p className="text-xs text-muted-foreground">
-          This removes your profile, memberships, RSVPs, saved sessions, notifications and connected
-          assistants, and ends every session you have signed in from. Sessions you proposed stay on the
-          schedules they are on — they are your own records, and the gatherings have no authority over them.
-          Paid tickets keep their amount and lose your name, so a gathering’s books do not change because you
-          left. This cannot be undone.
+          This removes your profile, memberships, RSVPs, saved sessions and notifications, and signs you out
+          everywhere. You cannot undo it.
         </p>
+        <Details>
+          <p>
+            Sessions you proposed stay on the schedules they are on: they are yours, and the gatherings have no
+            authority over them. Paid tickets keep their amount and lose your name, so a gathering&apos;s books do not
+            change because you left.{' '}
+            <Link href={HELP_PRIVACY.identity} className="underline">
+              {LEARN_MORE}
+            </Link>
+          </p>
+        </Details>
         {preview ? <p className="mt-2 text-xs text-muted-foreground">{preview.pdsSentence}</p> : null}
 
         {preview && preview.blockingGatherings.length > 0 ? (
@@ -1640,11 +1705,15 @@ function CalendarSubscriptions({ active }: { active: boolean }) {
         Subscribe to your schedule
       </h3>
       <p className="text-xs text-muted-foreground">
-        A calendar address for the sessions you have saved, across every gathering you belong to, with a
-        reminder 15 minutes before each one. Your calendar re-checks it on its own, so schedule changes
-        arrive without you doing anything. The address is a key: anyone who has it can read your saved
-        sessions, so share it with nobody and revoke it here if it gets out.
+        One calendar address for every session you saved, with a reminder 15 minutes before each. Treat it as a key:
+        anyone who has it can read your saved sessions.
       </p>
+      <Details>
+        <p>
+          Your calendar re-checks the address on its own, so schedule changes arrive without you doing anything.
+          Revoke it here if it gets out.
+        </p>
+      </Details>
 
       {fresh ? (
         <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-2">

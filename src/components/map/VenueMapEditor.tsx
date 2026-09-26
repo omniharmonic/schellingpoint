@@ -15,6 +15,7 @@
  * is as precise as its address, and a private residence may have no outline at all.
  */
 import * as React from 'react'
+import Link from 'next/link'
 import { Crosshair, Image as ImageIcon, Loader2, Lock, MapPin, Search, Trash2, Upload, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -22,6 +23,7 @@ import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { ApiError } from '@/lib/api/client'
 import { plural } from '@/lib/format'
+import { HELP_PRIVACY, LEARN_MORE } from '@/lib/labels'
 import { addressLine } from '@/lib/geo/coarse'
 import { CUSTOM_MAP_DEFAULT_OPACITY, CUSTOM_MAP_MAX_BYTES, type CustomMap } from '@/lib/geo/custom-map'
 import { outlineRing, type OutlinePolygon } from '@/lib/geo/outline'
@@ -486,8 +488,9 @@ note.tone === 'amber' ? 'text-xs text-signal-amber' : 'text-xs text-muted-foregr
         })}
       </ul>
       <p className="text-xs text-muted-foreground">
-        A public room’s pin is published with the room. A private residence’s pin is shown to members only; its record carries the neighbourhood, never the point.
-        Outlines stay in this app: members see them on the gathering map, and no record ever carries one.
+        A public room’s pin is published with the room. A private home’s pin reaches members only, and outlines never
+        leave this app.{' '}
+        <Link href={HELP_PRIVACY.never} className="underline">{LEARN_MORE}</Link>
       </p>
 
       {canEditCustomMap && onSaveCustomMap && (
@@ -573,8 +576,8 @@ note.tone === 'amber' ? 'text-xs text-signal-amber' : 'text-xs text-muted-foregr
             </div>
           ) : (
             <p className="text-xs text-muted-foreground">
-              A PNG, JPEG or WebP up to {Math.round(CUSTOM_MAP_MAX_BYTES / (1024 * 1024))} MB. Like the gathering’s logo, the file is served from an
-              unguessable but public address — treat the plan as public.
+              A PNG, JPEG or WebP up to {Math.round(CUSTOM_MAP_MAX_BYTES / (1024 * 1024))} MB. Treat the plan as public:
+              anyone with its address can open it.
             </p>
           )}
         </div>

@@ -133,11 +133,16 @@ export function LocationPicker({ eventSlug, value, onChange, initialView, idPref
           fallback={<p className="p-4 text-sm text-muted-foreground">The map is unavailable right now. Your address text is still saved.</p>}
         />
       </div>
-      <p className="text-xs text-muted-foreground">
-        {hasPin && coarse
-          ? <>Pin set. Confirmed attendees see the exact spot; everyone else sees an area of about 1 km ({coarse.lat.toFixed(2)}, {coarse.lng.toFixed(2)}). Drag the pin to adjust.</>
-          : <>Optional. Add a pin so attendees can find you on the gathering map; only an approximate area is shown to non-attendees.</>}
-      </p>
+      {hasPin && coarse ? (
+        <p className="text-xs text-muted-foreground">
+          Confirmed attendees see the exact spot; everyone else an area of about 1 km ({coarse.lat.toFixed(2)},{' '}
+          {coarse.lng.toFixed(2)}). Drag the pin to adjust.
+        </p>
+      ) : (
+        <p className="text-xs text-muted-foreground">
+          Optional. Add a pin so attendees can find you; everyone else sees an area of about 1 km.
+        </p>
+      )}
     </div>
   )
 }

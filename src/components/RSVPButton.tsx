@@ -100,7 +100,7 @@ export function RSVPButton({
       setLocalWaitlistCount(result.waitlist_count)
       onRSVPChange?.(next)
       if (next === 'confirmed') toast({ title: 'You’re going', description: 'This session is on your RSVP list.', variant: 'success' })
-      else if (next === 'waitlist') toast({ title: 'You’re on the waitlist', description: 'We’ll move you in if a spot opens.', variant: 'success' })
+      else if (next === 'waitlist') toast({ title: 'You’re on the waitlist', description: 'You move up if a spot opens.', variant: 'success' })
       else toast({ title: 'RSVP cancelled', variant: 'success' })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Your RSVP could not be saved. Please try again.')

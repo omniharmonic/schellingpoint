@@ -449,7 +449,7 @@ export function EditSessionModal({ isOpen, onClose, session, onSave }: EditSessi
                     <div className="space-y-2">
                       <Label htmlFor="edit-public-place">Public area (optional)</Label>
                       <Input id="edit-public-place" value={form.publicPlace} onChange={(e) => set('publicPlace', e.target.value)} placeholder="e.g. Near Pearl St, Boulder" maxLength={80} aria-describedby="edit-public-place-hint" />
-                      <p id="edit-public-place-hint" className="text-xs text-muted-foreground">A neighborhood or landmark, never a street address. It appears on your public proposal record.</p>
+                      <p id="edit-public-place-hint" className="text-xs text-muted-foreground">A neighborhood or landmark, never a street address. Anyone can read it on your published proposal.</p>
                     </div>
                   </div>
                 )}
@@ -554,7 +554,7 @@ export function EditSessionModal({ isOpen, onClose, session, onSave }: EditSessi
               {session.unclaimed && (
                 <p className="text-xs text-muted-foreground">
                   {session.listed_as ? <>Listed as <span className="font-medium text-foreground">{session.listed_as}</span>. </> : null}
-                  Unclaimed: no participant has proposed or claimed this session. Listing labels are managed in the organizer sessions view and are never shown publicly.
+                  Unclaimed: nobody has proposed or claimed this session. Listing labels stay between organizers.
                 </p>
               )}
               {session.status !== 'scheduled' && (
@@ -572,7 +572,7 @@ export function EditSessionModal({ isOpen, onClose, session, onSave }: EditSessi
                 </Select>
               </div>
               <p className="text-xs text-muted-foreground">
-                Venue and time are set in the schedule builder. None of these settings change the proposer’s record.
+                Venue and time are set in the schedule builder. Nothing here changes what the proposer wrote.
               </p>
             </div>
           )}

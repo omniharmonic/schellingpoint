@@ -20,9 +20,9 @@ import { apiFetch, ApiError } from '@/lib/api/client'
  * Props (stable for package B): `sessionId`, `eventSlug`, `signedIn`, `userRsvpStatus?`.
  */
 
-const PERMANENCE = 'This writes a public record to your own ATProto repository. You can delete it, but copies may persist on the network.'
+const PERMANENCE = 'This publishes under your own name on the open network. You can delete it later, but copies may already exist elsewhere.'
 const LINKAGE =
-  'You signed in with an existing ATProto account. Publishing links that account to this gathering, permanently and in public. Confirm once to continue.'
+  'Publishing links your existing account to this gathering, in public and for good. Confirm once to continue.'
 const ENDORSEMENT_NOTE_MAX = 150
 
 type RsvpStatus = 'going' | 'interested' | 'notgoing'
