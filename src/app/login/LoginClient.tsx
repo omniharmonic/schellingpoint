@@ -131,7 +131,7 @@ function LoginContent({ atConfigured }: { atConfigured: boolean }) {
 
   if (emailSent) {
     return (
-      <div className="min-h-screen grid lg:grid-cols-2 items-center gap-8 p-5 sm:p-12 lg:p-20">
+      <div className="min-h-screen grid grid-cols-1 lg:grid-cols-2 items-center gap-8 p-5 sm:p-12 lg:p-20">
         {aside}
         <Card className="w-full max-w-md mx-auto border-0 bg-transparent shadow-none">
           <CardHeader className="text-left">
@@ -188,7 +188,7 @@ function LoginContent({ atConfigured }: { atConfigured: boolean }) {
   }
 
   return (
-    <div className="min-h-screen grid lg:grid-cols-2 items-center gap-8 p-5 sm:p-12 lg:p-20">
+    <div className="min-h-screen grid grid-cols-1 lg:grid-cols-2 items-center gap-8 p-5 sm:p-12 lg:p-20">
       {aside}
       <Card className="w-full max-w-md mx-auto border-0 bg-transparent shadow-none">
         <CardHeader className="text-left">

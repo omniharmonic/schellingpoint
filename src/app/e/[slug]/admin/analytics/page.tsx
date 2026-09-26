@@ -129,7 +129,7 @@ export default function AdminAnalyticsPage() {
         </Card>
       ) : (
         <div className="space-y-6">
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <StatCard title="Proposals" value={proposals.total} icon={<FileText className="h-4 w-4" aria-hidden="true" />} description={`${proposals.approvalRate}% approved or scheduled`} />
             <StatCard title="Members" value={members.total} icon={<Users className="h-4 w-4" aria-hidden="true" />} description={plural(roleCount, 'role')} />
             <StatCard title="Schedule" value={`${schedule.utilization}%`} icon={<Calendar className="h-4 w-4" aria-hidden="true" />} description={`${schedule.filledSlots} of ${plural(schedule.sessionSlots, 'slot')} filled`} />
@@ -250,7 +250,7 @@ export default function AdminAnalyticsPage() {
             </Card>
           ) : null}
 
-          <div className="grid gap-6 lg:grid-cols-2">
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2"><FileText className="h-5 w-5" aria-hidden="true" />Proposal status</CardTitle>

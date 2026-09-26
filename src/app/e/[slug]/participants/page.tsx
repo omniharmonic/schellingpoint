@@ -296,7 +296,7 @@ function ParticipantsContent() {
               People who share your interests
             </h2>
             <p className="text-sm text-muted-foreground mb-3">Matched on the interests in your profile. Only you see this.</p>
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {sharedPeople.map(({ person, interests }) => (
                 <ParticipantCard key={person.did} participant={person} shared={interests} onClick={() => setSelected(person)} />
               ))}
@@ -382,7 +382,7 @@ function ParticipantsContent() {
                   <Shield className="h-4 w-4 text-primary" aria-hidden="true" />
                   Organizers ({organizers.length})
                 </h2>
-                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
                   {organizers.map((p) => (
                     <ParticipantCard key={p.did} participant={p} onClick={() => setSelected(p)} />
                   ))}
@@ -395,7 +395,7 @@ function ParticipantsContent() {
                   <Users className="h-4 w-4" aria-hidden="true" />
                   Participants ({others.length})
                 </h2>
-                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
                   {others.map((p) => (
                     <ParticipantCard key={p.did} participant={p} onClick={() => setSelected(p)} />
                   ))}
@@ -538,14 +538,14 @@ function ParticipantCard({ participant, shared, onClick }: { participant: Partic
               <div className="flex items-center gap-2 flex-wrap">
                 {/* The name is the link to the profile page (design §3.2); the card itself still
                     opens the quick-look dialog the directory has always had. */}
-                <Link href={profileHref(event.slug, participant.did)} className="font-medium truncate hover:text-primary hover:underline">
+                <Link href={profileHref(event.slug, participant.did)} className="min-w-0 max-w-full truncate font-medium hover:text-primary hover:underline">
                   {nameOf(participant)}
                 </Link>
                 {roleLabel && <Badge variant="default">{roleLabel}</Badge>}
                 {participant.is_self && <Badge variant="outline">You</Badge>}
               </div>
               {showHandle && (
-                <p className="flex items-center gap-1.5 text-xs text-muted-foreground truncate">
+                <p className="flex min-w-0 items-center gap-1.5 truncate text-xs text-muted-foreground">
                   <span className="truncate">@{participant.handle}</span>
                   <BlueskyLink person={participant} />
                 </p>

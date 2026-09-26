@@ -138,7 +138,7 @@ export function AudienceClusters({ base, votingStatus, refreshKey = 0, className
               {data.keepApart.length === 0 ? (
                 <p className="mt-1.5 text-muted-foreground">No two sessions share that much of an audience. Anything can run at the same time as far as ballots are concerned.</p>
               ) : (
-                <ul className="mt-2 grid gap-2 sm:grid-cols-2">
+                <ul className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
                   {data.keepApart.map((p) => (
                     <li key={`${p.a.id}|${p.b.id}`} className="min-w-0 overflow-hidden rounded-lg border border-signal-amber/40 bg-signal-amber/5 p-3">
                       <div className="flex items-center gap-2 text-xs">

@@ -475,7 +475,7 @@ function Dashboard({ data }: { data: DashboardData }) {
             </div>
           </CardHeader>
           <CardContent className="pt-0">
-            <ul className="grid gap-2 sm:grid-cols-2">
+            <ul className="grid grid-cols-1 gap-2 sm:grid-cols-2">
               {data.mySessions.slice(0, 6).map((session) => {
                 const status = sessionStatusBadge(session.status)
                 return (
@@ -548,7 +548,7 @@ function Dashboard({ data }: { data: DashboardData }) {
             </div>
           </CardHeader>
           <CardContent className="pt-0">
-            <ul className="grid gap-2 sm:grid-cols-2">
+            <ul className="grid grid-cols-1 gap-2 sm:grid-cols-2">
               {data.recentSessions.map((session) => (
                 <li key={session.id}>
                   <Link
@@ -587,7 +587,7 @@ function Dashboard({ data }: { data: DashboardData }) {
             </div>
           </CardHeader>
           <CardContent className="pt-0">
-            <ul className="grid gap-2 sm:grid-cols-2">
+            <ul className="grid grid-cols-1 gap-2 sm:grid-cols-2">
               {supported
                 .sort(([, a], [, b]) => b - a)
                 .slice(0, 6)

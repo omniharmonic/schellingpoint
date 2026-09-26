@@ -42,6 +42,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { WarningBox } from '@/components/WarningBox'
+import { InstallAppRow } from '@/components/InstallApp'
 import { useAuth } from '@/hooks/useAuth'
 import { apiFetch, ApiError } from '@/lib/api/client'
 import { HELP_PRIVACY, LEARN_MORE } from '@/lib/labels'
@@ -698,6 +699,9 @@ export function AccountPanel({ gathering, onDirtyChange, onCancel, active = true
             </div>
 
             {gathering && <GatheringSharingSection slug={gathering.slug} name={gathering.name} />}
+
+            {/* One row, and only on a browser that has an install to offer. */}
+            <InstallAppRow className="flex min-h-11 w-full items-center gap-3 rounded-xl border-t px-3 text-left text-sm transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
 
             <div className="flex flex-col gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
               <div className="min-w-0 flex-1">

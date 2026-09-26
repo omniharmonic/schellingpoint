@@ -25,6 +25,7 @@ import {
 } from 'lucide-react'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { CreditGauge } from '@/components/CreditGauge'
+import { InstallAppRow } from '@/components/InstallApp'
 import { cn } from '@/lib/utils'
 
 export interface MoreSheetProps {
@@ -118,6 +119,10 @@ export function MoreSheet({
             </>
           )}
         </nav>
+
+        {/* Installing is not a destination, so it sits outside the nav — and it draws nothing at
+            all on a browser with no install to offer, or once the offer has been turned down. */}
+        <InstallAppRow className={cn(ROW, '-mx-1 w-full text-left')} onInstalled={close} />
       </DialogContent>
     </Dialog>
   )

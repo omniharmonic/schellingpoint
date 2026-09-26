@@ -170,7 +170,7 @@ export default async function HomePage() {
           showViewAll={hasMoreUpcoming}
         />}
 
-        {pastEvents.length > 0 && <section className="container mx-auto px-5 py-10" aria-labelledby="past-heading"><h2 id="past-heading" className="text-4xl sm:text-5xl font-semibold tracking-tight mb-4">Previously, together.</h2><p className="text-muted-foreground mb-6">Revisit the ideas and people behind past gatherings.</p><div className="grid md:grid-cols-2 gap-6">{pastEvents.map(event => <EventCard key={event.id} event={event}/>)}</div></section>}
+        {pastEvents.length > 0 && <section className="container mx-auto px-5 py-10" aria-labelledby="past-heading"><h2 id="past-heading" className="text-4xl sm:text-5xl font-semibold tracking-tight mb-4">Previously, together.</h2><p className="text-muted-foreground mb-6">Revisit the ideas and people behind past gatherings.</p><div className="grid grid-cols-1 md:grid-cols-2 gap-6">{pastEvents.map(event => <EventCard key={event.id} event={event}/>)}</div></section>}
 
         <CreateEventCTA />
       </main>

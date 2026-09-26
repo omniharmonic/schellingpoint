@@ -39,7 +39,7 @@ const policies = [
 
 function Cards({ items }: { items: Array<{ href: string; icon: React.ComponentType<{ className?: string }>; title: string; description: string }> }) {
   return (
-    <ul className="grid gap-4 sm:grid-cols-2">
+    <ul className="grid grid-cols-1 gap-4 sm:grid-cols-2">
       {items.map((item) => (
         <li key={item.href}>
           <Link

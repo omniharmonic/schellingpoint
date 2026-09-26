@@ -68,7 +68,7 @@ export default function AskPage() {
                   Themes the organizers drew from the session transcripts and stand behind. Members only — never published.
                 </CardDescription>
               </CardHeader>
-              <CardContent className="grid gap-4 sm:grid-cols-2">
+              <CardContent className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 {themes.map((t) => (
                   <div key={t.title} className="rounded-xl border p-4">
                     <p className="font-medium">{t.title}</p>

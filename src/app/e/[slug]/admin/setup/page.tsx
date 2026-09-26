@@ -401,11 +401,11 @@ export default function AdminSetupPage() {
           <Card className="border-primary/50">
             <CardHeader><CardTitle className="text-lg">{editingVenue ? 'Edit room' : 'New room'}</CardTitle></CardHeader>
             <CardContent className="space-y-4">
-              <div className="grid gap-4 sm:grid-cols-2">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 {field('name', 'Name', { placeholder: 'e.g. Main hall', maxLength: 100, 'aria-invalid': venueError && !venueForm.name.trim() ? true : undefined }, venueNameRef)}
                 {field('slug', 'Short name (optional)', { placeholder: 'Generated from the name if empty', maxLength: 60 })}
               </div>
-              <div className="grid gap-4 sm:grid-cols-2">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 {field('capacity', 'Capacity (optional)', { type: 'number', min: 1, placeholder: 'e.g. 100', inputMode: 'numeric' })}
                 <fieldset className="space-y-2">
                   <legend className="text-sm font-medium">Type</legend>

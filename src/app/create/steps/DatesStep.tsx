@@ -92,7 +92,7 @@ export function DatesStep({ state, dispatch }: DatesStepProps) {
           <CardDescription>When the gathering happens. Proposal and voting deadlines, and the schedule, are shown on this clock.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-5">
-          <div className="grid gap-4 sm:grid-cols-2">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <Field label="Start date" htmlFor="startDate" error={startError}>
               <Input
                 id="startDate"
@@ -128,7 +128,7 @@ export function DatesStep({ state, dispatch }: DatesStepProps) {
           <CardDescription>Where people meet. Rooms come in the next step.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-5">
-          <div role="radiogroup" aria-label="Location type" className="grid gap-3 sm:grid-cols-3">
+          <div role="radiogroup" aria-label="Location type" className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             {LOCATION_TYPE_OPTIONS.map((option) => (
               <ChoiceCard
                 key={option.value}

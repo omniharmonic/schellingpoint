@@ -119,7 +119,7 @@ export default async function EventPage({ params }: { params: Promise<{ slug: st
 
       <main id="event-main">
         <section className="container mx-auto px-5 py-10 sm:py-16">
-          <div className="grid lg:grid-cols-[1.2fr_1fr] gap-10 lg:gap-16 items-center">
+          <div className="grid grid-cols-1 lg:grid-cols-[1.2fr_1fr] gap-10 lg:gap-16 items-center">
             <div>
               <div className="flex items-center gap-3 mb-6">
                 {event.logoUrl && <img src={event.logoUrl} alt="" className="h-12 w-12 rounded-xl object-contain border bg-card" />}
@@ -207,7 +207,7 @@ export default async function EventPage({ params }: { params: Promise<{ slug: st
                   </Link>
                 </Button>
               </div>
-              <div className="grid gap-3 sm:grid-cols-2">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 {recent.map((session) => (
                   <Link key={session.id} href={`/e/${event.slug}/sessions/${session.id}`}>
                     <Card accent="left" accentColor={session.track_color || 'hsl(var(--signal))'} interactive className="h-full">
@@ -249,7 +249,7 @@ export default async function EventPage({ params }: { params: Promise<{ slug: st
 
           <section className="rounded-2xl bg-secondary/50 p-6 sm:p-8" aria-labelledby="ways-heading">
             <h2 id="ways-heading" className="text-2xl font-semibold mb-6">{eventIsOver ? 'Keep the connections going.' : 'There’s more than one way to take part.'}</h2>
-            <div className="grid sm:grid-cols-3 gap-6">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
               {[
                 !proposing
                   ? { icon: Calendar, title: 'Explore the gathering', description: 'Explore the program and the sessions we made together.', href: 'schedule', action: 'Explore the schedule' }

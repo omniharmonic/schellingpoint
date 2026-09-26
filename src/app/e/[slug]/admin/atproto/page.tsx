@@ -398,7 +398,7 @@ export default function AdminAtprotoPage() {
           <CardContent className="space-y-4 text-sm">
             {!status.configured ? <p className="text-muted-foreground">ATProto is not configured on this deployment.</p> : null}
             {status.linked ? (
-              <dl className="grid gap-2 sm:grid-cols-2">
+              <dl className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                 <div><dt className="text-xs uppercase text-muted-foreground">Handle</dt><dd className="font-mono">{status.actorHandle ? `@${status.actorHandle}` : '—'}</dd></div>
                 <div><dt className="text-xs uppercase text-muted-foreground">DID</dt><dd className="font-mono" title={status.actorDid ?? ''}>{short(status.actorDid)}</dd></div>
                 <div><dt className="text-xs uppercase text-muted-foreground">Credential</dt><dd className="flex flex-wrap items-center gap-2">{status.credentialKind === 'app-password' ? 'Custodied by this app' : 'OAuth session'} <Badge variant={health.badge}>{health.label}</Badge></dd></div>
@@ -472,7 +472,7 @@ export default function AdminAtprotoPage() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="grid gap-2 sm:grid-cols-3">
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
                 {PUBLISH_BUTTONS.map((b) => (
                   <Button key={b.what} variant={b.what === 'all' ? 'default' : 'outline'} className="h-auto flex-col items-start py-2 text-left" disabled={busy !== null} onClick={() => publish(b.what)}>
                     <span className="flex items-center gap-2 font-medium">{busy === `publish:${b.what}` ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : null}{b.label}</span>
@@ -827,7 +827,7 @@ export default function AdminAtprotoPage() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <dl className="grid gap-3 text-sm sm:grid-cols-2">
+            <dl className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
               {PUBLIC_RECORDS.map((r) => (
                 <div key={r.record}><dt className="font-medium">{r.record}</dt><dd className="text-muted-foreground">{r.what}</dd></div>
               ))}

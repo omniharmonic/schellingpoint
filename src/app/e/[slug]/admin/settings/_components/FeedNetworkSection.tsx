@@ -98,7 +98,7 @@ export function FeedNetworkSection({ event, network }: { event: Event; network: 
       <Button type="button" size="sm" className="mt-3" loading={busy} onClick={retry}>{busy ? null : <RefreshCw className="mr-2 h-4 w-4" aria-hidden="true" />}Retry</Button>
     </WarningBox> : <div className="space-y-4">
       {created ? <p className="flex items-center gap-2 text-sm text-success"><Check className="h-4 w-4" aria-hidden="true" />Identity created: @{created}</p> : null}
-      <div className="grid gap-3 sm:grid-cols-2">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <div className="rounded-xl border p-4">
           <p className="flex items-center gap-1 text-xs text-muted-foreground"><Fingerprint className="h-3.5 w-3.5" aria-hidden="true" />Handle</p>
           <p className="mt-1 break-all font-mono text-sm">@{network?.handle ?? created}</p>

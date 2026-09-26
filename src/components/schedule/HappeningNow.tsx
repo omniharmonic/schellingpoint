@@ -86,7 +86,7 @@ export function HappeningNow({
           Nothing is in session right now. Votes open 15 minutes before a session starts.
         </p>
       ) : (
-        <ul className="grid gap-3 md:grid-cols-2">
+        <ul className="grid grid-cols-1 gap-3 md:grid-cols-2">
           {rows.map((session) => (
             <li key={session.id}>
               <Card className={cn(!savedIds.has(session.id) && 'border-dashed')}>

@@ -56,7 +56,7 @@ export function NowLine({ input, className }: { input: NowLineInput; className?:
       className={cn('border-b pb-5', className)}
     >
       <p
-        className="font-display text-2xl font-bold leading-tight tracking-tight text-balance sm:text-3xl"
+        className="font-display text-2xl font-bold leading-tight tracking-tight text-balance break-anywhere sm:text-3xl"
         aria-live={copy.ticking ? 'off' : undefined}
       >
         {copy.headline}

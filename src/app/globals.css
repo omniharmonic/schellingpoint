@@ -105,6 +105,20 @@
     --favorite-foreground: 162 30% 13%;
   }
   * { @apply border-border; }
+  /*
+   * No side-to-side movement, anywhere.
+   *
+   * iOS Safari and Chrome do not merely show a horizontal scrollbar when something overflows
+   * sideways: with `width=device-width, initial-scale=1` they widen the layout viewport to fit
+   * the widest thing on the page and zoom out to match. A single unbreakable session title was
+   * enough to turn a 390px phone into a 780px page that slid left and right under the thumb and
+   * dragged the floating bar, the header and the toasts off-screen with it.
+   *
+   * `clip`, not `hidden`: `overflow: hidden` on the root makes the element a scroll container,
+   * which breaks every `position: sticky` in the app (the day chips, the schedule headings).
+   * `clip` cuts the overflow without one.
+   */
+  html, body { overflow-x: clip; }
   body { @apply bg-background text-foreground font-sans antialiased; font-feature-settings: "ss01" 1, "calt" 1; }
   h1, h2, h3, h4, h5, h6 { font-family: 'BDO Grotesk', system-ui, sans-serif; text-wrap: balance; }
   h1 { letter-spacing: -0.045em; }
@@ -165,6 +179,13 @@
 .signal-ping::after { content: ''; position: absolute; inset: -4px; border-radius: 50%; border: 2px solid hsl(var(--signal)); animation: ping-ripple .4s ease-out; opacity: 0; }
 @layer utilities {
   .text-balance { text-wrap: balance; }
+  /*
+   * For identity strings — titles, handles, DIDs, pasted URLs — that have no space to break at.
+   * `break-words` (`overflow-wrap: break-word`) wraps them visually but is ignored when the
+   * browser computes min-content, so the string still sizes the grid track or flex item it sits
+   * in and blows the row out. `anywhere` counts, so the box can actually be narrow.
+   */
+  .break-anywhere { overflow-wrap: anywhere; }
   .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
   .scrollbar-hide::-webkit-scrollbar { display: none; }
   .page-transition { @apply transition-colors duration-200; }

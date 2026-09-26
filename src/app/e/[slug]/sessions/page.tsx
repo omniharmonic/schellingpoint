@@ -371,7 +371,7 @@ export default function EventSessionsPage() {
         </div>
 
         {!showEmpty && (
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
             {sessions.map((session) => {
               const ownerStatus = mineOnly && OWNER_ONLY_STATUSES.has(session.status) ? sessionStatusBadge(session.status) : undefined
               return (

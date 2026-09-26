@@ -27,6 +27,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { FilterChip } from '@/components/ui/filter-chip'
+import { InstallAppCard } from '@/components/InstallApp'
 import { cn } from '@/lib/utils'
 import { apiFetch } from '@/lib/api/client'
 import { PROFILE_INPUT_LIMITS, uploadAvatar, useInterestSuggestions } from '@/components/SettingsModal'
@@ -527,6 +528,10 @@ export function OnboardingModal({ email, initialProfile, onComplete, suggestedTo
               )}
             </div>
           )}
+
+          {/* Last step, last thing: the app on the home screen. Skippable like everything else
+              here, and gone for good once turned down. */}
+          <InstallAppCard />
           </div>
         )
       default:

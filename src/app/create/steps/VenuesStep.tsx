@@ -335,7 +335,7 @@ export function VenuesStep({ state, dispatch }: VenuesStepProps) {
         </CardHeader>
         <CardContent className="space-y-4">
           {venues.length > 0 ? (
-            <div className="grid gap-3 sm:grid-cols-2">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               {venues.map((venue) => (
                 <VenueCard key={venue.id} venue={venue} onEdit={handleEditVenue} onDelete={handleDeleteVenue} />
               ))}

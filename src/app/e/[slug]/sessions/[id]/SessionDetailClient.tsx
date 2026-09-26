@@ -411,7 +411,7 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
           </WarningBox>
         )}
 
-        <div className="grid gap-6 lg:grid-cols-3 lg:grid-rows-[auto_auto_1fr]">
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-3 lg:grid-rows-[auto_auto_1fr]">
           <Card className="lg:col-span-2 lg:col-start-1 lg:row-start-1">
             <CardContent className="p-4 pt-4 sm:p-6 sm:pt-6">
               {/* Edit, save and share left the header card: they are rows in Quick actions
@@ -443,7 +443,7 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
                 )}
               </div>
 
-              <h1 className="page-title mb-4 break-words">{session.title}</h1>
+              <h1 className="page-title mb-4 break-anywhere">{session.title}</h1>
 
               {hosts.length === 0 ? (
                 <p className="italic text-muted-foreground">{hostByline(session)}</p>
@@ -453,7 +453,7 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
                     type="button"
                     onClick={() => setShowHostCard(showHostCard ? null : hosts[0].key)}
                     aria-expanded={!!showHostCard}
-                    className="group flex items-center gap-3 rounded-lg text-left transition-opacity hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                    className="group flex max-w-full items-center gap-3 rounded-lg text-left transition-opacity hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
                   >
                     <div className="flex -space-x-2">
                       {hosts.map((host) => (
@@ -469,7 +469,7 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
                       ))}
                     </div>
                     <span className="min-w-0">
-                      <span className="block text-foreground">
+                      <span className="block break-anywhere text-foreground">
                         {session.host ? `Hosted by ${hostByline(session)}` : hostByline(session)}
                       </span>
                       {hostHandles.length > 0 && (
@@ -578,7 +578,7 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
               <Card className="border-primary/20 bg-primary/5">
                 <CardContent className="p-4 pt-4 sm:p-6 sm:pt-6">
                   <SessionLocationMap session={session} className="mb-4" />
-                  <div className="grid gap-6 sm:grid-cols-2">
+                  <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
                     {session.is_self_hosted ? (
                       <div>
                         <div className="mb-2 flex items-center gap-2">
@@ -683,7 +683,7 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
                 <CardTitle className="text-xl">About this session</CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="prose prose-sm max-w-none break-words">
+                <div className="prose prose-sm max-w-none break-anywhere">
                   {session.description ? (
                     session.description.split('\n').map((paragraph, i) => (
                       <p key={i} className="mb-3 text-muted-foreground">{paragraph}</p>

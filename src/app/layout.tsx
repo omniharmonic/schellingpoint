@@ -21,9 +21,16 @@ export const metadata: Metadata = {
     statusBarStyle: 'default',
   },
   formatDetection: { telephone: false },
+  other: {
+    // Next emits only the modern `mobile-web-app-capable`, which iOS honours from 16.4. An iPhone
+    // on an older iOS opens an installed app inside Safari's chrome without this one.
+    'apple-mobile-web-app-capable': 'yes',
+  },
   icons: {
     icon: '/icon.svg',
-    apple: '/icons/apple-touch-icon.png',
+    // iOS reads only `apple-touch-icon`, and only a PNG: an SVG favicon gets a screenshot of the
+    // page on the home screen instead. 180×180 is the size every current iPhone asks for.
+    apple: [{ url: '/icons/apple-touch-icon.png', sizes: '180x180', type: 'image/png' }],
   },
   openGraph: {
     title: 'unconference',

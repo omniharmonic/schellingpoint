@@ -195,7 +195,7 @@ export default function TicketsPage() {
             </CardContent>
           </Card>
         ) : (
-          <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+          <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
             {tiers.map((tier) => {
               const { status, label } = getTierStatus(tier)
               const hasTicket = userHasTicket(tier.id)

@@ -198,7 +198,7 @@ export default function AdminCommunicationsPage() {
           </CardContent>
         </Card>
 
-        <div className="grid gap-6 lg:grid-cols-2">
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2"><Megaphone className="h-5 w-5" aria-hidden="true" />Send an announcement</CardTitle>
@@ -216,7 +216,7 @@ export default function AdminCommunicationsPage() {
                   <Textarea id="message" placeholder="Write your announcement…" value={message} onChange={(e) => setMessage(e.target.value)} required rows={5} maxLength={1000} />
                   <p className="text-xs text-muted-foreground text-right">{message.length}/1000</p>
                 </div>
-                <div className="grid gap-4 sm:grid-cols-2">
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   <div className="space-y-2">
                     <Label htmlFor="ctaUrl">Link (optional)</Label>
                     <Input id="ctaUrl" placeholder={`https://… or /e/${event.slug}/schedule`} value={ctaUrl} onChange={(e) => setCtaUrl(e.target.value)} maxLength={500} />

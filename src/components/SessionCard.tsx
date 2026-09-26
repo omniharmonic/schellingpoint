@@ -118,7 +118,7 @@ export function SessionCard({
           </div>
 
           <Link href={href} className="block rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2">
-            <h3 className="line-clamp-2 font-display text-lg font-semibold leading-snug transition-colors group-hover:text-primary">
+            <h3 className="line-clamp-2 break-anywhere font-display text-lg font-semibold leading-snug transition-colors group-hover:text-primary">
               {session.title}
               <ChevronRight className="ml-1 inline h-3.5 w-3.5 opacity-0 transition-opacity group-hover:opacity-100" aria-hidden />
             </h3>
@@ -127,7 +127,9 @@ export function SessionCard({
           {/* The byline links to the host's profile in this gathering when we know their DID —
               the read model sends it to members only, so a public card stays plain text
               (design §3.2). */}
-          <p className={cn('text-xs text-muted-foreground', !session.host && 'italic')}>
+          {/* A display name and a handle are both single unbreakable words as far as the browser
+              is concerned, so they need `anywhere` rather than `break-word` to stay in the card. */}
+          <p className={cn('break-anywhere text-xs text-muted-foreground', !session.host && 'italic')}>
             {session.host?.did ? (
               <Link href={profileHref(eventSlug, session.host.did)} className="not-italic hover:text-primary hover:underline">
                 {hostByline(session)}

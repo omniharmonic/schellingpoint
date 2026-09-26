@@ -162,7 +162,7 @@ export function ScheduleView({ view }: { view: ScheduleViewMode }) {
   }, [filtered, groupBy, tz])
 
   const size = view === 'mine' ? 'md' : 'sm'
-  const gridClass = view === 'mine' ? 'grid gap-3 md:grid-cols-2' : 'grid gap-2 sm:grid-cols-2 lg:grid-cols-3'
+  const gridClass = view === 'mine' ? 'grid grid-cols-1 gap-3 md:grid-cols-2' : 'grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3'
   const cardProps = {
     eventSlug: event.slug,
     timeZone: tz,

@@ -922,7 +922,7 @@ function AdminTicketsPageInner() {
           )}
 
           {/* Stats */}
-          <div className="grid gap-4 md:grid-cols-3">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
             <Card>
               <CardContent className="pt-6">
                 <div className="flex items-center gap-3">
@@ -985,7 +985,7 @@ function AdminTicketsPageInner() {
                 <CardTitle>{editingTier ? 'Edit ticket type' : 'New ticket type'}</CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="grid gap-4 md:grid-cols-2">
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                   <div className="space-y-2">
                     <Label htmlFor="tier-name">Name</Label>
                     <Input

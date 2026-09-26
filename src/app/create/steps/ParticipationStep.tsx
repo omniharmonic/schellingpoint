@@ -95,7 +95,7 @@ export function ParticipationStep({ state, dispatch }: ParticipationStepProps) {
           <CardDescription>How people join. Ticket tiers and payouts are set up after the gathering exists.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-5">
-          <div role="radiogroup" aria-label="Admission" className="grid gap-3 sm:grid-cols-2">
+          <div role="radiogroup" aria-label="Admission" className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             {ADMISSION_OPTIONS.map((option) => (
               <ChoiceCard
                 key={option.label}

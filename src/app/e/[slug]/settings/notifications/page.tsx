@@ -19,7 +19,7 @@ import {
 } from '@/hooks/useNotificationPreferences'
 
 /** One responsive grid for the header and every row: stacked on phones, four columns from `sm`. */
-const ROW_GRID = 'grid gap-3 sm:grid-cols-[minmax(0,1fr)_5rem_5rem_6rem] sm:items-center'
+const ROW_GRID = 'grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_5rem_5rem_6rem] sm:items-center'
 
 const CHANNELS: { key: NotificationChannel; label: string; icon: React.ComponentType<{ className?: string }>; comingSoon?: boolean }[] = [
   { key: 'email_enabled', label: 'Email', icon: Mail },

@@ -366,7 +366,7 @@ export default function AdminPage() {
               <h2 id="setup-title" className="text-2xl font-display font-semibold tracking-tight">Give your gathering a good start.</h2>
               <p className="mt-2 text-sm text-muted-foreground max-w-xl">Your draft is private. Set the essentials, preview the invitation, then publish when you’re ready.</p>
             </div>
-            <div className="grid divide-y sm:grid-cols-3 sm:divide-y-0 sm:divide-x">
+            <div className="grid grid-cols-1 divide-y sm:grid-cols-3 sm:divide-y-0 sm:divide-x">
               {[{ href: 'settings', title: 'Gathering details', detail: 'Dates, location and the invitation.' },
                 { href: 'setup', title: 'Rooms & time slots', detail: `${plural(venues.length, 'room')} and ${plural(timeSlots.filter(slot => !slot.is_break).length, 'session slot')} ready.` },
                 { href: event.ticketingEnabled ? 'tickets' : 'settings', title: 'Admission & publishing', detail: event.ticketingEnabled ? 'Set up ticket types and connect payouts.' : 'Review participation and publish your gathering.' }].map(item => (
@@ -412,7 +412,7 @@ export default function AdminPage() {
           timeSlots={timeSlots.filter((t) => !t.is_break).length}
         />
 
-        <section className="grid gap-4 lg:grid-cols-[1.35fr_1fr]" aria-label="Next steps">
+        <section className="grid grid-cols-1 gap-4 lg:grid-cols-[1.35fr_1fr]" aria-label="Next steps">
           <div className="rounded-2xl border border-primary/25 bg-secondary p-6 sm:p-8">
             <div className="flex items-center gap-2 text-primary text-sm font-medium mb-4"><FileText className="h-4 w-4" aria-hidden="true" />Next up</div>
             <h2 className="text-2xl sm:text-3xl font-display font-semibold tracking-tight mb-3 leading-tight text-balance">

@@ -245,14 +245,14 @@ export default function AdminKnowledgePage() {
         </p>
       )}
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Stat label="Sessions with a transcript" value={`${data.totals.with_transcript} / ${data.totals.sessions}`} hint="Approved and scheduled sessions" />
         <Stat label="Words collected" value={data.totals.words.toLocaleString()} />
         <Stat label="Chunks" value={data.totals.chunks} hint="≈ 800 tokens each, 15% overlap" />
         <Stat label="Indexed" value={data.totals.chunks ? `${Math.round((data.totals.embedded / data.totals.chunks) * 100)}%` : '—'} hint={data.providers.embeddings.configured ? `${data.totals.embedded} of ${data.totals.chunks} embedded` : 'No embeddings provider'} />
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-2">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-lg"><Archive className="h-5 w-5 text-muted-foreground" aria-hidden />Corpus</CardTitle>
@@ -445,7 +445,7 @@ export default function AdminKnowledgePage() {
               </form>
             ) : (
               <>
-                <div className="grid gap-4 sm:grid-cols-2">
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   {data.themes.themes.map((t) => (
                     <div key={t.title} className="rounded-xl border p-4">
                       <p className="font-medium">{t.title}</p>
