@@ -87,28 +87,14 @@ function Separator() {
 }
 
 /**
- * The page's own single-column point (`lg:grid-cols-3` below). Quick actions is one stack with two
- * mount points — under the header card on mobile, in the sidebar on desktop (design §5.3) — and it
- * must exist once, not twice behind a `hidden` class, so the buttons are reachable exactly once by
- * keyboard and by a screen reader. `useSyncExternalStore` hydrates with the server's answer and
- * re-renders once the real viewport is known, so there is no hydration mismatch.
+ * Quick actions is one stack, mounted once — under the header card on a phone, in the sidebar
+ * column on a desktop (design §5.3) — and where it goes is decided by CSS alone, never by
+ * JavaScript reading the viewport. The page's grid (`lg:grid-cols-3 lg:grid-rows-[auto_auto_1fr]`
+ * below) holds four items: the header card, the stack, the rest of the main column, and the
+ * sidebar. On a phone they stack in DOM order, which is what the server renders; on a desktop the
+ * stack moves to column three. So the server's HTML is already right for a phone, the most-visited
+ * viewport, and neither breakpoint moves anything after hydration.
  */
-const DESKTOP_QUERY = '(min-width: 1024px)'
-
-function subscribeToDesktop(onChange: () => void): () => void {
-  if (typeof window === 'undefined' || !window.matchMedia) return () => {}
-  const media = window.matchMedia(DESKTOP_QUERY)
-  media.addEventListener('change', onChange)
-  return () => media.removeEventListener('change', onChange)
-}
-
-function useIsDesktop(): boolean {
-  return React.useSyncExternalStore(
-    subscribeToDesktop,
-    () => (typeof window === 'undefined' || !window.matchMedia ? true : window.matchMedia(DESKTOP_QUERY).matches),
-    () => true,
-  )
-}
 
 export function SessionDetailClient({ sessionId, initialSession }: SessionDetailClientProps) {
   const router = useRouter()
@@ -118,7 +104,6 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
   const votingOpen = isParticipationOpen(event, 'vote')
   // The attendance round (design §11): open only while the gathering is live and opted in.
   const attendance = useVoting(event.slug, 'attendance')
-  const isDesktop = useIsDesktop()
 
   const [session, setSession] = React.useState<SessionView | null>(initialSession ?? null)
   const [isLoading, setIsLoading] = React.useState(!initialSession)
@@ -178,7 +163,7 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
       toast({
         title: next ? 'Saved to my schedule' : 'Removed from my schedule',
         variant: 'success',
-        action: next ? { label: 'View my schedule', onClick: () => router.push(`/e/${event.slug}/my-schedule`) } : undefined,
+        action: next ? { label: 'View my schedule', onClick: () => router.push(`/e/${event.slug}/schedule?view=mine`) } : undefined,
       })
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Your saved schedule could not be updated. Please try again.')
@@ -426,169 +411,169 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
           </WarningBox>
         )}
 
-        <div className="grid gap-6 lg:grid-cols-3">
-          <div className="space-y-6 lg:col-span-2">
-            <Card>
-              <CardContent className="p-4 pt-4 sm:p-6 sm:pt-6">
-                {/* Edit, save and share left the header card: they are rows in Quick actions
-                    (design §5.2), and the context row above carries save + share on mobile. */}
-                <div className="mb-3 flex min-w-0 flex-wrap items-center gap-2 text-sm text-muted-foreground">
-                  <span className="flex items-center gap-1.5" title={formatDescription(session.format)}>
-                    <FormatIcon className="h-4 w-4 shrink-0" aria-hidden />
-                    {formatLabel(session.format)}
-                  </span>
-                  {session.duration != null && (
-                    <>
-                      <Separator />
-                      <span className="flex items-center gap-1.5">
-                        <Clock className="h-4 w-4 shrink-0" aria-hidden />
-                        {session.duration} min
-                      </span>
-                    </>
-                  )}
-                  <Separator />
-                  <Badge variant={status.badge}>{status.label}</Badge>
-                  {session.track && (
-                    <>
-                      <Separator />
-                      <span className="flex items-center gap-1.5">
-                        {session.track.color && <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: session.track.color }} aria-hidden />}
-                        <span>{session.track.name}</span>
-                      </span>
-                    </>
-                  )}
-                </div>
+        <div className="grid gap-6 lg:grid-cols-3 lg:grid-rows-[auto_auto_1fr]">
+          <Card className="lg:col-span-2 lg:col-start-1 lg:row-start-1">
+            <CardContent className="p-4 pt-4 sm:p-6 sm:pt-6">
+              {/* Edit, save and share left the header card: they are rows in Quick actions
+                  (design §5.2). */}
+              <div className="mb-3 flex min-w-0 flex-wrap items-center gap-2 text-sm text-muted-foreground">
+                <span className="flex items-center gap-1.5" title={formatDescription(session.format)}>
+                  <FormatIcon className="h-4 w-4 shrink-0" aria-hidden />
+                  {formatLabel(session.format)}
+                </span>
+                {session.duration != null && (
+                  <>
+                    <Separator />
+                    <span className="flex items-center gap-1.5">
+                      <Clock className="h-4 w-4 shrink-0" aria-hidden />
+                      {session.duration} min
+                    </span>
+                  </>
+                )}
+                <Separator />
+                <Badge variant={status.badge}>{status.label}</Badge>
+                {session.track && (
+                  <>
+                    <Separator />
+                    <span className="flex items-center gap-1.5">
+                      {session.track.color && <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: session.track.color }} aria-hidden />}
+                      <span>{session.track.name}</span>
+                    </span>
+                  </>
+                )}
+              </div>
 
-                <h1 className="page-title mb-4 break-words">{session.title}</h1>
+              <h1 className="page-title mb-4 break-words">{session.title}</h1>
 
-                {hosts.length === 0 ? (
-                  <p className="italic text-muted-foreground">{hostByline(session)}</p>
-                ) : (
-                  <div className="relative" ref={hostCardRef}>
-                    <button
-                      type="button"
-                      onClick={() => setShowHostCard(showHostCard ? null : hosts[0].key)}
-                      aria-expanded={!!showHostCard}
-                      className="group flex items-center gap-3 rounded-lg text-left transition-opacity hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                    >
-                      <div className="flex -space-x-2">
-                        {hosts.map((host) => (
-                          <div key={host.key} className="flex h-9 w-9 items-center justify-center overflow-hidden rounded-full bg-muted ring-2 ring-background">
-                            {host.avatar_url ? (
-                              <img src={host.avatar_url} alt="" className="h-full w-full object-cover" />
-                            ) : host.handle ? (
-                              <span className="text-sm font-medium uppercase text-muted-foreground">{host.handle.charAt(0)}</span>
-                            ) : (
-                              <User className="h-4 w-4 text-muted-foreground" aria-hidden />
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                      <span className="min-w-0">
-                        <span className="block text-foreground">
-                          {session.host ? `Hosted by ${hostByline(session)}` : hostByline(session)}
+              {hosts.length === 0 ? (
+                <p className="italic text-muted-foreground">{hostByline(session)}</p>
+              ) : (
+                <div className="relative" ref={hostCardRef}>
+                  <button
+                    type="button"
+                    onClick={() => setShowHostCard(showHostCard ? null : hosts[0].key)}
+                    aria-expanded={!!showHostCard}
+                    className="group flex items-center gap-3 rounded-lg text-left transition-opacity hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                  >
+                    <div className="flex -space-x-2">
+                      {hosts.map((host) => (
+                        <div key={host.key} className="flex h-9 w-9 items-center justify-center overflow-hidden rounded-full bg-muted ring-2 ring-background">
+                          {host.avatar_url ? (
+                            <img src={host.avatar_url} alt="" className="h-full w-full object-cover" />
+                          ) : host.handle ? (
+                            <span className="text-sm font-medium uppercase text-muted-foreground">{host.handle.charAt(0)}</span>
+                          ) : (
+                            <User className="h-4 w-4 text-muted-foreground" aria-hidden />
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                    <span className="min-w-0">
+                      <span className="block text-foreground">
+                        {session.host ? `Hosted by ${hostByline(session)}` : hostByline(session)}
+                      </span>
+                      {hostHandles.length > 0 && (
+                        <span className="block truncate text-sm text-muted-foreground">
+                          {hostHandles.map((h) => `@${h}`).join(' · ')}
                         </span>
-                        {hostHandles.length > 0 && (
-                          <span className="block truncate text-sm text-muted-foreground">
-                            {hostHandles.map((h) => `@${h}`).join(' · ')}
-                          </span>
-                        )}
-                      </span>
-                    </button>
+                      )}
+                    </span>
+                  </button>
 
-                    {showHostCard && (() => {
-                      const active = hosts.find((h) => h.key === showHostCard) || hosts[0]
-                      return (
-                        <>
-                          <div className="fixed inset-0 z-40 bg-foreground/40 md:hidden" onClick={() => setShowHostCard(null)} />
-                          <div className="fixed inset-x-4 bottom-[calc(env(safe-area-inset-bottom)+88px)] z-50 overflow-hidden rounded-xl border bg-card shadow-xl md:absolute md:inset-x-auto md:bottom-auto md:left-0 md:top-full md:mt-2 md:w-80">
-                            <Button
-                              variant="ghost"
-                              size="icon-sm"
-                              onClick={() => setShowHostCard(null)}
-                              className="absolute right-1 top-1 hidden md:inline-flex"
-                              aria-label="Close"
-                            >
-                              <X className="h-4 w-4" aria-hidden />
-                            </Button>
-                            {hosts.length > 1 && (
-                              <div className="flex border-b pr-10">
-                                {hosts.map((host) => (
-                                  <button
-                                    key={host.key}
-                                    type="button"
-                                    onClick={() => setShowHostCard(host.key)}
-                                    className={cn(
-                                      'flex-1 truncate px-3 py-2 text-sm transition-colors',
-                                      showHostCard === host.key ? 'border-b-2 border-primary font-medium' : 'text-muted-foreground hover:text-foreground'
-                                    )}
-                                  >
-                                    {host.display_name || (host.handle ? `@${host.handle}` : host.role)}
-                                  </button>
-                                ))}
-                              </div>
-                            )}
-                            <div className="p-4 pr-10">
-                              <div className="mb-3 flex items-start gap-3">
-                                <div className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-full bg-muted">
-                                  {active.avatar_url ? (
-                                    <img src={active.avatar_url} alt="" className="h-full w-full object-cover" />
-                                  ) : active.handle ? (
-                                    <span className="text-lg font-medium uppercase text-muted-foreground">{active.handle.charAt(0)}</span>
-                                  ) : (
-                                    <User className="h-6 w-6 text-muted-foreground" aria-hidden />
+                  {showHostCard && (() => {
+                    const active = hosts.find((h) => h.key === showHostCard) || hosts[0]
+                    return (
+                      <>
+                        <div className="fixed inset-0 z-50 bg-foreground/40 md:hidden" onClick={() => setShowHostCard(null)} />
+                        <div className="fixed inset-x-4 bottom-[calc(env(safe-area-inset-bottom)+88px)] z-[51] overflow-hidden rounded-xl border bg-card shadow-xl md:absolute md:inset-x-auto md:bottom-auto md:left-0 md:top-full md:mt-2 md:w-80">
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            onClick={() => setShowHostCard(null)}
+                            className="absolute right-1 top-1 hidden md:inline-flex"
+                            aria-label="Close"
+                          >
+                            <X className="h-4 w-4" aria-hidden />
+                          </Button>
+                          {hosts.length > 1 && (
+                            <div className="flex border-b pr-10">
+                              {hosts.map((host) => (
+                                <button
+                                  key={host.key}
+                                  type="button"
+                                  onClick={() => setShowHostCard(host.key)}
+                                  className={cn(
+                                    'flex-1 truncate px-3 py-2 text-sm transition-colors',
+                                    showHostCard === host.key ? 'border-b-2 border-primary font-medium' : 'text-muted-foreground hover:text-foreground'
                                   )}
-                                </div>
-                                <div className="min-w-0 flex-1">
-                                  <h4 className="truncate font-semibold">{active.display_name || (active.handle ? `@${active.handle}` : 'Member')}</h4>
-                                  {active.handle && <p className="truncate text-xs text-muted-foreground">@{active.handle}</p>}
-                                  {active.affiliation && <p className="truncate text-sm text-muted-foreground">{active.affiliation}</p>}
-                                </div>
-                              </div>
-                              <Badge variant="muted" className="mb-2">{active.role}</Badge>
-                              {active.bio && <p className="mb-1 line-clamp-3 text-sm text-muted-foreground">{active.bio}</p>}
-                              {/* The popover had no way out before (fact-finding, Profiles): the
-                                  name now leads to this gathering's profile page (design §3.2).
-                                  `did` reaches members only, so a signed-out reader sees no link. */}
-                              {active.did && (
-                                <p className="mt-2">
-                                  <Link
-                                    href={profileHref(event.slug, active.did)}
-                                    className="text-sm font-medium text-primary hover:underline"
-                                    onClick={() => setShowHostCard(null)}
-                                  >
-                                    View profile
-                                  </Link>
-                                </p>
-                              )}
+                                >
+                                  {host.display_name || (host.handle ? `@${host.handle}` : host.role)}
+                                </button>
+                              ))}
                             </div>
-                            <button
-                              type="button"
-                              onClick={() => setShowHostCard(null)}
-                              className="w-full border-t py-3 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted md:hidden"
-                            >
-                              Close
-                            </button>
+                          )}
+                          <div className="p-4 pr-10">
+                            <div className="mb-3 flex items-start gap-3">
+                              <div className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-full bg-muted">
+                                {active.avatar_url ? (
+                                  <img src={active.avatar_url} alt="" className="h-full w-full object-cover" />
+                                ) : active.handle ? (
+                                  <span className="text-lg font-medium uppercase text-muted-foreground">{active.handle.charAt(0)}</span>
+                                ) : (
+                                  <User className="h-6 w-6 text-muted-foreground" aria-hidden />
+                                )}
+                              </div>
+                              <div className="min-w-0 flex-1">
+                                <h4 className="truncate font-semibold">{active.display_name || (active.handle ? `@${active.handle}` : 'Member')}</h4>
+                                {active.handle && <p className="truncate text-xs text-muted-foreground">@{active.handle}</p>}
+                                {active.affiliation && <p className="truncate text-sm text-muted-foreground">{active.affiliation}</p>}
+                              </div>
+                            </div>
+                            <Badge variant="muted" className="mb-2">{active.role}</Badge>
+                            {active.bio && <p className="mb-1 line-clamp-3 text-sm text-muted-foreground">{active.bio}</p>}
+                            {/* The popover had no way out before (fact-finding, Profiles): the
+                                name now leads to this gathering's profile page (design §3.2).
+                                `did` reaches members only, so a signed-out reader sees no link. */}
+                            {active.did && (
+                              <p className="mt-2">
+                                <Link
+                                  href={profileHref(event.slug, active.did)}
+                                  className="text-sm font-medium text-primary hover:underline"
+                                  onClick={() => setShowHostCard(null)}
+                                >
+                                  View profile
+                                </Link>
+                              </p>
+                            )}
                           </div>
-                        </>
-                      )
-                    })()}
-                  </div>
-                )}
+                          <button
+                            type="button"
+                            onClick={() => setShowHostCard(null)}
+                            className="w-full border-t py-3 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted md:hidden"
+                          >
+                            Close
+                          </button>
+                        </div>
+                      </>
+                    )
+                  })()}
+                </div>
+              )}
 
-                {session.topic_tags.length > 0 && (
-                  <div className="mt-4 flex flex-wrap gap-2">
-                    {session.topic_tags.map((tag) => (
-                      <Badge key={tag} variant="muted">{tag}</Badge>
-                    ))}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
+              {session.topic_tags.length > 0 && (
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {session.topic_tags.map((tag) => (
+                    <Badge key={tag} variant="muted">{tag}</Badge>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
 
-            {/* Mobile mount point: the stack sits directly under the header card (design §5.3). */}
-            {!isDesktop && quickActions}
+          {/* The one stack: under the header card here, column three on a desktop. */}
+          <div className="lg:col-start-3 lg:row-start-1 lg:row-span-2 lg:self-start">{quickActions}</div>
 
+          <div className="space-y-6 lg:col-span-2 lg:col-start-1 lg:row-start-2 lg:row-span-2">
             {(session.venue || session.time_slot || session.is_self_hosted) && (
               <Card className="border-primary/20 bg-primary/5">
                 <CardContent className="p-4 pt-4 sm:p-6 sm:pt-6">
@@ -727,7 +712,7 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
             {sessionHasStarted && <SessionFeedback sessionId={sessionId} eventSlug={event.slug} />}
           </div>
 
-          <div className="space-y-6">
+          <div className="space-y-6 lg:col-start-3 lg:row-start-3 lg:self-start">
             {votingOpen && session.status !== 'rejected' && session.status !== 'pending' && (
               <Card>
                 <CardHeader className="pb-3">
@@ -753,9 +738,6 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
                 </CardContent>
               </Card>
             )}
-
-            {/* Desktop mount point: the same stack, in the sidebar column (design §5.3). */}
-            {isDesktop && quickActions}
 
             <SessionResources sessionId={sessionId} eventSlug={event.slug} canManage={viewer.can_manage} />
             <TranscriptPanel sessionId={sessionId} eventSlug={event.slug} sessionTitle={session.title} canManage={viewer.can_manage} />

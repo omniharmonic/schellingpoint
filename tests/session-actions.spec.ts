@@ -195,6 +195,25 @@ test.describe('session page: one stack of quick actions', () => {
     })
   }
 
+  test('the server renders the stack where a phone wants it, before any JavaScript runs', async ({ request }) => {
+    const res = await request.get(`${base}/e/${gathering.slug}/sessions/${sessionId}`, {
+      headers: { cookie: attendee.cookie },
+    })
+    expect(res.status()).toBe(200)
+    const html = await res.text()
+    // The <h1> is inside the header card; the title alone also appears in <head>, which proves nothing.
+    const title = html.indexOf('<h1')
+    const stack = html.indexOf('data-testid="quick-actions"')
+    const address = html.indexOf('data-testid="session-address-link"')
+    expect(stack, 'the stack is in the server render').toBeGreaterThan(-1)
+    expect(address, 'the location card is in the server render').toBeGreaterThan(-1)
+    // The phone's placement, in the markup itself: after the header card that carries the title and
+    // before the location card. The phone is the most-visited viewport, so nothing moves on it once
+    // the page hydrates — where the stack goes on a desktop is CSS, not a second render.
+    expect(stack).toBeGreaterThan(title)
+    expect(stack).toBeLessThan(address)
+  })
+
   test('the host sees the chat link in the stack, and there is no chat card', async ({ browser }) => {
     const { page, errors, close } = await pageFor(browser, host, PHONE)
     try {

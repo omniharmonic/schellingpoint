@@ -168,7 +168,7 @@ function NextForYou({
             className="mt-3 inline-flex items-center gap-1.5 text-sm font-medium text-primary underline-offset-4 hover:underline"
           >
             <Navigation className="h-4 w-4" aria-hidden />
-            Get directions
+            {next.coarseLocation ? 'Directions to the area' : 'Get directions'}
           </a>
         )}
       </CardContent>

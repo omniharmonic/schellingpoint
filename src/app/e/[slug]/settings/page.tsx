@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button'
 import { ConfirmInline } from '@/components/ui/confirm-inline'
 import { DashboardLayout } from '@/components/DashboardLayout'
 import { PageHeader } from '@/components/PageHeader'
+import { useAccountModal } from '@/components/WorkspaceUserMenu'
 import { useEvent, useEventRole } from '@/contexts/EventContext'
 import { useAuth } from '@/hooks/useAuth'
 import { apiFetch, ApiError } from '@/lib/api/client'
@@ -177,6 +178,39 @@ function CodeOfConductCard() {
 }
 
 /**
+ * The Account row on this page (spec §3 "Account").
+ *
+ * This page is the one place the old `?settings=1` link could not work: it points at the page you
+ * are already on, so nothing navigates and the modal never opened. Inside the shell's
+ * `AccountModalProvider` it is a button that opens that one dialog; without a provider it falls
+ * back to the link, which still works from anywhere else.
+ */
+function AccountCard({ base }: { base: string }) {
+  const account = useAccountModal()
+  const body = (
+    <CardContent className="flex items-center gap-4 p-4 sm:p-6">
+      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary"><UserRound className="h-5 w-5" aria-hidden="true" /></span>
+      <span className="min-w-0 flex-1 text-left">
+        <span className="block font-medium">Account</span>
+        <span className="mt-0.5 block text-sm text-muted-foreground">Your profile, network identity and messaging handle.</span>
+      </span>
+      <ChevronRight className="h-5 w-5 shrink-0 text-muted-foreground transition-colors group-hover:text-foreground" aria-hidden="true" />
+    </CardContent>
+  )
+  return <Card interactive className="group">
+    {account ? (
+      <button type="button" onClick={account.open} className="block w-full rounded-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+        {body}
+      </button>
+    ) : (
+      <Link href={`${base}/settings?settings=1`} className="block rounded-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+        {body}
+      </Link>
+    )}
+  </Card>
+}
+
+/**
  * `/e/[slug]/settings`: the participant's settings for this gathering (spec §3 "Account").
  */
 export default function ParticipantSettingsPage() {
@@ -200,18 +234,7 @@ export default function ParticipantSettingsPage() {
             </CardContent>
           </Link>
         </Card>
-        <Card interactive className="group">
-          <Link href={`${base}/settings?settings=1`} className="block rounded-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-            <CardContent className="flex items-center gap-4 p-4 sm:p-6">
-              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary"><UserRound className="h-5 w-5" aria-hidden="true" /></span>
-              <span className="min-w-0 flex-1">
-                <span className="block font-medium">Account</span>
-                <span className="mt-0.5 block text-sm text-muted-foreground">Your profile, network identity and messaging handle.</span>
-              </span>
-              <ChevronRight className="h-5 w-5 shrink-0 text-muted-foreground transition-colors group-hover:text-foreground" aria-hidden="true" />
-            </CardContent>
-          </Link>
-        </Card>
+        <AccountCard base={base} />
         {user?.handle ? <FeedMentionsCard slug={event.slug} eventName={event.name} handle={user.handle} /> : null}
         <CodeOfConductCard />
         <LeaveGatheringCard eventName={event.name} />

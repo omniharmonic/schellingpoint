@@ -46,8 +46,12 @@ export interface ScheduleData {
   loadError: string | null
   actionError: string | null
   clearActionError: () => void
-  /** Flips the favourite; on the saved tab the row leaves the list. Never throws. */
-  toggleFavorite: (sessionId: string) => Promise<{ saved: boolean } | null>
+  /**
+   * Saves or un-saves a session. `saved` is the state being asked for, not a flip of whatever this
+   * closure last saw, so the toast's Undo can ask for `true` and get it. On the saved tab an
+   * un-save takes the row out of the list. Never throws.
+   */
+  toggleFavorite: (sessionId: string, saved: boolean) => Promise<{ saved: boolean } | null>
 }
 
 const QUERY: Record<ScheduleViewMode, string> = {
@@ -96,9 +100,7 @@ export function useSchedule(eventSlug: string, view: ScheduleViewMode, enabled: 
   }, [eventSlug, view, enabled])
 
   const toggleFavorite = React.useCallback(
-    async (sessionId: string) => {
-      const wasSaved = favoriteIds.has(sessionId)
-      const next = !wasSaved
+    async (sessionId: string, saved: boolean) => {
       const row = sessions.find((s) => s.id === sessionId) ?? removed.current.get(sessionId) ?? null
       setActionError(null)
       setTogglingIds((prev) => new Set(prev).add(sessionId))
@@ -109,10 +111,10 @@ export function useSchedule(eventSlug: string, view: ScheduleViewMode, enabled: 
           else set.delete(sessionId)
           return set
         })
-      flip(next)
+      flip(saved)
       // On the saved tab the list *is* the favourites, so an un-save removes the row.
       if (view === 'mine') {
-        if (next) {
+        if (saved) {
           if (row) setSessions((prev) => (prev.some((s) => s.id === sessionId) ? prev : [...prev, row]))
         } else {
           if (row) removed.current.set(sessionId, row)
@@ -120,12 +122,12 @@ export function useSchedule(eventSlug: string, view: ScheduleViewMode, enabled: 
         }
       }
       try {
-        await setFavorite(eventSlug, sessionId, next)
-        return { saved: next }
+        await setFavorite(eventSlug, sessionId, saved)
+        return { saved }
       } catch (err) {
-        flip(wasSaved)
+        flip(!saved)
         if (view === 'mine') {
-          if (next) setSessions((prev) => prev.filter((s) => s.id !== sessionId))
+          if (saved) setSessions((prev) => prev.filter((s) => s.id !== sessionId))
           else if (row) setSessions((prev) => (prev.some((s) => s.id === sessionId) ? prev : [...prev, row]))
         }
         setActionError(err instanceof Error ? err.message : 'Your saved schedule could not be updated.')
@@ -138,7 +140,7 @@ export function useSchedule(eventSlug: string, view: ScheduleViewMode, enabled: 
         })
       }
     },
-    [eventSlug, favoriteIds, sessions, view],
+    [eventSlug, sessions, view],
   )
 
   return {

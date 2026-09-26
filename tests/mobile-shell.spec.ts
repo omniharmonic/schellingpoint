@@ -272,6 +272,53 @@ test.describe('mobile shell: floating bar, More sheet, context row', () => {
     }
   })
 
+  test('the Account card on Settings opens the modal from the page it is already on', async ({ browser }) => {
+    const { page, errors, close } = await shell(browser, PHONE)
+    try {
+      await openWorkspace(page, `/e/${gathering.slug}/settings`)
+      // `?settings=1` here points at this very page, so the card is a button on the shell's own
+      // Account modal rather than a link that navigates nowhere.
+      const card = page.getByRole('button', { name: /^Account Your profile/ })
+      await expect(card).toBeVisible()
+
+      // The card is a button, so the tap needs React to have hydrated; against `next dev` a cold
+      // route can still be hydrating when the markup is already there. Retry the tap rather than
+      // race it.
+      const account = page.getByRole('dialog')
+      await expect(async () => {
+        await card.click()
+        await expect(account.getByRole('heading', { name: 'Account' })).toBeVisible({ timeout: 2000 })
+      }).toPass({ timeout: 30_000 })
+      expect(errors).toEqual([])
+    } finally {
+      await close()
+    }
+  })
+
+  // ── toasts and the bar ────────────────────────────────────────────────────────────────────
+
+  test('a toast sits above the floating bar, so a tab still takes the tap', async ({ browser }) => {
+    const { page, errors, close } = await shell(browser, PHONE)
+    try {
+      await openWorkspace(page, `/e/${gathering.slug}/sessions/${sessionId}`)
+      await page.getByRole('button', { name: 'Save to my schedule' }).click()
+
+      const note = page.getByRole('region', { name: 'Notifications' }).getByRole('status')
+      await expect(note).toContainText('Saved to my schedule')
+      // Above the bar, not over it.
+      const toastBox = (await note.boundingBox())!
+      const barBox = (await bar(page).boundingBox())!
+      expect(toastBox.y + toastBox.height).toBeLessThanOrEqual(barBox.y)
+
+      // And the tap really lands: Playwright refuses a click another element would intercept.
+      await bar(page).getByRole('link', { name: 'Schedule' }).click()
+      await expect(page).toHaveURL(new RegExp(`/e/${gathering.slug}/schedule`))
+      expect(errors).toEqual([])
+    } finally {
+      await close()
+    }
+  })
+
   // ── the context row ───────────────────────────────────────────────────────────────────────
 
   test('the context row says where back goes on a session page, and where you are elsewhere', async ({ browser }) => {

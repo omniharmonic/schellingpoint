@@ -60,7 +60,7 @@ export function ScheduleView({ view }: { view: ScheduleViewMode }) {
       return
     }
     const wasSaved = data.favoriteIds.has(sessionId)
-    const result = await data.toggleFavorite(sessionId)
+    const result = await data.toggleFavorite(sessionId, !wasSaved)
     if (!result) {
       toast({
         title: 'Your saved schedule could not be updated',
@@ -73,7 +73,7 @@ export function ScheduleView({ view }: { view: ScheduleViewMode }) {
       title: result.saved ? 'Saved to my schedule' : 'Removed from my schedule',
       variant: 'success',
       action: wasSaved
-        ? { label: 'Undo', onClick: () => void data.toggleFavorite(sessionId) }
+        ? { label: 'Undo', onClick: () => void data.toggleFavorite(sessionId, true) }
         : view === 'program'
           ? { label: 'View my schedule', onClick: () => router.push(`/e/${event.slug}/schedule?view=mine`) }
           : undefined,

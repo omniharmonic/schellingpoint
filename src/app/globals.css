@@ -139,6 +139,8 @@
   .mobile-bar { bottom: calc(env(safe-area-inset-bottom) + var(--mobile-bar-inset)); left: var(--mobile-bar-inset); right: var(--mobile-bar-inset); }
   /* Anything else pinned to the bottom on mobile (the map's place sheet) sits above the bar. */
   .above-mobile-bar { bottom: calc(env(safe-area-inset-bottom) + var(--mobile-bar-inset) + var(--mobile-bar-h) + 8px); }
+  /* The toast viewport is one of those: a toast over the bar would eat taps meant for a tab. */
+  .toast-viewport { bottom: calc(env(safe-area-inset-bottom) + var(--mobile-bar-inset) + var(--mobile-bar-h) + 8px); }
   .mono { font-family: ui-monospace, monospace; }
   .section-rule { @apply flex items-center gap-4 text-sm font-semibold text-foreground; }
   .section-rule::after { content: ''; @apply flex-1 h-px bg-border; }
@@ -292,6 +294,7 @@
   /* No floating bar on desktop, so nothing has to clear it. */
   .pb-safe { padding-bottom: 0; }
   .above-mobile-bar { bottom: auto; }
+  .toast-viewport { bottom: 1rem; }
 }
 @media (max-width: 1023px) {
   .story-chapter { min-height: auto; padding-block: 2rem; }

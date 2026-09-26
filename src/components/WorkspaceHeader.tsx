@@ -20,19 +20,14 @@ export interface WorkspaceBack {
  *
  * On desktop it is unchanged: the "{gathering} / {page}" breadcrumb, the date, and the same
  * gathering link, at the `--workspace-header-h` height the sticky offsets are measured against.
- *
- * `right` is a slot beside the gathering link for page-level actions that belong in the row
- * rather than in the content (the session page's save and share, design §5.1).
  */
 export function WorkspaceHeader({
   label,
   back,
-  right,
 }: {
   label: string
   /** A back link shown instead of the page title on mobile. */
   back?: WorkspaceBack | null
-  right?: React.ReactNode
 }) {
   const event = useEvent()
   return (
@@ -59,7 +54,6 @@ export function WorkspaceHeader({
         <span className="truncate font-medium" aria-current="page">{label}</span>
       </nav>
       <div className="flex shrink-0 items-center gap-1 md:gap-6">
-        {right}
         <span className="hidden xl:flex items-center gap-2 text-xs text-muted-foreground">
           <CalendarDays className="h-4 w-4" aria-hidden="true" />
           {formatCalendarDate(event.startDate, { month: 'short', day: 'numeric', year: 'numeric' })}

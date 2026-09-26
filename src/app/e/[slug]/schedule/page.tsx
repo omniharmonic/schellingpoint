@@ -27,7 +27,9 @@ function SchedulePageBody() {
   const fromUrl: ScheduleViewMode = searchParams.get('view') === 'mine' ? 'mine' : 'program'
   const [view, setView] = React.useState<ScheduleViewMode>(fromUrl)
 
-  // Back/forward and a link into the other tab both arrive as a new `?view=`.
+  // A link or a redirect into a tab arrives as a new `?view=`, so follow it. Switching tabs by
+  // hand goes the other way and *replaces* the URL (`replaceState` in `changeView`), so tapping
+  // between the two never piles up history entries for Back to walk out of.
   React.useEffect(() => {
     setView(fromUrl)
   }, [fromUrl])

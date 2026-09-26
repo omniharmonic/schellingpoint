@@ -121,7 +121,11 @@ function ToastItem({ t }: { t: ToastRecord }) {
   )
 }
 
-/** Render once per page shell. Positioned bottom-right on desktop, bottom-center on phones. */
+/**
+ * Render once per page shell. Bottom-right on desktop, bottom-centre on phones — and on a phone it
+ * sits *above* the floating tab bar (`.toast-viewport` in `globals.css`, the same tokens the bar
+ * itself is placed with), because a toast that covers the bar swallows taps meant for a tab.
+ */
 function Toaster({ className }: { className?: string }) {
   const [items, setItems] = React.useState<ToastRecord[]>(toasts)
   React.useEffect(() => {
@@ -140,7 +144,7 @@ function Toaster({ className }: { className?: string }) {
       role="region"
       aria-label="Notifications"
       className={cn(
-        'pointer-events-none fixed inset-x-4 bottom-4 z-[60] flex flex-col gap-2 sm:inset-x-auto sm:right-6 sm:bottom-6 sm:w-96',
+        'toast-viewport pointer-events-none fixed inset-x-4 z-[60] flex flex-col gap-2 sm:inset-x-auto sm:right-6 sm:w-96',
         className
       )}
     >

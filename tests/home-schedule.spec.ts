@@ -450,6 +450,36 @@ test.describe('Home and Schedule against a real gathering', () => {
     }
   })
 
+  test('Undo after an un-save saves it again, and the API agrees', async ({ browser }) => {
+    const { page, errors, close } = await phone(browser, member)
+    try {
+      await page.goto(`/e/${gathering.slug}/schedule?view=mine`)
+      const view = page.getByTestId('schedule-view')
+      await expect(view).toHaveAttribute('data-view', 'mine', { timeout: 30_000 })
+      const title = `Home later ${gathering.slug}`
+      await expect(view).toContainText(title)
+
+      // Un-saving takes the row out of the saved tab and offers Undo.
+      await view.getByRole('button', { name: `Remove ${title} from my schedule` }).click()
+      await expect(view).not.toContainText(title)
+      const note = page.getByRole('region', { name: 'Notifications' }).getByRole('status')
+      await expect(note).toContainText('Removed from my schedule')
+
+      // Undo means "save it again", not "toggle whatever the button last saw".
+      await note.getByRole('button', { name: 'Undo' }).click()
+      await expect(view).toContainText(title)
+      await expect(view.getByRole('button', { name: `Remove ${title} from my schedule` })).toHaveCount(1)
+
+      const saved = await page.request.get(`/api/v1/events/${gathering.slug}/sessions?favorites=1`)
+      expect(saved.status()).toBe(200)
+      const body = (await saved.json()) as { sessions: Array<{ id: string; is_favorite: boolean }> }
+      expect(body.sessions.map((s) => s.id)).toContain(S.later)
+      expect(errors).toEqual([])
+    } finally {
+      await close()
+    }
+  })
+
   test('a signed-out viewer gets the sign-in prompt where the saved list would be', async ({ browser }) => {
     const context = await browser.newContext({ baseURL: base, viewport: PHONE })
     try {

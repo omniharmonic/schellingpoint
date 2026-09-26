@@ -31,6 +31,12 @@ export interface NextUpSession {
   directionsQuery: string | null
   geo: { lat: number; lng: number } | null
   isSelfHosted: boolean
+  /**
+   * True when the only place this link can point at is the coarse ≈1 km point — a self-hosted
+   * session with no written address, seen by someone who is not entitled to the exact one. Home
+   * says "Directions to the area" then, because the pin is a neighbourhood, not a door.
+   */
+  coarseLocation: boolean
 }
 
 export interface NextUpResponse {
@@ -66,6 +72,8 @@ function serialize(session: SessionView): NextUpSession | null {
         : null
       : (session.venue?.geo ?? null),
     isSelfHosted: session.is_self_hosted,
+    coarseLocation:
+      session.is_self_hosted && !session.custom_location && !!session.location_geo && !session.location_geo.exact,
   }
 }
 

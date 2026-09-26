@@ -23,7 +23,7 @@
 
 import * as React from 'react'
 import Link from 'next/link'
-import { usePathname, useRouter } from 'next/navigation'
+import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { Bell, ChevronDown, ExternalLink, LogOut, UserRound } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
@@ -74,17 +74,21 @@ export function AccountModalProvider({
 /**
  * `?settings=1` on any page inside a workspace opens the Account modal, then leaves the URL clean.
  * `enabled` is false for a menu that delegates to a provider, so the link is claimed exactly once.
+ *
+ * It watches `useSearchParams()`, not just the mount: a link that only adds `?settings=1` to the
+ * page you are already on is a client-side navigation, and reading `window.location` once would
+ * miss it (the Account card on `/e/[slug]/settings` did nothing at all).
  */
 function useSettingsDeepLink(enabled: boolean, open: (value: boolean) => void) {
+  const searchParams = useSearchParams()
+  const wanted = searchParams?.get('settings') === '1'
   React.useEffect(() => {
-    if (!enabled || typeof window === 'undefined') return
+    if (!enabled || !wanted || typeof window === 'undefined') return
+    open(true)
     const url = new URL(window.location.href)
-    if (url.searchParams.get('settings') === '1') {
-      open(true)
-      url.searchParams.delete('settings')
-      window.history.replaceState(null, '', url.pathname + (url.search || '') + url.hash)
-    }
-  }, [enabled, open])
+    url.searchParams.delete('settings')
+    window.history.replaceState(null, '', url.pathname + (url.search || '') + url.hash)
+  }, [enabled, open, wanted])
 }
 
 /* ──────────────────────────────── the menu ──────────────────────────────── */
