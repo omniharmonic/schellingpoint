@@ -14,6 +14,9 @@ build/
 # Production
 dist/
 
+# MapLibre's worker, copied out of node_modules by `npm run maplibre:worker` (predev/prebuild)
+/public/maplibre/
+
 # Misc
 .DS_Store
 *.pem

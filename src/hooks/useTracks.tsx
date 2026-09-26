@@ -1,7 +1,7 @@
 'use client'
 
 import * as React from 'react'
-import { apiFetch } from '@/lib/api/client'
+import { apiFetch, listFrom } from '@/lib/api/client'
 
 export interface Track {
   id: string
@@ -35,7 +35,7 @@ export function useTracks(eventSlug: string | null | undefined): UseTracksResult
     apiFetch<{ tracks: Track[] }>(`/api/v1/events/${encodeURIComponent(eventSlug)}/tracks`)
       .then((data) => {
         if (!mounted) return
-        setTracks(data.tracks)
+        setTracks(listFrom<Track>(data, 'tracks'))
         setError(null)
       })
       .catch((err) => {

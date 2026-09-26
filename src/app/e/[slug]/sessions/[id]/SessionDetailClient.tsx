@@ -491,10 +491,11 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
                         </div>
                         <p className="text-lg font-medium">{session.venue.name}</p>
                         {session.venue.capacity && <p className="text-sm text-muted-foreground">Capacity: {session.venue.capacity} people</p>}
-                        {session.venue.address && (
+                        {session.venue.directions_query && <p className="text-sm text-muted-foreground">{session.venue.directions_query}</p>}
+                        {(session.venue.directions_query || session.venue.address) && (
                           <Button asChild variant="outline" size="sm" className="mt-2">
                             <a
-                              href={directionsHref({ lat: session.venue.geo?.lat, lng: session.venue.geo?.lng, query: session.venue.address }) ?? '#'}
+                              href={directionsHref({ lat: session.venue.geo?.lat, lng: session.venue.geo?.lng, query: session.venue.directions_query ?? session.venue.address }) ?? '#'}
                               target="_blank"
                               rel="noopener noreferrer"
                             >

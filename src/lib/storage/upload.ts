@@ -43,8 +43,24 @@ export async function uploadImage(file: File, options: UploadOptions = {}): Prom
   const validationError = validateFile(file, Math.min(options.maxSize ?? serverCap, serverCap));
   if (validationError) return { success: false, error: validationError };
 
+  // Read the bytes here rather than handing `fetch` the File.
+  //
+  // A File is a handle, not data: a photo still in iCloud, a file moved or re-synced since the
+  // picker returned it, or an iOS HEIC the browser transcodes lazily can report one size and then
+  // deliver fewer bytes. `fetch` has already sent that size as Content-Length, so the multipart
+  // body arrives truncated and the server can only say "that was not a multipart body" — the
+  // upload looks broken for a reason nobody can act on. Reading first turns an unreadable file
+  // into a plain message, and guarantees the request body matches its declared length.
+  let bytes: ArrayBuffer;
+  try {
+    bytes = await file.arrayBuffer();
+  } catch {
+    return { success: false, error: 'That image could not be read. If it is stored in the cloud, download it first and try again.' };
+  }
+  if (bytes.byteLength === 0) return { success: false, error: 'That file is empty.' };
+
   const body = new FormData();
-  body.append('file', file);
+  body.append('file', new Blob([bytes], { type: file.type || 'application/octet-stream' }), file.name || 'upload');
   if (options.event) body.append('event', options.event);
   if (options.purpose) body.append('purpose', options.purpose);
 
@@ -70,4 +86,17 @@ export function uploadEventLogo(file: File, event?: string): Promise<UploadResul
 /** Upload an event banner (pass the slug once the gathering exists). */
 export function uploadEventBanner(file: File, event?: string): Promise<UploadResult> {
   return uploadImage(file, { event });
+}
+
+/**
+ * Upload the signed-in account's own profile photo (≤ 2 MB) and return its URL. Throws an Error
+ * with a message fit to show — the profile editors expect that shape.
+ *
+ * Deliberately the same path as every other image: a multipart body must never travel through the
+ * JSON client, which sets `Content-Type` and would leave the server unable to parse the parts.
+ */
+export async function uploadAvatar(file: File): Promise<string> {
+  const result = await uploadImage(file, { purpose: 'avatar' });
+  if (!result.success || !result.url) throw new Error(result.error || 'Upload failed.');
+  return result.url;
 }

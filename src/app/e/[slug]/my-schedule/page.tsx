@@ -19,7 +19,7 @@ import { useVoting } from '@/hooks/useVoting'
 import { useEvent } from '@/contexts/EventContext'
 import { useTracks } from '@/hooks/useTracks'
 import { setFavorite } from '@/components/SessionCard'
-import { apiFetch } from '@/lib/api/client'
+import { apiFetch, listFrom } from '@/lib/api/client'
 import { EN_DASH, plural } from '@/lib/format'
 import { formatLabel } from '@/lib/sessions/constants'
 import { hostByline } from '@/app/api/v1/sessions/_lib/byline'
@@ -144,7 +144,7 @@ function HappeningNow({ eventSlug, timeZone, saved }: { eventSlug: string; timeZ
     if (!open) return
     let mounted = true
     apiFetch<{ sessions: SessionView[] }>(`/api/v1/events/${encodeURIComponent(eventSlug)}/sessions?timed=1&sort=time`)
-      .then((data) => { if (mounted) setTimed(data.sessions) })
+      .then((data) => { if (mounted) setTimed(listFrom<SessionView>(data, 'sessions')) })
       .catch(() => { if (mounted) setTimed([]) })
     return () => { mounted = false }
   }, [open, eventSlug, attendance.votableNow.size])
@@ -224,7 +224,7 @@ export default function MySchedulePage() {
     let mounted = true
     apiFetch<{ sessions: SessionView[] }>(`/api/v1/events/${encodeURIComponent(event.slug)}/sessions?favorites=1&sort=time`)
       .then((data) => {
-        if (mounted) setFavorites(data.sessions.map(withWhen))
+        if (mounted) setFavorites(listFrom<SessionView>(data, 'sessions').map(withWhen))
       })
       .catch((err) => {
         if (mounted) setSaveError(err instanceof Error ? err.message : 'Your saved sessions could not be loaded.')

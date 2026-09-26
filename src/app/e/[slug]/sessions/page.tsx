@@ -19,7 +19,7 @@ import { useAuth } from '@/hooks/useAuth'
 import { useTracks } from '@/hooks/useTracks'
 import { useEvent } from '@/contexts/EventContext'
 import { getEventDays, formatCalendarDate } from '@/lib/events/dates'
-import { apiFetch } from '@/lib/api/client'
+import { apiFetch, listFrom } from '@/lib/api/client'
 import { sessionStatusBadge } from '@/lib/labels'
 import { EN_DASH } from '@/lib/format'
 import { formatLabel, SESSION_FORMATS } from '@/lib/sessions/constants'
@@ -131,10 +131,11 @@ export default function EventSessionsPage() {
     apiFetch<{ sessions: SessionView[] }>(`/api/v1/events/${encodeURIComponent(event.slug)}/sessions?${query}`)
       .then((data) => {
         if (!mounted) return
-        setSessions(data.sessions)
+        const list = listFrom<SessionView>(data, 'sessions')
+        setSessions(list)
         setFavorites((prev) => {
           const next = new Set(prev)
-          for (const s of data.sessions) {
+          for (const s of list) {
             if (s.is_favorite) next.add(s.id)
             else next.delete(s.id)
           }

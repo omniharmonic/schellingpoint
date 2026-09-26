@@ -11,6 +11,7 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { apiFetch, ApiError } from '@/lib/api/client'
 import { plural } from '@/lib/format'
+import { addressLine } from '@/lib/geo/coarse'
 import type { AdminVenue } from '@/components/admin/types'
 import { GatheringMap, type MapHandle, type MapPin as Pin, type MapView } from './GatheringMap'
 
@@ -27,8 +28,20 @@ export interface VenueMapEditorProps {
   seedAddress?: string | null
 }
 
+/** A room's address in parts, as the geocode route wants it. */
+function venueAddressParts(v: AdminVenue) {
+  return { street: v.address, locality: v.locality, region: v.region, postal_code: v.postal_code, country: v.country }
+}
+
+/** The same address on one line: what is recorded as `geocoded_from`, and what a person reads. */
 function venueAddress(v: AdminVenue): string {
-  return [v.address, v.locality, v.region, v.postal_code, v.country].filter((s) => s && s.trim()).join(', ')
+  return addressLine({
+    street: v.address,
+    locality: v.locality,
+    region: v.region,
+    postalCode: v.postal_code,
+    country: v.country,
+  })
 }
 
 export function VenueMapEditor({ eventSlug, venues, view, canManage, onSaveView, onPlaceVenue, seedAddress }: VenueMapEditorProps) {
@@ -48,10 +61,12 @@ export function VenueMapEditor({ eventSlug, venues, view, canManage, onSaveView,
     [placed, canManage],
   )
 
-  const geocode = React.useCallback(async (query: string) => {
+  // `body` is either `{ query }` (free text) or `{ address }` (a room's parts, which constrain
+  // the match to the right city instead of leaving it to the geocoder's ranking).
+  const geocode = React.useCallback(async (body: Record<string, unknown>) => {
     const res = await apiFetch<{ result: { lat: number; lng: number; label: string } | null }>(`/api/v1/events/${encodeURIComponent(eventSlug)}/admin/geocode`, {
       method: 'POST',
-      json: { query },
+      json: body,
     })
     return res.result
   }, [eventSlug])
@@ -61,7 +76,7 @@ export function VenueMapEditor({ eventSlug, venues, view, canManage, onSaveView,
   React.useEffect(() => {
     if (seededRef.current || view || placed.length || !seedAddress || !canManage) return
     seededRef.current = true
-    geocode(seedAddress)
+    geocode({ query: seedAddress })
       .then((r) => {
         if (r) setSeededView({ center: [r.lng, r.lat], zoom: 13 })
       })
@@ -78,7 +93,7 @@ export function VenueMapEditor({ eventSlug, venues, view, canManage, onSaveView,
     setBusy(venue.id)
     setError(null)
     try {
-      const r = await geocode(query)
+      const r = await geocode({ address: venueAddressParts(venue) })
       if (!r) {
         setError(`No match for “${venue.name}”’s address. Click the map to place it by hand.`)
         setPlacing(venue.id)

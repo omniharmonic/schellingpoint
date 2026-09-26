@@ -45,6 +45,7 @@ import { WarningBox } from '@/components/WarningBox'
 import { useAuth } from '@/hooks/useAuth'
 import { apiFetch, ApiError } from '@/lib/api/client'
 import { cn } from '@/lib/utils'
+import { uploadAvatar } from '@/lib/storage/upload'
 
 /**
  * Account: the one place a person edits their profile, identity and notification settings
@@ -120,29 +121,11 @@ export const PROFILE_INPUT_LIMITS = {
   interestLength: 40,
 } as const
 
-const AVATAR_MAX_BYTES = 2 * 1024 * 1024
-
 /**
- * Upload a profile photo through the app's upload endpoint (package A: `POST /api/uploads`,
- * multipart, returns `{ url }`). Throws an Error with a message fit to show.
+ * Profile photos go through the one image-upload path (`src/lib/storage/upload.ts`), re-exported
+ * here because the profile editors import it from this module.
  */
-export async function uploadAvatar(file: File): Promise<string> {
-  if (!file.type.startsWith('image/')) throw new Error('Choose an image file.')
-  if (file.size > AVATAR_MAX_BYTES) throw new Error('That image is larger than 2 MB.')
-  const form = new FormData()
-  form.append('file', file)
-  form.append('purpose', 'avatar')
-  try {
-    const res = await apiFetch<{ url: string }>('/api/uploads', { method: 'POST', body: form })
-    if (!res?.url) throw new Error('Upload did not return a URL.')
-    return res.url
-  } catch (err) {
-    if (err instanceof ApiError && (err.status === 404 || err.status === 405)) {
-      throw new Error('Photo uploads are not available yet.')
-    }
-    throw err instanceof Error ? err : new Error('Upload failed.')
-  }
-}
+export { uploadAvatar }
 
 /** Interest suggestions for the profile editors: GET /api/me/profile/interests. */
 export function useInterestSuggestions(enabled: boolean, eventSlug: string | null): string[] {

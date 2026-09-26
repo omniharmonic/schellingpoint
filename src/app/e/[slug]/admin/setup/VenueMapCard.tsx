@@ -59,7 +59,9 @@ export function VenueMapCard({ venues, base, canManage, onChanged }: VenueMapCar
           canManage={canManage}
           onSaveView={saveView}
           onPlaceVenue={placeVenue}
-          seedAddress={[event.locationName, event.locationAddress].filter(Boolean).join(', ') || null}
+          // Only when there is a real address: a venue *name* on its own ("Test Hall") geocodes to
+          // whichever place in the world shares it, and the map opens over the wrong continent.
+          seedAddress={event.locationAddress ? [event.locationName, event.locationAddress].filter(Boolean).join(', ') : null}
         />
       </CardContent>
     </Card>

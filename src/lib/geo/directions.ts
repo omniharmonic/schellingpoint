@@ -2,11 +2,19 @@
  * A generic "Get directions" link (spec §8.4): `geo:` on Android/iOS, where the OS offers the
  * installed maps app, Google Maps directions elsewhere. Browser-only; no data leaves the device
  * except to the maps provider the person chooses.
+ *
+ * The written address wins over coordinates whenever there is one. A room's pin is only ever as
+ * good as the lookup that placed it — a street line geocoded without its city lands in the wrong
+ * town — whereas the address is what the organizer actually typed, and every maps app resolves it
+ * against the rider's own context. Coordinates are the fallback, for a self-hosted session whose
+ * host dropped a pin and wrote no address.
  */
+import { isLatLng } from './coarse'
+
 export interface DirectionsTarget {
   lat?: number | null
   lng?: number | null
-  /** Free-text fallback (an address) when there is no point. */
+  /** The whole address, as written: street, city, region, postal code. Preferred over the point. */
   query?: string | null
 }
 
@@ -16,16 +24,16 @@ function isMobile(): boolean {
 }
 
 export function directionsHref(target: DirectionsTarget): string | null {
-  const hasPoint = typeof target.lat === 'number' && typeof target.lng === 'number'
-  const query = target.query?.trim() || null
+  const hasPoint = isLatLng(target.lat, target.lng)
+  const query = target.query?.trim().replace(/\s+/g, ' ') || null
   if (!hasPoint && !query) return null
   if (isMobile()) {
-    if (hasPoint) {
-      const label = query ? `(${encodeURIComponent(query)})` : ''
-      return `geo:${target.lat},${target.lng}?q=${target.lat},${target.lng}${label}`
-    }
-    return `geo:0,0?q=${encodeURIComponent(query!)}`
+    // `geo:<point>?q=<address>`: the address is what the maps app searches for; the point is the
+    // coordinate to fall back on, and 0,0 when there is none.
+    const base = hasPoint ? `${target.lat},${target.lng}` : '0,0'
+    if (query) return `geo:${base}?q=${encodeURIComponent(query)}`
+    return `geo:${base}?q=${base}`
   }
-  const destination = hasPoint ? `${target.lat},${target.lng}` : encodeURIComponent(query!)
+  const destination = query ? encodeURIComponent(query) : `${target.lat},${target.lng}`
   return `https://www.google.com/maps/dir/?api=1&destination=${destination}`
 }

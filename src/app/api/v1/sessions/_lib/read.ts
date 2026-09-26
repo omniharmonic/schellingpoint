@@ -1,5 +1,5 @@
 import 'server-only'
-import { isLatLng, parseLatLng, roundCoarse } from '@/lib/geo/coarse'
+import { addressLine, isLatLng, parseLatLng, roundCoarse } from '@/lib/geo/coarse'
 /**
  * Session reads for the app (work package B): one query shape for the list, the detail
  * page, my-schedule and the schedule, serialized through one R9 filter.
@@ -97,6 +97,9 @@ interface SessionRow {
   venue_address: string | null
   venue_is_private_residence: boolean | null
   venue_locality: string | null
+  venue_region: string | null
+  venue_postal_code: string | null
+  venue_country: string | null
   time_slot_id: string | null
   slot_label: string | null
   slot_start_time: string | null
@@ -156,6 +159,12 @@ export interface SessionView {
     capacity: number | null
     features: string[]
     address: string | null
+    /**
+     * The whole postal address on one line, for the "Get directions" link: street, city, region,
+     * postal code, country. Same tier as `address`, so a private residence without attendee
+     * details gives only its neighbourhood, never a street or a postcode.
+     */
+    directions_query: string | null
     /** The room's point: always for a public venue; for a private residence only with attendee details. */
     geo: { lat: number; lng: number } | null
   } | null
@@ -263,6 +272,7 @@ async function queryRows(access: EventAccess, filters: SessionListFilters, sessi
       s.track_id, t.name as track_name, t.slug as track_slug, t.color as track_color,
       s.venue_id, v.name as venue_name, v.capacity as venue_capacity, v.features as venue_features,
       v.address as venue_address, v.is_private_residence as venue_is_private_residence, v.locality as venue_locality,
+      v.region as venue_region, v.postal_code as venue_postal_code, v.country as venue_country,
       s.time_slot_id, ts.label as slot_label, ts.start_time as slot_start_time, ts.end_time as slot_end_time,
       ts.day_date as slot_day_date,
       (
@@ -381,6 +391,19 @@ export function serializeSession(row: SessionRow, access: EventAccess, detail: b
           features: row.venue_features ?? [],
           // A private residence's street address is ticket-holder detail, never public (spec §10).
           address: row.venue_is_private_residence && !attendeeDetails ? row.venue_locality : row.venue_address,
+          // The directions link needs the city and region too, or a street line alone sends
+          // people to a same-named street in another state (spec §8.4). Same tier as `address`:
+          // a private residence the viewer may not see keeps to its neighbourhood.
+          directions_query:
+            row.venue_is_private_residence && !attendeeDetails
+              ? row.venue_locality
+              : addressLine({
+                  street: row.venue_address,
+                  locality: row.venue_locality,
+                  region: row.venue_region,
+                  postalCode: row.venue_postal_code,
+                  country: row.venue_country,
+                }) || null,
           // Same tier for its point (spec §8.1): a private home's pin is attendee-only.
           geo: isLatLng(row.venue_latitude, row.venue_longitude) && (!row.venue_is_private_residence || attendeeDetails)
             ? { lat: row.venue_latitude as number, lng: row.venue_longitude as number }

@@ -19,6 +19,27 @@ import type { MapCanvasProps, MapHandle, MapPin, MapView } from './types'
 // `||`, not `??`: the image build defines the variable as an empty string when it is unset.
 export const DEFAULT_STYLE_URL = process.env.NEXT_PUBLIC_MAP_STYLE_URL || 'https://tiles.openfreemap.org/styles/liberty'
 
+/**
+ * Where MapLibre's worker script is served from, copied out of `node_modules` by
+ * `scripts/copy-maplibre-worker.mjs` (`predev` / `prebuild`).
+ *
+ * MapLibre 6 starts its worker from a separate file whose URL it derives from `import.meta.url`.
+ * Webpack rewrites that to a `file://` path, MapLibre's resolver rejects any non-`http(s)` URL and
+ * returns an empty string, and `new Worker('')` then loads the current *page* as the worker —
+ * which dies silently. The worker is what fetches vector tiles and glyphs, so without this the map
+ * draws only the raster world outline and never loads anything as you zoom in.
+ */
+export const WORKER_URL = '/maplibre/maplibre-gl-worker.mjs'
+
+let workerUrlSet = false
+
+/** Point MapLibre at our copy of the worker. Once per document, before the first `Map`. */
+function pointAtOurWorker(): void {
+  if (workerUrlSet || typeof window === 'undefined') return
+  workerUrlSet = true
+  maplibregl.setWorkerUrl(new URL(WORKER_URL, window.location.origin).href)
+}
+
 const PIN_COLORS: Record<MapPin['kind'], string> = {
   venue: 'hsl(163 48% 27%)',
   self: 'hsl(32 85% 33%)',
@@ -113,6 +134,7 @@ export default function MapCanvas({
     if (!container) return
     let map: MapLibreMap
     try {
+      pointAtOurWorker()
       map = new maplibregl.Map({
         container,
         style: styleUrl,

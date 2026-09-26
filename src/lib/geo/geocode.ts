@@ -14,7 +14,15 @@ import 'server-only'
 import { createHash } from 'node:crypto'
 import { safeFetch } from '@/lib/net/safe-fetch'
 import { sql, type Sql } from '@/lib/db'
-import { isLatLng, normalizeQuery, type LatLng } from './coarse'
+import {
+  addressIsPlaced,
+  addressLine,
+  geocodeParams,
+  isLatLng,
+  normalizeQuery,
+  type LatLng,
+  type StructuredAddress,
+} from './coarse'
 
 export const GEOCODE_CACHE_DAYS = 30
 export const GEOCODE_PER_ACCOUNT_HOUR = 30
@@ -100,11 +108,13 @@ interface NominatimRow {
   display_name?: string
 }
 
-async function lookup(query: string): Promise<GeocodeResult | null> {
+/** One Nominatim request. `input` is either free text (`q=`) or a structured address. */
+async function lookup(input: string | StructuredAddress): Promise<GeocodeResult | null> {
   const url = new URL(geocoderUrl())
+  const params = geocodeParams(input)
+  for (const [key, value] of params) url.searchParams.set(key, value)
   url.searchParams.set('format', 'jsonv2')
   url.searchParams.set('limit', '1')
-  url.searchParams.set('q', normalizeQuery(query))
   await takeToken()
   const res = await safeFetch(url, { headers: { 'user-agent': GEOCODE_USER_AGENT, accept: 'application/json' } })
   if (!res.ok) throw new Error(`geocoder answered ${res.status}`)
@@ -118,16 +128,32 @@ async function lookup(query: string): Promise<GeocodeResult | null> {
 }
 
 /**
- * Geocode `query`. Returns `{ result, cached }`; `result` is null when nothing matched (a
- * miss is cached too, so retyping the same bad address does not hit Nominatim again).
+ * Geocode an address. `input` may be free text (an address somebody typed) or a structured
+ * address; a structured one is asked of Nominatim in its structured form, so the city, region
+ * and postal code actually constrain the match instead of being ranking hints. A structured
+ * lookup that matches nothing falls back to the same address as one line, which Nominatim is
+ * more forgiving about.
+ *
+ * Returns `{ result, cached }`; `result` is null when nothing matched (a miss is cached too, so
+ * retyping the same bad address does not hit Nominatim again). Both forms of the same address
+ * share one cache key — the one-line form — so the cache cannot hold two answers for it.
  */
-export async function geocode(query: string, db: Sql = sql): Promise<{ result: GeocodeResult | null; cached: boolean }> {
-  const q = normalizeQuery(query)
-  if (q.length < 3) return { result: null, cached: false }
-  const hash = queryHash(q)
+export async function geocode(
+  input: string | StructuredAddress,
+  db: Sql = sql,
+): Promise<{ result: GeocodeResult | null; cached: boolean }> {
+  const line = normalizeQuery(typeof input === 'string' ? input : addressLine(input))
+  if (line.length < 3) return { result: null, cached: false }
+  const hash = queryHash(line)
   const cached = await readCache(db, hash)
   if (cached.hit) return { result: cached.result, cached: true }
-  const result = await lookup(q)
+
+  // A street line with no city, region or postal code is ambiguous in every country at once:
+  // ask it as free text rather than as a structured address Nominatim would refuse to place.
+  const structured = typeof input !== 'string' && addressIsPlaced(input)
+  let result = await lookup(structured ? input : line)
+  if (!result && structured) result = await lookup(line)
+
   await writeCache(db, hash, result)
   return { result, cached: false }
 }

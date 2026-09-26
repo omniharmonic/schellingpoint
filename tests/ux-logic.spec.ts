@@ -50,3 +50,50 @@ test('event day filters preserve calendar boundaries across daylight saving', ()
   expect(getEventDays(new Date('2026-03-07'), new Date('2026-03-09'))).toEqual(['2026-03-07', '2026-03-08', '2026-03-09'])
   expect(getEventDayLabel('2026-10-16', 'America/Denver')).toBe('Fri, Oct 16')
 })
+
+
+import { addressIsPlaced, addressLine, geocodeParams } from '../src/lib/geo/coarse'
+import { directionsHref } from '../src/lib/geo/directions'
+
+// A street line on its own matches whichever same-named street a geocoder ranks first, anywhere
+// in the world — an organizer's Boulder venue arrived in Falls Church, Virginia. The city, region
+// and postal code have to be sent as Nominatim's structured parameters, where they constrain the
+// match, and never squeezed into `q` alongside it (Nominatim refuses that combination outright).
+test('a room address is geocoded by its parts, not by its street line', () => {
+  const boulder = { street: '1500 Pearl St', locality: 'Boulder', region: 'CO', postalCode: '80302', country: 'US' }
+  expect(addressLine(boulder)).toBe('1500 Pearl St, Boulder, CO, 80302, US')
+
+  const params = geocodeParams(boulder)
+  expect(Object.fromEntries(params)).toEqual({ street: '1500 Pearl St', city: 'Boulder', state: 'CO', postalcode: '80302', country: 'US' })
+  expect(params.has('q')).toBe(false)
+
+  // Missing parts are left out rather than sent empty, and whitespace is tidied.
+  expect(Object.fromEntries(geocodeParams({ street: '  1500   Pearl St ', locality: 'Boulder', region: '', postalCode: null })))
+    .toEqual({ street: '1500 Pearl St', city: 'Boulder' })
+
+  // Free text (an address somebody typed) stays a `q` search, normalized the way the cache keys it.
+  expect(Object.fromEntries(geocodeParams('  Pearl Street   Mall, Boulder '))).toEqual({ q: 'pearl street mall, boulder' })
+
+  // A street with no city, region or postal code is not a place: it is asked as free text instead.
+  expect(addressIsPlaced({ street: '1500 Pearl St' })).toBe(false)
+  expect(addressIsPlaced(boulder)).toBe(true)
+  expect(addressIsPlaced({ postalCode: '80302' })).toBe(true)
+})
+
+// "Get directions" carries the address the organizer wrote whenever there is one: a pin is only
+// as good as the lookup that placed it, while every maps app resolves a written address itself.
+test('directions carry the whole address, and fall back to a point only without one', () => {
+  const full = '1500 Pearl St, Boulder, CO, 80302, US'
+  expect(directionsHref({ query: full, lat: 38.88, lng: -77.17 }))
+    .toBe(`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(full)}`)
+
+  // A self-hosted session with a pin and no address: coordinates are all there is.
+  expect(directionsHref({ lat: 40.0176, lng: -105.2797 }))
+    .toBe('https://www.google.com/maps/dir/?api=1&destination=40.0176,-105.2797')
+
+  // Nothing to point at, no link.
+  expect(directionsHref({})).toBeNull()
+  expect(directionsHref({ query: '   ', lat: null, lng: null })).toBeNull()
+  // A half-point is not a point.
+  expect(directionsHref({ lat: 40.0176, lng: null })).toBeNull()
+})

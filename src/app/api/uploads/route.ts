@@ -62,11 +62,22 @@ export async function POST(request: Request) {
     return err(413, 'Images can be at most 5 MB.', 'TooLarge')
   }
 
+  // Two different failures used to share one message, and it was the wrong message for the one
+  // that actually happens: a body that arrives short (a stalled upload, a file whose bytes ran
+  // out) parses no better than JSON would, and the uploader was told to send multipart — which
+  // is what it had just sent. Separate them, and log the parse failure: nothing about it reaches
+  // the browser otherwise, so production had no way to tell the two apart.
+  const contentType = (request.headers.get('content-type') ?? '').toLowerCase()
+  if (!contentType.includes('multipart/form-data')) {
+    return err(415, 'Send the image as multipart/form-data with a "file" field.', 'InvalidBody')
+  }
+
   let form: FormData
   try {
     form = await request.formData()
-  } catch {
-    return err(400, 'Send the image as multipart/form-data with a "file" field.', 'InvalidBody')
+  } catch (e) {
+    console.error('[uploads] multipart body could not be read:', e instanceof Error ? e.message : e)
+    return err(400, 'The upload did not finish. Check your connection and try again.', 'IncompleteUpload')
   }
 
   const eventRef = form.get('event')

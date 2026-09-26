@@ -1,5 +1,12 @@
 /**
- * POST /api/v1/events/[slug]/admin/geocode  { query }  →  { result: { lat, lng, label } | null, cached }
+ * POST /api/v1/events/[slug]/admin/geocode
+ *   { query }                                              free text somebody typed
+ *   { address: { street, locality, region, postal_code, country } }   a room's address in parts
+ *   →  { result: { lat, lng, label } | null, cached }
+ *
+ * The parts form is what the map editor sends for a room, and it matters: a street line on its own
+ * matches whichever same-named street the geocoder ranks first anywhere in the world, so the city,
+ * region and postal code travel with it as real constraints (spec §8.2).
  *
  * Forward geocoding for the map (spec §8.2). Who may call it:
  *   - organizers (owner / admin / moderator), placing rooms and the map area;
@@ -17,10 +24,34 @@ import { assertSameOrigin, requireViewer } from '@/lib/auth/viewer'
 import { canSubmitProposals } from '@/lib/events/lifecycle'
 import { json, jsonError, loadEventAccess, readJsonObject } from '@/app/api/v1/sessions/_lib/access'
 import { chargeGeocodeQuota, geocode, GeocodeRateLimitError } from '@/lib/geo/geocode'
-import { normalizeQuery } from '@/lib/geo/coarse'
+import { addressLine, hasAddress, normalizeQuery, type StructuredAddress } from '@/lib/geo/coarse'
 import type { EventStatus } from '@/types/event'
 
 export const dynamic = 'force-dynamic'
+
+const text = (value: unknown): string | null => (typeof value === 'string' && value.trim() ? value.trim().slice(0, 200) : null)
+
+/**
+ * What to look up: the `address` parts when they are given, otherwise the free-text `query`.
+ * Null when neither says enough to be worth a Nominatim request.
+ */
+function addressToLookUp(body: Record<string, unknown>): string | StructuredAddress | null {
+  const raw = body.address
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    const parts = raw as Record<string, unknown>
+    const address: StructuredAddress = {
+      street: text(parts.street),
+      locality: text(parts.locality),
+      region: text(parts.region),
+      postalCode: text(parts.postal_code) ?? text(parts.postalCode),
+      country: text(parts.country),
+    }
+    if (hasAddress(address) && normalizeQuery(addressLine(address)).length >= 3) return address
+    return null
+  }
+  const query = typeof body.query === 'string' ? normalizeQuery(body.query) : ''
+  return query.length >= 3 ? query : null
+}
 
 export async function POST(request: Request, { params }: { params: Promise<{ slug: string }> }) {
   const bad = assertSameOrigin(request)
@@ -54,8 +85,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
 
   const body = await readJsonObject(request)
   if (body instanceof Response) return body
-  const query = typeof body.query === 'string' ? normalizeQuery(body.query) : ''
-  if (query.length < 3) return jsonError(400, 'Enter an address to look up', { field: 'query' })
+  const lookup = addressToLookUp(body)
+  if (!lookup) return jsonError(400, 'Enter an address to look up', { field: 'query' })
 
   try {
     await chargeGeocodeQuota(sql, viewer.accountId)
@@ -70,7 +101,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
   }
 
   try {
-    const { result, cached } = await geocode(query)
+    const { result, cached } = await geocode(lookup)
     return json({ result, cached })
   } catch (e) {
     console.error('[geocode] lookup failed:', e instanceof Error ? e.message : e)

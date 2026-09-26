@@ -125,6 +125,13 @@ test.describe('map', () => {
     const ownerRes = await api(path, { method: 'POST', cookie: owner.cookie, json: { query: QUERY } })
     expect(ownerRes.status, ownerRes.text).toBe(200)
     expect(ownerRes.body).toEqual({ result: { lat: 40.0176, lng: -105.2797, label: 'Pearl Street Mall, Boulder, Colorado' }, cached: true })
+    // The same address sent in parts (what the map editor sends for a room) keys the same cache
+    // entry as the one line it makes, so a room is never geocoded twice or answered two ways.
+    const [street, ...rest] = QUERY.split(', ')
+    const structured = await api(path, { method: 'POST', cookie: owner.cookie, json: { address: { street, locality: rest.join(', ') } } })
+    expect(structured.status, structured.text).toBe(200)
+    expect(structured.body).toEqual(ownerRes.body)
+
     // A member while proposals are open (they are placing the session they are about to propose).
     const memberRes = await api(path, { method: 'POST', cookie: attendee.cookie, json: { query: QUERY } })
     expect(memberRes.status, memberRes.text).toBe(200)
