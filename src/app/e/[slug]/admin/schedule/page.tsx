@@ -22,13 +22,16 @@ import {
   ShieldCheck,
   Undo2,
   SlidersHorizontal,
+  CalendarPlus,
   X,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Checkbox } from '@/components/ui/checkbox'
+import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Select } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 import { ConfirmInline } from '@/components/ui/confirm-inline'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -39,7 +42,8 @@ import { apiFetch, ApiError } from '@/lib/api/client'
 import { getEventDayLabel, getEventDays } from '@/lib/events/dates'
 import { formatInEventTimezone } from '@/lib/events/timezone'
 import { cn } from '@/lib/utils'
-import { plural } from '@/lib/format'
+import { EN_DASH, plural } from '@/lib/format'
+import { formatClock, minutesToTime, timeToMinutes, SLOT_LENGTH_OPTIONS } from '@/lib/scheduling/slot-blocks'
 import { PublishJobProgress } from '@/components/PublishJobProgress'
 import { hostLabel, type AdminSession, type AdminSessionsResponse, type AdminTimeSlot, type AdminVenue, type RoundStatus } from '@/components/admin/types'
 import { AudienceClusters } from '@/components/admin/AudienceClusters'
@@ -156,6 +160,7 @@ export default function AdminSchedulePage() {
   const event = useEvent()
   const { can } = useEventRole()
   const canSchedule = can('manageSchedule')
+  const canManageVenues = can('manageVenues')
   const base = `/api/v1/events/${event.slug}`
 
   const eventDays = React.useMemo(() => getEventDays(event.startDate, event.endDate), [event.startDate, event.endDate])
@@ -193,6 +198,12 @@ export default function AdminSchedulePage() {
   const [qualityOpen, setQualityOpen] = React.useState(false)
   const [pinning, setPinning] = React.useState<string | null>(null)
   const [pinRevision, setPinRevision] = React.useState(0)
+
+  // Quick fix after the fact (design 2026-09-25 §4): one more row of slots across every room.
+  const [rowOpen, setRowOpen] = React.useState(false)
+  const [rowStart, setRowStart] = React.useState('09:00')
+  const [rowLength, setRowLength] = React.useState(60)
+  const [rowError, setRowError] = React.useState<string | null>(null)
 
   const [publishOpen, setPublishOpen] = React.useState(false)
   const [publishing, setPublishing] = React.useState(false)
@@ -475,6 +486,43 @@ export default function AdminSchedulePage() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [undo, redo])
+
+  /**
+   * "Add a row of slots at HH:MM": one more slot in every room on the day being looked at, for
+   * the fix that only becomes obvious once the grid is in front of you. Same route, same
+   * transaction and same re-publish as the bulk editor — a room that already has something at
+   * that time makes the whole row fail, and the message says so.
+   */
+  const addSlotRow = async () => {
+    const start = timeToMinutes(rowStart)
+    if (Number.isNaN(start)) { setRowError('Enter a start time (HH:MM).'); return }
+    // The route's clock is 00:00–23:59, so a row has to end before midnight.
+    if (start + rowLength > 23 * 60 + 59) { setRowError('That row would run past midnight. Start it earlier, or make it shorter.'); return }
+    if (venues.length === 0) { setRowError('Add a room first.'); return }
+    setRowError(null)
+    setBusy(true)
+    try {
+      await apiFetch(`${base}/admin/time-slots`, {
+        method: 'POST',
+        json: {
+          slots: venues.map((v) => ({
+            venue_id: v.id,
+            day_date: selectedDay,
+            start: rowStart,
+            end: minutesToTime(start + rowLength),
+            slot_type: 'session',
+          })),
+        },
+      })
+      setRowOpen(false)
+      setNotice({ kind: 'success', text: `Added ${plural(venues.length, 'slot')} at ${formatClock(rowStart)}.` })
+      await refreshAfterChange().catch(() => undefined)
+    } catch (e) {
+      setRowError(errorText(e, 'The row could not be added.'))
+    } finally {
+      setBusy(false)
+    }
+  }
 
   const resetDay = async () => {
     setConfirmReset(false)
@@ -760,6 +808,11 @@ export default function AdminSchedulePage() {
                   <Button variant="ghost" size="icon-sm" disabled={busy} aria-label="More actions"><MoreHorizontal className="h-4 w-4" aria-hidden="true" /></Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end">
+                  {canManageVenues && (
+                    <DropdownMenuItem className="gap-2" onSelect={() => { setRowError(null); setRowOpen(true) }}>
+                      <CalendarPlus className="h-4 w-4" aria-hidden="true" />Add a row of slots…
+                    </DropdownMenuItem>
+                  )}
                   <DropdownMenuItem className="text-destructive focus:text-destructive gap-2" onSelect={() => setConfirmReset(true)}>
                     <RotateCcw className="h-4 w-4" aria-hidden="true" />Clear this day…
                   </DropdownMenuItem>
@@ -1163,6 +1216,37 @@ export default function AdminSchedulePage() {
                 </Button>
               </>
             )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={rowOpen} onOpenChange={(open) => { if (!open && !busy) setRowOpen(false) }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2"><CalendarPlus className="h-5 w-5 text-primary" aria-hidden="true" />Add a row of slots</DialogTitle>
+            <DialogDescription>
+              One slot in each of {plural(venues.length, 'room')} on {getEventDayLabel(selectedDay, event.timezone)}, in the gathering&rsquo;s timezone. Saved together or not at all.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="space-y-2">
+              <Label htmlFor="slot-row-start">Start</Label>
+              <Input id="slot-row-start" type="time" className="w-32" value={rowStart} onChange={(e) => setRowStart(e.target.value)} />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="slot-row-length">Slot length</Label>
+              <Select id="slot-row-length" wrapperClassName="w-auto" value={rowLength} onChange={(e) => setRowLength(Number(e.target.value))}>
+                {SLOT_LENGTH_OPTIONS.map((m) => <option key={m} value={m}>{m % 60 === 0 && m >= 60 ? plural(m / 60, 'hour') : `${m} min`}</option>)}
+              </Select>
+            </div>
+            <p className="pb-3 text-sm text-muted-foreground">
+              {formatClock(rowStart)}{EN_DASH}{formatClock(minutesToTime(Math.min(23 * 60 + 59, (timeToMinutes(rowStart) || 0) + rowLength)))}
+            </p>
+          </div>
+          {rowError && <p role="alert" className="rounded-lg border border-destructive/20 bg-destructive/10 p-3 text-sm text-destructive">{rowError}</p>}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRowOpen(false)} disabled={busy}>Cancel</Button>
+            <Button onClick={() => void addSlotRow()} loading={busy}>Add {plural(venues.length, 'slot')}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

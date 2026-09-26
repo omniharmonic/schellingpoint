@@ -2,8 +2,9 @@ import 'server-only'
 /**
  * Clone a gathering (MT §11.3).
  *
- * What is copied: the shape of the thing — its settings, venues, tracks and the pattern of its
- * slot grid, re-dated onto the new gathering's days.
+ * What is copied: the shape of the thing — its settings, venues, tracks, the pattern of its
+ * slot grid, re-dated onto the new gathering's days, and the saved bulk-block templates (design
+ * 2026-09-25 §4: they name rooms by position, so they apply to the copy's rooms unchanged).
  *
  * What is **not** copied, and this is the whole point: anything about people. No members, no
  * invitations, no proposals, no votes, no tickets, no check-ins, no RSVPs, no feed history. A
@@ -92,7 +93,8 @@ export async function cloneGathering(input: CloneInput): Promise<CloneResult> {
         max_proposals_per_user, require_proposal_approval, suggested_topics, theme,
         logo_url, banner_url, favicon_url, policy_thresholds, transcripts_enabled,
         transcripts_visibility, attendance_voting_enabled, attendance_credits,
-        code_of_conduct_url, require_conduct_acceptance, checkin_gates_voting
+        code_of_conduct_url, require_conduct_acceptance, checkin_gates_voting,
+        slot_templates
       )
       select ${input.slug}, ${name}, ${input.startDate}::date, ${endDate}::date, 'draft', ${input.createdBy},
         tagline, description, location_name, location_address, timezone, visibility,
@@ -100,7 +102,8 @@ export async function cloneGathering(input: CloneInput): Promise<CloneResult> {
         max_proposals_per_user, require_proposal_approval, suggested_topics, theme,
         logo_url, banner_url, favicon_url, policy_thresholds, transcripts_enabled,
         transcripts_visibility, attendance_voting_enabled, attendance_credits,
-        code_of_conduct_url, require_conduct_acceptance, checkin_gates_voting
+        code_of_conduct_url, require_conduct_acceptance, checkin_gates_voting,
+        slot_templates
       from events where id = ${input.sourceEventId}
       returning id
     `

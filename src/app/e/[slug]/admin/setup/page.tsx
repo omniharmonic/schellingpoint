@@ -36,6 +36,7 @@ import { EN_DASH, plural } from '@/lib/format'
 import { SESSION_FORMATS } from '@/lib/sessions/constants'
 import { cn } from '@/lib/utils'
 import { BulkSlotGenerator, type GeneratedSlot } from '@/components/admin/BulkSlotGenerator'
+import type { SlotTemplate } from '@/lib/scheduling/slot-blocks'
 import { VenueMapCard } from './VenueMapCard'
 import { networkNotice, type AdminTimeSlot, type AdminVenue, type NetworkSync } from '@/components/admin/types'
 
@@ -123,6 +124,8 @@ export default function AdminSetupPage() {
   const [confirmDeleteVenue, setConfirmDeleteVenue] = React.useState<string | null>(null)
   const [expandedVenues, setExpandedVenues] = React.useState<Set<string>>(new Set())
   const [showBulkGenerator, setShowBulkGenerator] = React.useState(false)
+  const [slotTemplates, setSlotTemplates] = React.useState<SlotTemplate[]>([])
+  const [savingTemplates, setSavingTemplates] = React.useState(false)
   const venueNameRef = React.useRef<HTMLInputElement>(null)
 
   const reportNetwork = (sync: NetworkSync | undefined, success: string) => {
@@ -133,12 +136,16 @@ export default function AdminSetupPage() {
 
   const load = React.useCallback(async () => {
     try {
-      const [v, t] = await Promise.all([
+      const [v, t, tpl] = await Promise.all([
         apiFetch<{ venues: AdminVenue[] }>(`${base}/venues`),
         apiFetch<{ timeSlots: AdminTimeSlot[] }>(`${base}/time-slots`),
+        // Saved bulk-block shapes (design §4). Organizer-only, and only the generator uses them,
+        // so a reader without `manageVenues` simply gets none.
+        apiFetch<{ templates: SlotTemplate[] }>(`${base}/slot-templates`).catch(() => ({ templates: [] })),
       ])
       setVenues(v.venues)
       setTimeSlots(t.timeSlots)
+      setSlotTemplates(tpl.templates)
     } catch (e) {
       setError(errorText(e, 'Rooms and availability could not be loaded. Refresh to try again.'))
     } finally {
@@ -300,6 +307,18 @@ export default function AdminSetupPage() {
     }
   }
 
+  /** The editor holds the whole list; PUT replaces it (save, apply and delete are all one list). */
+  const saveTemplates = async (next: SlotTemplate[]) => {
+    setSavingTemplates(true)
+    try {
+      const res = await apiFetch<{ templates: SlotTemplate[] }>(`${base}/slot-templates`, { method: 'PUT', json: { templates: next } })
+      setSlotTemplates(res.templates)
+      toast({ title: 'Templates saved.', variant: 'success' })
+    } finally {
+      setSavingTemplates(false)
+    }
+  }
+
   const handleBulkGenerate = async (slots: GeneratedSlot[]) => {
     const message = await createSlots(slots.map((s) => ({ venueId: s.venueId, dayDate: s.dayDate, startTime: s.startTime, endTime: s.endTime, label: s.label, slotType: s.isBreak ? 'break' : 'session' })))
     if (message) setError(message)
@@ -366,6 +385,9 @@ export default function AdminSetupPage() {
                 }))}
                 onGenerate={handleBulkGenerate}
                 isSaving={isSaving}
+                templates={slotTemplates}
+                onTemplatesChange={saveTemplates}
+                templatesBusy={savingTemplates}
                 onCancel={() => setShowBulkGenerator(false)}
               />
             </CardContent>
@@ -444,7 +466,7 @@ export default function AdminSetupPage() {
             <CardContent className="py-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
               <div>
                 <h2 className="font-display text-lg font-semibold">Rooms are ready — now add times</h2>
-                <p className="mt-1 text-sm text-muted-foreground">Sessions can only be placed where a room has a free slot. Generate a day’s slots in one go, or add them room by room.</p>
+                <p className="mt-1 text-sm text-muted-foreground">Sessions can only be placed where a room has a free slot. Generate every room’s day in one pass — each room can keep its own hours, or be closed — or add slots one at a time.</p>
               </div>
               {canManage && (
                 <Button onClick={() => setShowBulkGenerator(true)} className="shrink-0"><Zap className="h-4 w-4 mr-2" aria-hidden="true" />Generate slots</Button>

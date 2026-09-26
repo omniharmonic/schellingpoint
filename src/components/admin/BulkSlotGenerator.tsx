@@ -1,14 +1,57 @@
 'use client'
 
+/**
+ * Bulk session blocks (design 2026-09-25 §4): a two-axis editor over the slot grid.
+ *
+ *   day tabs (the gathering's dates, with "copy from <day>")
+ *     × one row per room (start, end, slot length, break, "closed this day")
+ *     → a live preview grid and one POST of every slot, saved together or not at all.
+ *
+ * "Same as first room" (on by default) keeps a row in lockstep with the first until it is
+ * unticked, and "Same times every day" (on by default when there is more than one day) keeps
+ * every day the same. With both on, three choices — start, end, slot length — still produce the
+ * uniform grid the previous generator produced, in the same number of interactions.
+ *
+ * Generation, conflict detection and the template shape are pure functions in
+ * `src/lib/scheduling/slot-blocks.ts`, so the preview and the POST can never disagree.
+ */
+
 import * as React from 'react'
-import { CalendarPlus, Coffee } from 'lucide-react'
+import { Ban, CalendarPlus, Coffee, Copy, Save, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
-import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 import { plural } from '@/lib/format'
+import {
+  applyTemplate,
+  BREAK_LENGTH_OPTIONS,
+  conflictKeys,
+  copyDayRooms,
+  countSlots,
+  formatClock,
+  generateSlots,
+  MAX_SLOTS_PER_SAVE,
+  MAX_TEMPLATES,
+  MAX_TEMPLATE_NAME,
+  newPlan,
+  planToTemplate,
+  slotKey,
+  slotsForRoom,
+  SLOT_LENGTH_OPTIONS,
+  syncRooms,
+  type DayPlan,
+  type ExistingSlot,
+  type GeneratedSlot,
+  type RoomPattern,
+  type SlotTemplate,
+} from '@/lib/scheduling/slot-blocks'
+
+export type { GeneratedSlot }
 
 interface BulkSlotGeneratorProps {
   venues: { id: string; name: string; capacity: number | null }[]
@@ -16,47 +59,15 @@ interface BulkSlotGeneratorProps {
   onGenerate: (slots: GeneratedSlot[]) => void
   onCancel: () => void
   isSaving?: boolean
-  existingSlots?: Array<Pick<GeneratedSlot, 'venueId' | 'dayDate' | 'startTime' | 'endTime'>>
+  existingSlots?: ExistingSlot[]
+  /** Saved shapes of this gathering. Omit the handler to hide the template controls. */
+  templates?: SlotTemplate[]
+  onTemplatesChange?: (next: SlotTemplate[]) => void | Promise<void>
+  templatesBusy?: boolean
 }
 
-export interface GeneratedSlot {
-  venueId: string
-  dayDate: string
-  startTime: string
-  endTime: string
-  label: string
-  isBreak: boolean
-}
-
-const DURATION_OPTIONS = [
-  { value: 30, label: '30 min' },
-  { value: 45, label: '45 min' },
-  { value: 60, label: '1 hour' },
-  { value: 90, label: '1.5 hours' },
-  { value: 120, label: '2 hours' },
-]
-
-const ALL = '__all__'
-
-const BREAK_DURATION_OPTIONS = [
-  { value: 10, label: '10 min' },
-  { value: 15, label: '15 min' },
-  { value: 20, label: '20 min' },
-  { value: 30, label: '30 min' },
-]
-
-function minutesToTime(minutes: number): string {
-  const hours = Math.floor(minutes / 60)
-  const mins = minutes % 60
-  return `${hours.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}`
-}
-
-function formatTime(time: string): string {
-  const [hours, minutes] = time.split(':').map(Number)
-  const period = hours >= 12 ? 'PM' : 'AM'
-  const displayHours = hours % 12 || 12
-  return `${displayHours}:${minutes.toString().padStart(2, '0')} ${period}`
-}
+const lengthLabel = (minutes: number) =>
+  minutes % 60 === 0 && minutes >= 60 ? plural(minutes / 60, 'hour') : `${minutes} min`
 
 export function BulkSlotGenerator({
   venues,
@@ -65,198 +76,348 @@ export function BulkSlotGenerator({
   onCancel,
   isSaving = false,
   existingSlots = [],
+  templates,
+  onTemplatesChange,
+  templatesBusy = false,
 }: BulkSlotGeneratorProps) {
-  const [venueId, setVenueId] = React.useState(venues[0]?.id || '')
-  const [dayDate, setDayDate] = React.useState(eventDays[0]?.date || '')
-  const [startHour, setStartHour] = React.useState(9 * 60)
-  const [endHour, setEndHour] = React.useState(17 * 60)
-  const [duration, setDuration] = React.useState(60)
-  const [includeBreaks, setIncludeBreaks] = React.useState(false)
-  const [breakDuration, setBreakDuration] = React.useState(15)
-
-  // One day's pattern of slots, as wall-clock times in the event timezone.
-  const pattern = React.useMemo(() => {
-    const slots: Array<Pick<GeneratedSlot, 'startTime' | 'endTime' | 'label' | 'isBreak'>> = []
-    let currentMinutes = startHour
-    const endMinutes = endHour
-    while (currentMinutes + duration <= endMinutes) {
-      const slotEndMinutes = currentMinutes + duration
-      slots.push({ startTime: minutesToTime(currentMinutes), endTime: minutesToTime(slotEndMinutes), label: '', isBreak: false })
-      currentMinutes = slotEndMinutes
-      if (includeBreaks && currentMinutes + breakDuration + duration <= endMinutes) {
-        const breakEndMinutes = currentMinutes + breakDuration
-        slots.push({ startTime: minutesToTime(currentMinutes), endTime: minutesToTime(breakEndMinutes), label: 'Break', isBreak: true })
-        currentMinutes = breakEndMinutes
-      }
-    }
-    return slots
-  }, [startHour, endHour, duration, includeBreaks, breakDuration])
-
-  // Every (room, day) the pattern is applied to; saved in one transaction.
-  const preview = React.useMemo(() => {
-    const rooms = venueId === ALL ? venues.map((v) => v.id) : [venueId]
-    const days = dayDate === ALL ? eventDays.map((d) => d.date) : [dayDate]
-    return rooms.flatMap((room) => days.flatMap((day) => pattern.map((slot) => ({ ...slot, venueId: room, dayDate: day }))))
-  }, [pattern, venueId, dayDate, venues, eventDays])
-
-  const conflicts = preview.filter(slot => existingSlots.some(existing => existing.venueId === slot.venueId &&
-    existing.dayDate === slot.dayDate && existing.startTime < slot.endTime && slot.startTime < existing.endTime))
-  const selectedVenue = venues.find(v => v.id === venueId)
   const id = React.useId()
+  const dayKey = eventDays.map((d) => d.date).join(',')
+  const venueKey = venues.map((v) => v.id).join(',')
+
+  const [plan, setPlan] = React.useState<DayPlan[]>(() => newPlan(eventDays.map((d) => d.date), venues.map((v) => v.id)))
+  const [activeDay, setActiveDay] = React.useState(eventDays[0]?.date ?? '')
+  const [sameEveryDay, setSameEveryDay] = React.useState(eventDays.length > 1)
+  const [templateChoice, setTemplateChoice] = React.useState('')
+  const [templateName, setTemplateName] = React.useState('')
+  const [namingTemplate, setNamingTemplate] = React.useState(false)
+  const [templateError, setTemplateError] = React.useState<string | null>(null)
+
+  // Rooms added or dates changed while the editor is open: start that shape from the defaults
+  // rather than leaving rows pointing at a room that is gone.
+  React.useEffect(() => {
+    const dates = dayKey.split(',').filter(Boolean)
+    setPlan(newPlan(dates, venueKey.split(',').filter(Boolean)))
+    setActiveDay((current) => (dates.includes(current) ? current : (dates[0] ?? '')))
+  }, [dayKey, venueKey])
+
+  const day = plan.find((d) => d.dayDate === activeDay) ?? plan[0]
+  const rooms = day?.rooms ?? []
+  const nameOf = React.useCallback((venueId: string) => venues.find((v) => v.id === venueId)?.name ?? 'Room', [venues])
+
+  /** Write one room's change, pull the lockstep rows along, and mirror the day when asked to. */
+  const updateRoom = (index: number, patch: Partial<RoomPattern>) => {
+    if (!day) return
+    setPlan((prev) => {
+      const current = prev.find((d) => d.dayDate === day.dayDate)
+      if (!current) return prev
+      const rows = syncRooms(current.rooms.map((room, i) => (i === index ? { ...room, ...patch } : room)))
+      return prev.map((d) => {
+        if (d.dayDate === day.dayDate) return { ...d, rooms: rows }
+        return sameEveryDay ? { ...d, rooms: copyDayRooms(rows, d.rooms) } : d
+      })
+    })
+  }
+
+  const copyFrom = (sourceDate: string) => {
+    setPlan((prev) => {
+      const source = prev.find((d) => d.dayDate === sourceDate)
+      if (!source || !day) return prev
+      return prev.map((d) => (d.dayDate === day.dayDate ? { ...d, rooms: copyDayRooms(source.rooms, d.rooms) } : d))
+    })
+  }
+
+  const setSameDays = (next: boolean) => {
+    setSameEveryDay(next)
+    if (!next || !day) return
+    setPlan((prev) => {
+      const source = prev.find((d) => d.dayDate === day.dayDate)
+      if (!source) return prev
+      return prev.map((d) => (d.dayDate === source.dayDate ? d : { ...d, rooms: copyDayRooms(source.rooms, d.rooms) }))
+    })
+  }
+
+  const allSlots = React.useMemo(() => generateSlots(plan), [plan])
+  const conflicts = React.useMemo(() => conflictKeys(allSlots, existingSlots), [allSlots, existingSlots])
+  const counts = countSlots(allSlots)
+  const perDay = React.useMemo(
+    () => new Map(plan.map((d) => [d.dayDate, generateSlots([d]).length])),
+    [plan],
+  )
+  const tooMany = counts.total > MAX_SLOTS_PER_SAVE
+  const invalidRows = rooms.filter((room) => !room.closed && room.end <= room.start)
+
+  /* ─────────────────────────── templates ─────────────────────────── */
+
+  const saved = templates ?? []
+  const commitTemplates = async (next: SlotTemplate[]) => {
+    setTemplateError(null)
+    try {
+      await onTemplatesChange?.(next)
+    } catch {
+      setTemplateError('The template could not be saved. Try again.')
+    }
+  }
+
+  const saveTemplate = async () => {
+    const name = templateName.trim()
+    if (!name) { setTemplateError('Give the template a name.'); return }
+    const kept = saved.filter((t) => t.name.toLowerCase() !== name.toLowerCase())
+    if (kept.length >= MAX_TEMPLATES) { setTemplateError(`Keep at most ${MAX_TEMPLATES} templates — delete one first.`); return }
+    await commitTemplates([...kept, planToTemplate(name, plan, (venueId) => nameOf(venueId))])
+    setNamingTemplate(false)
+    setTemplateName('')
+    setTemplateChoice(name)
+  }
+
+  const useTemplate = () => {
+    const template = saved.find((t) => t.name === templateChoice)
+    if (!template) return
+    setPlan(applyTemplate(template, eventDays.map((d) => d.date), venues))
+    setSameEveryDay(false)
+    setTemplateError(null)
+  }
+
+  const deleteTemplate = async () => {
+    if (!templateChoice) return
+    await commitTemplates(saved.filter((t) => t.name !== templateChoice))
+    setTemplateChoice('')
+  }
 
   return (
-    <div className="space-y-4">
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <div className="space-y-2">
-          <Label htmlFor={`${id}-venue`}>Room</Label>
-          <Select
-            id={`${id}-venue`}
-            value={venueId}
-            onChange={(e) => setVenueId(e.target.value)}
-          >
-            {venues.map((venue) => (
-              <option key={venue.id} value={venue.id}>
-                {venue.name} {venue.capacity ? `(${venue.capacity} cap)` : ''}
-              </option>
-            ))}
-            {venues.length > 1 && <option value={ALL}>Every room</option>}
-          </Select>
-        </div>
-
-        <div className="space-y-2">
-          <Label htmlFor={`${id}-day`}>Day</Label>
-          <Select
-            id={`${id}-day`}
-            value={dayDate}
-            onChange={(e) => setDayDate(e.target.value)}
-          >
-            {eventDays.map((day) => (
-              <option key={day.date} value={day.date}>
-                {day.label}
-              </option>
-            ))}
-            {eventDays.length > 1 && <option value={ALL}>Every day</option>}
-          </Select>
-        </div>
-
-        <div className="space-y-2">
-          <Label htmlFor={`${id}-start`}>Start time</Label>
-          <Select
-            id={`${id}-start`}
-            value={startHour}
-            onChange={(e) => setStartHour(Number(e.target.value))}
-          >
-            {Array.from({ length: 96 }, (_, i) => (
-              <option key={i} value={i * 15}>
-                {formatTime(minutesToTime(i * 15))}
-              </option>
-            ))}
-          </Select>
-        </div>
-
-        <div className="space-y-2">
-          <Label htmlFor={`${id}-end`}>End time</Label>
-          <Select
-            id={`${id}-end`}
-            value={endHour}
-            onChange={(e) => setEndHour(Number(e.target.value))}
-          >
-            {Array.from({ length: 96 }, (_, i) => (
-              <option key={i} value={i * 15}>
-                {formatTime(minutesToTime(i * 15))}
-              </option>
-            ))}
-          </Select>
-        </div>
-
-        <div className="space-y-2">
-          <Label htmlFor={`${id}-duration`}>Slot length</Label>
-          <Select
-            id={`${id}-duration`}
-            value={duration}
-            onChange={(e) => setDuration(Number(e.target.value))}
-          >
-            {DURATION_OPTIONS.map((opt) => (
-              <option key={opt.value} value={opt.value}>
-                {opt.label}
-              </option>
-            ))}
-          </Select>
-        </div>
-
-        <div className="space-y-2">
-          <Label id={`${id}-breaks`}>Breaks between slots</Label>
-          <div className="flex items-center gap-3 h-11">
-            <Switch checked={includeBreaks} onCheckedChange={setIncludeBreaks} aria-labelledby={`${id}-breaks`} />
-            {includeBreaks && (
+    <div className="space-y-4" data-testid="slot-block-editor">
+      {eventDays.length > 1 && (
+        <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Days">
+          {eventDays.map((d) => (
+            <Button
+              key={d.date}
+              size="sm"
+              variant={d.date === activeDay ? 'default' : 'outline'}
+              aria-pressed={d.date === activeDay}
+              data-testid="slot-day-tab"
+              data-day={d.date}
+              onClick={() => setActiveDay(d.date)}
+              className="whitespace-nowrap"
+            >
+              {d.label}
+              <Badge variant={d.date === activeDay ? 'secondary' : 'muted'} className="ml-2 text-xs">{perDay.get(d.date) ?? 0}</Badge>
+            </Button>
+          ))}
+          <div className="ml-auto flex items-center gap-3">
+            <div className="flex items-center gap-2">
+              <Switch size="sm" checked={sameEveryDay} onCheckedChange={setSameDays} aria-labelledby={`${id}-same-days`} />
+              <Label id={`${id}-same-days`} className="font-normal">Same times every day</Label>
+            </div>
+            {!sameEveryDay && eventDays.length > 1 && (
               <Select
-                aria-label="Break length"
-                value={breakDuration}
-                onChange={(e) => setBreakDuration(Number(e.target.value))}
+                aria-label="Copy times from another day"
+                value=""
                 wrapperClassName="w-auto"
+                data-testid="slot-copy-from"
+                onChange={(e) => { if (e.target.value) copyFrom(e.target.value) }}
               >
-                {BREAK_DURATION_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
+                <option value="">Copy from…</option>
+                {eventDays.filter((d) => d.date !== activeDay).map((d) => (
+                  <option key={d.date} value={d.date}>Copy from {d.label}</option>
                 ))}
               </Select>
             )}
           </div>
         </div>
+      )}
+
+      {onTemplatesChange && (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/30 p-3">
+          {saved.length > 0 ? (
+            <>
+              <Select
+                aria-label="Saved template"
+                value={templateChoice}
+                wrapperClassName="w-auto min-w-40"
+                data-testid="slot-template-select"
+                onChange={(e) => setTemplateChoice(e.target.value)}
+              >
+                <option value="">Saved templates…</option>
+                {saved.map((t) => <option key={t.name} value={t.name}>{t.name}</option>)}
+              </Select>
+              <Button size="sm" variant="outline" disabled={!templateChoice || templatesBusy} onClick={useTemplate}>
+                <Copy className="h-4 w-4 mr-1.5" aria-hidden="true" />Apply template
+              </Button>
+              <Button size="sm" variant="ghost" disabled={!templateChoice || templatesBusy} onClick={() => void deleteTemplate()}>
+                <Trash2 className="h-4 w-4 mr-1.5" aria-hidden="true" />Delete template
+              </Button>
+            </>
+          ) : (
+            <p className="text-sm text-muted-foreground">No saved templates yet. Save this shape to reuse it next time — a clone of this gathering carries it too.</p>
+          )}
+          <div className="ml-auto flex items-center gap-2">
+            {namingTemplate ? (
+              <>
+                <Input
+                  aria-label="Template name"
+                  autoFocus
+                  value={templateName}
+                  maxLength={MAX_TEMPLATE_NAME}
+                  placeholder="e.g. Weekday shape"
+                  className="h-9 w-48"
+                  onChange={(e) => setTemplateName(e.target.value)}
+                />
+                <Button size="sm" onClick={() => void saveTemplate()} loading={templatesBusy}>Save</Button>
+                <Button size="sm" variant="ghost" onClick={() => { setNamingTemplate(false); setTemplateError(null) }}>Cancel</Button>
+              </>
+            ) : (
+              <Button size="sm" variant="outline" onClick={() => setNamingTemplate(true)} disabled={templatesBusy}>
+                <Save className="h-4 w-4 mr-1.5" aria-hidden="true" />Save as template
+              </Button>
+            )}
+          </div>
+          {templateError && <p role="alert" className="w-full text-sm text-destructive">{templateError}</p>}
+        </div>
+      )}
+
+      <div className="space-y-2">
+        {rooms.map((room, index) => {
+          const rowId = `${id}-r${index}`
+          const locked = index > 0 && room.sameAsFirst
+          const generated = slotsForRoom(room, day?.dayDate ?? '')
+          const rowConflicts = generated.filter((s) => conflicts.has(slotKey(s))).length
+          return (
+            <div
+              key={room.venueId}
+              data-testid="slot-room-row"
+              data-venue-id={room.venueId}
+              className={cn('rounded-lg border p-3', room.closed && 'bg-muted/40', rowConflicts > 0 && 'border-destructive/40')}
+            >
+              <div className="flex flex-wrap items-end gap-3">
+                <div className="min-w-32 flex-1">
+                  <p className="text-sm font-medium">{nameOf(room.venueId)}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {room.closed ? 'Closed' : `${plural(generated.filter((s) => !s.isBreak).length, 'slot')}${generated.some((s) => s.isBreak) ? `, ${plural(generated.filter((s) => s.isBreak).length, 'break')}` : ''}`}
+                  </p>
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor={`${rowId}-start`} className="text-xs">Start</Label>
+                  <Input id={`${rowId}-start`} type="time" className="h-10 w-28" value={room.start} disabled={locked || room.closed}
+                    onChange={(e) => updateRoom(index, { start: e.target.value })} />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor={`${rowId}-end`} className="text-xs">End</Label>
+                  <Input id={`${rowId}-end`} type="time" className="h-10 w-28" value={room.end} disabled={locked || room.closed}
+                    aria-invalid={!room.closed && room.end <= room.start ? true : undefined}
+                    onChange={(e) => updateRoom(index, { end: e.target.value })} />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor={`${rowId}-length`} className="text-xs">Slot length</Label>
+                  <Select id={`${rowId}-length`} className="h-10" wrapperClassName="w-auto" value={room.slotMinutes} disabled={locked || room.closed}
+                    onChange={(e) => updateRoom(index, { slotMinutes: Number(e.target.value) })}>
+                    {SLOT_LENGTH_OPTIONS.map((m) => <option key={m} value={m}>{lengthLabel(m)}</option>)}
+                  </Select>
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor={`${rowId}-break`} className="text-xs">Break</Label>
+                  <Select id={`${rowId}-break`} className="h-10" wrapperClassName="w-auto" value={room.breakMinutes} disabled={locked || room.closed}
+                    onChange={(e) => updateRoom(index, { breakMinutes: Number(e.target.value) })}>
+                    {BREAK_LENGTH_OPTIONS.map((m) => <option key={m} value={m}>{m === 0 ? 'None' : `${m} min`}</option>)}
+                  </Select>
+                </div>
+                <div className="flex items-center gap-2 pb-2">
+                  <Switch
+                    size="sm"
+                    checked={room.closed}
+                    onCheckedChange={(next) => updateRoom(index, { closed: next })}
+                    aria-label={`Closed this day: ${nameOf(room.venueId)}`}
+                  />
+                  <span className="text-sm text-muted-foreground">Closed this day</span>
+                </div>
+                {index > 0 && (
+                  <div className="flex items-center gap-2 pb-2">
+                    <Checkbox
+                      id={`${rowId}-same`}
+                      checked={room.sameAsFirst}
+                      onCheckedChange={(next) => updateRoom(index, { sameAsFirst: next === true })}
+                    />
+                    <Label htmlFor={`${rowId}-same`} className="font-normal">Same as first room</Label>
+                  </div>
+                )}
+              </div>
+            </div>
+          )
+        })}
       </div>
 
-      {/* Preview */}
-      {pattern.length > 0 && (
+      {/* Preview: this day's rooms across their generated slots. */}
+      {rooms.length > 0 && (
         <div className="space-y-2">
-          <p className="text-sm font-medium">Each day: {plural(pattern.filter(s => !s.isBreak).length, 'session')}, {plural(pattern.filter(s => s.isBreak).length, 'break')}</p>
-          <div className="rounded-lg border bg-muted/30 p-3 max-h-48 overflow-y-auto">
-            <div className="space-y-1.5">
-              {pattern.map((slot, index) => (
-                <div
-                  key={index}
-                  className={cn(
-                    'flex items-center justify-between text-sm px-2 py-1 rounded',
-                    slot.isBreak ? 'bg-signal-amber/10 text-signal-amber' : 'bg-background'
-                  )}
-                >
-                  <span>
-                    {formatTime(slot.startTime)}–{formatTime(slot.endTime)}
-                  </span>
-                  {slot.isBreak && (
-                    <Badge variant="secondary" className="text-xs">
-                      <Coffee className="h-3 w-3 mr-1" />
-                      Break
-                    </Badge>
-                  )}
-                </div>
-              ))}
+          <p className="text-sm font-medium">
+            {eventDays.find((d) => d.date === activeDay)?.label ?? 'This day'}: {plural(perDay.get(activeDay) ?? 0, 'slot')}
+          </p>
+          <div className="overflow-x-auto rounded-lg border bg-muted/30 p-3">
+            <div className="min-w-max space-y-1.5">
+              {rooms.map((room) => {
+                const generated = slotsForRoom(room, day?.dayDate ?? '')
+                return (
+                  <div key={room.venueId} className="flex items-center gap-2" data-testid="slot-preview-row">
+                    <span className="w-32 shrink-0 truncate text-xs text-muted-foreground">{nameOf(room.venueId)}</span>
+                    {room.closed ? (
+                      <span className="inline-flex items-center gap-1 text-xs text-muted-foreground"><Ban className="h-3 w-3" aria-hidden="true" />Closed</span>
+                    ) : generated.length === 0 ? (
+                      <span className="text-xs text-muted-foreground">No slots — check the hours</span>
+                    ) : (
+                      generated.map((slot) => {
+                        const clash = conflicts.has(slotKey(slot))
+                        return (
+                          <span
+                            key={`${slot.startTime}-${slot.endTime}`}
+                            data-testid="slot-preview-cell"
+                            data-conflict={clash ? 'true' : undefined}
+                            className={cn(
+                              'whitespace-nowrap rounded px-2 py-1 text-xs',
+                              clash ? 'bg-destructive/10 text-destructive ring-1 ring-destructive/40'
+                                : slot.isBreak ? 'bg-signal-amber/10 text-signal-amber' : 'bg-background',
+                            )}
+                          >
+                            {slot.isBreak && <Coffee className="mr-1 inline h-3 w-3" aria-hidden="true" />}
+                            {formatClock(slot.startTime)}
+                          </span>
+                        )
+                      })
+                    )}
+                  </div>
+                )
+              })}
             </div>
           </div>
-          <p className="text-xs text-muted-foreground">
-            {venueId === ALL ? 'Every room' : selectedVenue?.name} · {dayDate === ALL ? 'every day' : eventDays.find(d => d.date === dayDate)?.label} · {plural(preview.length, 'slot')} in total, saved together or not at all
+          <p className="text-xs text-muted-foreground" data-testid="slot-total">
+            {plural(counts.total, 'slot')} in total across {plural(eventDays.length, 'day')}
+            {counts.breaks > 0 ? ` (${plural(counts.breaks, 'break')})` : ''} · saved together or not at all
           </p>
         </div>
       )}
 
-      {conflicts.length > 0 && <p role="alert" className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-sm text-destructive">
-        {plural(conflicts.length, 'proposed slot')} {conflicts.length === 1 ? 'overlaps' : 'overlap'} existing availability. Choose another time, room or day before adding slots.
-      </p>}
-      {startHour >= endHour && (
-        <p className="text-sm text-destructive">End time must be after start time</p>
+      {conflicts.size > 0 && (
+        <p role="alert" className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-sm text-destructive">
+          {plural(conflicts.size, 'proposed slot')} {conflicts.size === 1 ? 'overlaps' : 'overlap'} availability this gathering already has. Change the hours, or close that room for the day, before adding slots.
+        </p>
+      )}
+      {invalidRows.length > 0 && (
+        <p role="alert" className="text-sm text-destructive">
+          {invalidRows.length === 1 ? 'One room ends' : `${invalidRows.length} rooms end`} before it starts — no slots are generated there.
+        </p>
+      )}
+      {tooMany && (
+        <p role="alert" className="text-sm text-destructive">
+          That is {plural(counts.total, 'slot')}; at most {MAX_SLOTS_PER_SAVE.toLocaleString()} can be saved at once. Shorten the hours or do one day at a time.
+        </p>
       )}
 
       <div className="flex flex-wrap justify-end gap-2 pt-2">
-        <Button variant="outline" onClick={onCancel} disabled={isSaving}>
-          Cancel
-        </Button>
+        <Button variant="outline" onClick={onCancel} disabled={isSaving}>Cancel</Button>
         <Button
-          onClick={() => onGenerate(preview)}
+          onClick={() => onGenerate(allSlots)}
           loading={isSaving}
-          disabled={preview.length === 0 || conflicts.length > 0}
+          disabled={counts.total === 0 || conflicts.size > 0 || tooMany}
         >
           {!isSaving && <CalendarPlus className="h-4 w-4 mr-2" aria-hidden="true" />}
-          Add {plural(preview.length, 'slot')}
+          Add {plural(counts.total, 'slot')}
         </Button>
       </div>
     </div>
