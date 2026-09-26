@@ -313,7 +313,7 @@ async function openDueAttendanceRounds(report: LifecycleJobReport, events: Clock
         type: 'voting_opened',
         title: `Attendance voting is open for ${event.name}`,
         body: `You have ${round.credits} fresh credits. Vote for a session while you are in it, from My schedule or the session page.`,
-        actionUrl: `/e/${event.slug}/my-schedule`,
+        actionUrl: `/e/${event.slug}/schedule?view=mine`,
         data: { round: 'attendance', closes_at: round.closesAt },
       })
       return round

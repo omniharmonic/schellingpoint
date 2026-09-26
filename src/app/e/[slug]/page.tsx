@@ -109,7 +109,7 @@ export default async function EventPage({ params }: { params: Promise<{ slug: st
       ? { href: `/e/${event.slug}/propose`, icon: FileText, label: 'Propose a session' }
       : { href: `/e/${event.slug}/sessions`, icon: FileText, label: 'Sessions' },
     { href: `/e/${event.slug}/my-votes`, icon: Vote, label: 'My votes' },
-    { href: `/e/${event.slug}/my-schedule`, icon: Calendar, label: 'My schedule' },
+    { href: `/e/${event.slug}/schedule?view=mine`, icon: Calendar, label: 'My schedule' },
     { href: `/e/${event.slug}/participants`, icon: Users, label: 'People' },
   ]
 

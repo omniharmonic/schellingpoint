@@ -175,7 +175,7 @@ export default function EventSessionsPage() {
       toast({
         title: isFavorited ? 'Removed from my schedule' : 'Saved to my schedule',
         variant: 'success',
-        action: isFavorited ? undefined : { label: 'View my schedule', onClick: () => router.push(`/e/${event.slug}/my-schedule`) },
+        action: isFavorited ? undefined : { label: 'View my schedule', onClick: () => router.push(`/e/${event.slug}/schedule?view=mine`) },
       })
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Your saved schedule could not be updated. Please try again.')

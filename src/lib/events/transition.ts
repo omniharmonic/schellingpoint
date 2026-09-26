@@ -133,7 +133,7 @@ export async function transitionSideEffects(
         type: 'voting_opened',
         title: `Attendance voting is open for ${row.name}`,
         body: `You have ${attendanceRound.credits} fresh credits. Vote for a session while you are in it, from My schedule or the session page.`,
-        actionUrl: `/e/${row.slug}/my-schedule`,
+        actionUrl: `/e/${row.slug}/schedule?view=mine`,
         data: { round: 'attendance', closes_at: attendanceRound.closesAt },
       })
     }

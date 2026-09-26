@@ -160,7 +160,15 @@ test.describe('production regressions: uploads, session navigation, map tiles', 
       await expect(page.getByText(`Regression session ${gathering.slug}`)).toBeVisible()
       await page.getByRole('button', { name: /^Save .* to my schedule$/ }).first().click()
 
-      for (const url of [`/e/${gathering.slug}/my-schedule`, `/e/${gathering.slug}/sessions?filter=mine`, `/e/${gathering.slug}/my-schedule`]) {
+      // My schedule is a tab of Schedule (mobile shell design §4); `/my-schedule` redirects to it,
+      // and that redirect is pinned in tests/home-schedule.spec.ts. Here we want the two pages
+      // themselves, and history between them, so navigate straight at the tab: a server redirect
+      // in the middle of the history stack is not what this regression is about.
+      for (const url of [
+        `/e/${gathering.slug}/schedule?view=mine`,
+        `/e/${gathering.slug}/sessions?filter=mine`,
+        `/e/${gathering.slug}/schedule?view=mine`,
+      ]) {
         await page.goto(url)
         await expect(crashed(page)).toHaveCount(0)
       }
@@ -193,7 +201,7 @@ test.describe('production regressions: uploads, session navigation, map tiles', 
       await expect(crashed(page)).toHaveCount(0)
       await expect(page.getByRole('heading', { name: 'Sessions' })).toBeVisible()
 
-      await page.goto(`/e/${gathering.slug}/my-schedule`)
+      await page.goto(`/e/${gathering.slug}/schedule?view=mine`)
       await expect(crashed(page)).toHaveCount(0)
       await expect(page.getByRole('heading', { name: 'My schedule' })).toBeVisible()
     } finally {

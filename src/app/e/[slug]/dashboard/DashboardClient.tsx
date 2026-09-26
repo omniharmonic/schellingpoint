@@ -1,5 +1,18 @@
 'use client'
 
+/**
+ * Home (mobile shell design §3), in the order the design gives:
+ *
+ *   1. the Now line — the one bold element, and the only motion on the page
+ *   2. Next for you — the next session you saved, or the next thing on; hidden before publish
+ *   3. Your ballot · 4. Your proposals · 5. From the organizers
+ *   6. Recently proposed · Sessions you're supporting · the assistant card
+ *   7. the organizer banner, with "N of M sessions placed" while the schedule is unpublished
+ *
+ * The stat tiles are gone: the two counts they carried are the Now line's second line. No vote
+ * totals and no leaderboard — those were removed on purpose and stay removed (spec §5.3).
+ */
+
 import * as React from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
@@ -8,28 +21,33 @@ import {
   Clock,
   Heart,
   Lock,
-  Mic,
-  Presentation,
+  MapPin,
+  Megaphone,
   MessagesSquare,
-  Users,
-  Vote,
-  Zap,
+  Mic,
+  Navigation,
   Sparkles,
   UserPlus,
+  Zap,
 } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
 import { DashboardLayout } from '@/components/DashboardLayout'
-import { PageHeader } from '@/components/PageHeader'
-import { useAuth, viewerDisplayName } from '@/hooks/useAuth'
+import { NowLine, type NowLineInput } from '@/components/home/NowLine'
+import { useAuth } from '@/hooks/useAuth'
 import { useVoting } from '@/hooks/useVoting'
 import { useEvent, useEventRole, JoinGatheringButton } from '@/contexts/EventContext'
 import { AssistantCard } from '@/components/knowledge/AssistantCard'
+import { apiFetch } from '@/lib/api/client'
+import { directionsHref } from '@/lib/geo/directions'
 import { isParticipationOpen } from '@/lib/events/lifecycle'
 import { sessionStatusBadge } from '@/lib/labels'
-import { plural, SEPARATOR } from '@/lib/format'
+import { plural } from '@/lib/format'
+import { cn } from '@/lib/utils'
+import type { Announcement } from '@/app/api/v1/events/[slug]/announcements/route'
+import type { NextUpResponse } from '@/app/api/v1/events/[slug]/next-up/route'
 
 export interface DashboardData {
   stats: {
@@ -63,10 +81,6 @@ export interface DashboardData {
   isOrganizer: boolean
 }
 
-function formatWhen(iso: string): string {
-  return new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
-}
-
 export function DashboardClient({ data }: { data: DashboardData }) {
   return (
     <DashboardLayout>
@@ -86,13 +100,118 @@ function ViewAll({ href, label = 'View all' }: { href: string; label?: string })
   )
 }
 
+function formatWhen(iso: string, timeZone: string): string {
+  return new Date(iso).toLocaleString('en-US', {
+    timeZone,
+    weekday: 'short',
+    hour: 'numeric',
+    minute: '2-digit',
+  })
+}
+
+/* ─────────────────────────── 2. Next for you ─────────────────────────── */
+
+function NextForYou({
+  next,
+  kind,
+  timeZone,
+  eventSlug,
+}: {
+  next: NextUpResponse['next']
+  kind: NextUpResponse['kind']
+  timeZone: string
+  eventSlug: string
+}) {
+  // `directionsPlatform` reads the user agent, so the href is only computed in the browser.
+  const [href, setHref] = React.useState<string | null>(null)
+  React.useEffect(() => {
+    if (!next) {
+      setHref(null)
+      return
+    }
+    setHref(directionsHref({ lat: next.geo?.lat, lng: next.geo?.lng, query: next.directionsQuery }))
+  }, [next])
+
+  if (!next) return null
+  return (
+    <Card data-testid="next-for-you">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-lg">Next for you</CardTitle>
+      </CardHeader>
+      <CardContent className="pt-0">
+        <p className="text-xs text-muted-foreground">
+          {kind === 'saved' ? 'From your saved sessions' : 'Next in the program'}
+        </p>
+        <Link
+          href={`/e/${eventSlug}/sessions/${next.id}`}
+          className="mt-1 block rounded-md font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          {next.title}
+        </Link>
+        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-muted-foreground">
+          <span className="flex items-center gap-1.5">
+            <Clock className="h-4 w-4 shrink-0" aria-hidden />
+            {formatWhen(next.startsAt, timeZone)}
+          </span>
+          {next.room && (
+            <span className="flex min-w-0 items-center gap-1.5">
+              <MapPin className="h-4 w-4 shrink-0" aria-hidden />
+              <span className="truncate">{next.room}</span>
+            </span>
+          )}
+        </div>
+        {href && (
+          <a
+            href={href}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="mt-3 inline-flex items-center gap-1.5 text-sm font-medium text-primary underline-offset-4 hover:underline"
+          >
+            <Navigation className="h-4 w-4" aria-hidden />
+            Get directions
+          </a>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+/* ──────────────────── 6. the assistant card, collapsed ──────────────────── */
+
+/**
+ * The assistant card is one line on mobile (design §3.6): a row with "Connect" that reveals the
+ * card in place. On `md` and up the card is simply there, as it always was.
+ */
+function AssistantSection({ gatheringName }: { gatheringName: string }) {
+  const [open, setOpen] = React.useState(false)
+  return (
+    <>
+      {!open && (
+        <Card className="md:hidden" data-testid="assistant-collapsed">
+          <CardContent className="flex items-center justify-between gap-3 py-4">
+            <p className="min-w-0 text-sm font-medium">Use your own AI assistant here</p>
+            <Button variant="outline" size="sm" onClick={() => setOpen(true)}>
+              Connect
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+      <AssistantCard gatheringName={gatheringName} className={cn(!open && 'hidden md:block')} />
+    </>
+  )
+}
+
+/* ─────────────────────────────── the page ─────────────────────────────── */
+
 function Dashboard({ data }: { data: DashboardData }) {
   const router = useRouter()
-  const { user, profile, isLoading: authLoading } = useAuth()
+  const { user, isLoading: authLoading } = useAuth()
   const event = useEvent()
   const { isMember, joinable, joinBlockedBy } = useEventRole()
   const voting = useVoting(event.slug)
+  const attendance = useVoting(event.slug, 'attendance')
   const proposalsOpen = isParticipationOpen(event, 'propose')
+  const schedulePublished = !!event.schedulePublishedAt
 
   // The server rendered for whoever held the cookie then; re-render after sign-in/out.
   const renderedFor = React.useRef<string | null | undefined>(undefined)
@@ -103,43 +222,127 @@ function Dashboard({ data }: { data: DashboardData }) {
     renderedFor.current = id
   }, [authLoading, user?.id, router])
 
-  const pendingMine = data.mySessions.filter((s) => s.status === 'pending')
-  const liveMine = data.mySessions.filter((s) => s.status !== 'pending')
+  const [nextUp, setNextUp] = React.useState<NextUpResponse | null>(null)
+  React.useEffect(() => {
+    let mounted = true
+    apiFetch<NextUpResponse>(`/api/v1/events/${encodeURIComponent(event.slug)}/next-up`, { cache: 'no-store' })
+      .then((res) => {
+        if (mounted) setNextUp(res)
+      })
+      .catch(() => {
+        if (mounted) setNextUp(null)
+      })
+    return () => {
+      mounted = false
+    }
+  }, [event.slug, user?.id])
+
+  const [announcements, setAnnouncements] = React.useState<Announcement[]>([])
+  React.useEffect(() => {
+    if (!user) {
+      setAnnouncements([])
+      return
+    }
+    let mounted = true
+    apiFetch<{ announcements: Announcement[] }>(
+      `/api/v1/events/${encodeURIComponent(event.slug)}/announcements?limit=3`,
+      { cache: 'no-store' },
+    )
+      .then((res) => {
+        if (mounted) setAnnouncements(Array.isArray(res?.announcements) ? res.announcements : [])
+      })
+      .catch(() => {
+        if (mounted) setAnnouncements([])
+      })
+    return () => {
+      mounted = false
+    }
+  }, [event.slug, user?.id])
+
+  // "N of M sessions placed", while the schedule is unpublished (design §3.7).
+  const [placed, setPlaced] = React.useState<{ filled: number; slots: number } | null>(null)
+  React.useEffect(() => {
+    if (!data.isOrganizer || schedulePublished) {
+      setPlaced(null)
+      return
+    }
+    let mounted = true
+    apiFetch<{ schedule?: { filledSlots?: number; sessionSlots?: number } }>(
+      `/api/v1/events/${encodeURIComponent(event.slug)}/admin/overview`,
+      { cache: 'no-store' },
+    )
+      .then((res) => {
+        if (!mounted) return
+        const filled = res?.schedule?.filledSlots
+        const slots = res?.schedule?.sessionSlots
+        setPlaced(typeof filled === 'number' && typeof slots === 'number' ? { filled, slots } : null)
+      })
+      .catch(() => {
+        if (mounted) setPlaced(null)
+      })
+    return () => {
+      mounted = false
+    }
+  }, [data.isOrganizer, schedulePublished, event.slug])
+
   const supported = Object.entries(voting.allocation)
   const titles = new Map(voting.sessions.map((s) => [s.id, s]))
   const votesCast = supported.reduce((sum, [, v]) => sum + v, 0)
 
-  let votingHeadline: string
-  let votingDetail: string
-  switch (voting.status) {
-    case 'open':
-      votingHeadline = 'Open'
-      votingDetail = voting.round ? `closes ${formatWhen(voting.round.closesAt)}` : 'now'
-      break
-    case 'upcoming':
-      votingHeadline = 'Soon'
-      votingDetail = voting.round ? `opens ${formatWhen(voting.round.opensAt)}` : ''
-      break
-    case 'closed':
-      votingHeadline = 'Closed'
-      votingDetail = 'results published as a public tally'
-      break
-    default:
-      votingHeadline = 'Not open'
-      votingDetail = 'voting has not started'
+  const nowInput: NowLineInput = {
+    slug: event.slug,
+    name: event.name,
+    eventStatus: event.status,
+    schedulePublished,
+    voting: {
+      status: voting.status,
+      opensAt: voting.round?.opensAt ?? null,
+      closesAt: voting.round?.closesAt ?? null,
+      remaining: voting.signedIn ? voting.remaining : null,
+    },
+    attendance: {
+      open: attendance.signedIn && attendance.attendanceOpen && attendance.status === 'open',
+      live: nextUp?.live.total ?? attendance.votableNow.size,
+      liveSaved: nextUp?.live.saved ?? 0,
+    },
+    saved: data.favorites,
+    sessions: data.stats.sessions,
+    participants: data.stats.participants,
+    feedbackOpen: !!nextUp?.feedbackOpen,
   }
+
+  /**
+   * The organizer banner (§3.7): what is still waiting on them, and — while the schedule is
+   * unpublished — how much of the grid is filled. "2 of 2 placed" with nothing pending is not a
+   * chore, so it becomes the nudge to publish instead.
+   */
+  const pendingCount = data.stats.pending ?? 0
+  const roomToPlace = !!placed && placed.slots > 0 && placed.filled < placed.slots
+  const organizerTodo = {
+    heading: pendingCount > 0 || roomToPlace ? 'Still to do' : 'Ready to publish',
+    detail: [
+      pendingCount > 0 ? `${plural(pendingCount, 'session')} awaiting review` : null,
+      placed && placed.slots > 0
+        ? roomToPlace
+          ? `${placed.filled} of ${placed.slots} sessions placed`
+          : `all ${plural(placed.filled, 'session')} placed`
+        : null,
+    ]
+      .filter(Boolean)
+      .join(', '),
+  }
+  const showOrganizerBanner = data.isOrganizer && (pendingCount > 0 || (!!placed && placed.slots > 0))
 
   const showJoinCard = Boolean(user) && !isMember && (joinable === true || joinBlockedBy === 'ticket-required')
   const nothingYet =
-    data.stats.sessions === 0 && data.recentSessions.length === 0 && data.mySessions.length === 0 && supported.length === 0
+    data.stats.sessions === 0 &&
+    data.recentSessions.length === 0 &&
+    data.mySessions.length === 0 &&
+    supported.length === 0
 
   return (
     <div className="space-y-6">
-      <PageHeader
-        className="dashboard-welcome mb-0"
-        title={user ? `Welcome back, ${viewerDisplayName(profile, user)}` : 'Your gathering'}
-        subtitle={`Find your people. Follow your curiosity. Make ${event.name} your own.`}
-      />
+      <NowLine input={nowInput} />
 
       {showJoinCard && (
         <Card accent="left" accentColor="hsl(var(--signal))">
@@ -162,112 +365,9 @@ function Dashboard({ data }: { data: DashboardData }) {
         </Card>
       )}
 
-      <div className="dashboard-stats grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <Card className="stats-card" accent="top" accentColor="hsl(var(--signal))">
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-xs text-muted-foreground">Sessions</CardTitle>
-            <Presentation className="h-4 w-4 text-muted-foreground" strokeWidth={1.5} aria-hidden />
-          </CardHeader>
-          <CardContent>
-            <div className="stat-value tabular-nums">{data.stats.sessions}</div>
-            <p className="text-xs text-muted-foreground mt-1">{data.stats.scheduled} scheduled</p>
-          </CardContent>
-        </Card>
-
-        <Card className="stats-card" accent="top" accentColor="hsl(var(--signal-amber))">
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-xs text-muted-foreground">Voting</CardTitle>
-            <Vote className="h-4 w-4 text-muted-foreground" strokeWidth={1.5} aria-hidden />
-          </CardHeader>
-          <CardContent>
-            <div className="stat-value">{votingHeadline}</div>
-            <p className="text-xs text-muted-foreground mt-1">{votingDetail}</p>
-          </CardContent>
-        </Card>
-
-        {data.stats.participants !== null && (
-          <Card className="stats-card" accent="top" accentColor="hsl(var(--signal-cyan))">
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-xs text-muted-foreground">Participants</CardTitle>
-              <Users className="h-4 w-4 text-muted-foreground" strokeWidth={1.5} aria-hidden />
-            </CardHeader>
-            <CardContent>
-              <div className="stat-value tabular-nums">{data.stats.participants}</div>
-              <p className="text-xs text-muted-foreground mt-1">people shaping the gathering</p>
-            </CardContent>
-          </Card>
-        )}
-
-        {user && voting.status !== 'none' && voting.status !== 'closed' && (
-          <Card className="stats-card" accent="top" accentColor="hsl(var(--signal))">
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-xs text-muted-foreground">Your credits</CardTitle>
-              <Vote className="h-4 w-4 text-primary" strokeWidth={1.5} aria-hidden />
-            </CardHeader>
-            <CardContent>
-              <div className="stat-value tabular-nums text-primary">{voting.remaining}</div>
-              <p className="text-xs text-muted-foreground mt-1">
-                {voting.spent} of {voting.budget} allocated
-              </p>
-            </CardContent>
-          </Card>
-        )}
-      </div>
-
-      {user && isMember && (
-        <div className="grid gap-4 md:grid-cols-3">
-          <Card interactive>
-            <Link href={`/e/${event.slug}/sessions`} className="block">
-              <CardContent className="pt-6">
-                <div className="flex items-center gap-4">
-                  <div className="p-3 rounded-lg bg-primary/10">
-                    <Vote className="h-6 w-6 text-primary" aria-hidden />
-                  </div>
-                  <div>
-                    <h2 className="font-semibold">{voting.canVote ? 'Vote on sessions' : 'Explore sessions'}</h2>
-                    <p className="text-sm text-muted-foreground">
-                      {voting.canVote ? `${plural(voting.remaining, 'credit')} remaining` : 'Discover the ideas taking shape'}
-                    </p>
-                  </div>
-                </div>
-              </CardContent>
-            </Link>
-          </Card>
-
-          <Card interactive>
-            <Link href={`/e/${event.slug}/my-schedule`} className="block">
-              <CardContent className="pt-6">
-                <div className="flex items-center gap-4">
-                  <div className="p-3 rounded-lg bg-primary/10">
-                    <Heart className="h-6 w-6 text-primary" aria-hidden />
-                  </div>
-                  <div>
-                    <h2 className="font-semibold">My schedule</h2>
-                    <p className="text-sm text-muted-foreground">{plural(data.favorites, 'session')} saved</p>
-                  </div>
-                </div>
-              </CardContent>
-            </Link>
-          </Card>
-
-          <Card interactive>
-            <Link href={`/e/${event.slug}/${proposalsOpen ? 'propose' : 'participants'}`} className="block">
-              <CardContent className="pt-6">
-                <div className="flex items-center gap-4">
-                  <div className="p-3 rounded-lg bg-primary/10">
-                    <Presentation className="h-6 w-6 text-primary" aria-hidden />
-                  </div>
-                  <div>
-                    <h2 className="font-semibold">{proposalsOpen ? 'Propose a session' : 'Find your people'}</h2>
-                    <p className="text-sm text-muted-foreground">
-                      {proposalsOpen ? 'Share your knowledge' : 'Connect with the community'}
-                    </p>
-                  </div>
-                </div>
-              </CardContent>
-            </Link>
-          </Card>
-        </div>
+      {/* 2. Next for you — nothing to point at before the schedule is out. */}
+      {schedulePublished && nextUp && (
+        <NextForYou next={nextUp.next} kind={nextUp.kind} timeZone={event.timezone} eventSlug={event.slug} />
       )}
 
       {nothingYet && (
@@ -306,8 +406,9 @@ function Dashboard({ data }: { data: DashboardData }) {
         </Card>
       )}
 
+      {/* 3. Your ballot. */}
       {user && isMember && voting.status !== 'none' && (
-        <Card accent="left" accentColor="hsl(var(--signal))" className="stats-card">
+        <Card accent="left" accentColor="hsl(var(--signal))" data-testid="your-ballot">
           <CardContent className="pt-6">
             <div className="flex items-center justify-between mb-4">
               <h2 className="font-semibold flex items-center gap-2">
@@ -319,8 +420,7 @@ function Dashboard({ data }: { data: DashboardData }) {
             {voting.status === 'closed' ? (
               <p className="flex items-start gap-2 text-sm text-muted-foreground">
                 <Lock className="h-4 w-4 mt-0.5 flex-shrink-0" aria-hidden />
-                Voting has closed and ballots are sealed: nobody, including you, can see how anyone voted. The public tally
-                shows the result.
+                Ballots are sealed: nobody, not even you, can see how anyone voted.
               </p>
             ) : (
               <>
@@ -362,51 +462,80 @@ function Dashboard({ data }: { data: DashboardData }) {
         </Card>
       )}
 
-      {user && pendingMine.length > 0 && (
-        <Card className="border-signal-amber/30 bg-signal-amber/5">
+      {/* 4. Your proposals — one card for every status, pending included. */}
+      {user && data.mySessions.length > 0 && (
+        <Card data-testid="your-proposals">
           <CardHeader className="pb-3">
             <div className="flex items-center justify-between">
               <CardTitle className="text-lg flex items-center gap-2">
-                <Clock className="h-5 w-5 text-signal-amber" aria-hidden />
-                My pending proposals
+                <Mic className="h-5 w-5 text-primary" aria-hidden />
+                Your proposals
               </CardTitle>
-              <div className="flex items-center gap-2">
-                <Badge variant="amber">Awaiting review</Badge>
-                <ViewAll href={`/e/${event.slug}/sessions?filter=mine`} />
-              </div>
+              <ViewAll href={`/e/${event.slug}/sessions?filter=mine`} />
             </div>
           </CardHeader>
           <CardContent className="pt-0">
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {pendingMine.map((session) => {
+            <ul className="grid gap-2 sm:grid-cols-2">
+              {data.mySessions.slice(0, 6).map((session) => {
                 const status = sessionStatusBadge(session.status)
                 return (
-                  <Link
-                    key={session.id}
-                    href={`/e/${event.slug}/sessions/${session.id}`}
-                    className="block p-4 rounded-lg border border-signal-amber/20 bg-background/50 hover:border-signal-amber/50 hover:bg-muted/30 transition-all"
-                  >
-                    <div className="flex items-start justify-between gap-2 mb-2">
-                      <p className="font-medium line-clamp-2">{session.title}</p>
-                      <Badge variant={status.badge} className="flex-shrink-0">{status.label}</Badge>
-                    </div>
-                    <p className="text-xs text-muted-foreground line-clamp-2 mb-2">{session.description || 'No description'}</p>
-                    <div className="flex items-center justify-between text-xs text-muted-foreground">
-                      <span className="capitalize">{session.format || 'session'}</span>
-                      <span>{new Date(session.created_at).toLocaleDateString()}</span>
-                    </div>
-                  </Link>
+                  <li key={session.id}>
+                    <Link
+                      href={`/e/${event.slug}/sessions/${session.id}`}
+                      className="flex items-start justify-between gap-2 rounded-lg p-2.5 transition-colors hover:bg-muted/50"
+                    >
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate font-medium">{session.title}</span>
+                        <span className="block text-xs capitalize text-muted-foreground">
+                          {session.format || 'session'}
+                        </span>
+                      </span>
+                      <Badge variant={status.badge} className="flex-shrink-0">
+                        {status.label}
+                      </Badge>
+                    </Link>
+                  </li>
                 )
               })}
-            </div>
-            <p className="text-xs text-muted-foreground mt-3">
-              Your proposals are being reviewed by organizers. You can still open and edit them while they wait. Once
-              approved they’ll appear in the sessions list.
-            </p>
+            </ul>
+            {data.mySessions.some((s) => s.status === 'pending') && (
+              <p className="mt-3 text-xs text-muted-foreground">
+                Organizers are reviewing what is marked awaiting review. You can still edit it while it waits.
+              </p>
+            )}
           </CardContent>
         </Card>
       )}
 
+      {/* 5. From the organizers. */}
+      {announcements.length > 0 && (
+        <Card data-testid="from-the-organizers">
+          <CardHeader className="pb-3">
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-lg flex items-center gap-2">
+                <Megaphone className="h-5 w-5 text-primary" aria-hidden />
+                From the organizers
+              </CardTitle>
+              <ViewAll href={`/e/${event.slug}/notifications`} label="All notifications" />
+            </div>
+          </CardHeader>
+          <CardContent className="pt-0">
+            <ul className="space-y-3">
+              {announcements.map((a) => (
+                <li key={a.id}>
+                  <p className="font-medium">{a.title}</p>
+                  {a.body && <p className="text-sm text-muted-foreground">{a.body}</p>}
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    {new Date(a.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* 6. Recently proposed. */}
       {data.recentSessions.length > 0 && (
         <Card>
           <CardHeader className="pb-3">
@@ -426,16 +555,11 @@ function Dashboard({ data }: { data: DashboardData }) {
                     href={`/e/${event.slug}/sessions/${session.id}`}
                     className="flex items-center gap-3 p-2.5 rounded-lg hover:bg-muted/50 transition-colors group"
                   >
-                    <div className="w-8 h-8 rounded-full bg-muted flex items-center justify-center flex-shrink-0">
-                      <MessagesSquare className="h-4 w-4 text-muted-foreground" aria-hidden />
-                    </div>
                     <div className="flex-1 min-w-0">
                       <p className="font-medium truncate group-hover:text-primary transition-colors">{session.title}</p>
-                      <div className="flex items-center text-xs text-muted-foreground overflow-hidden">
-                        {session.host_display_name && <span className="truncate">{session.host_display_name}</span>}
-                        {session.host_display_name && <span className="flex-shrink-0" aria-hidden>{SEPARATOR}</span>}
-                        <span className="flex-shrink-0">{new Date(session.created_at).toLocaleDateString()}</span>
-                      </div>
+                      {session.host_display_name && (
+                        <p className="truncate text-xs text-muted-foreground">{session.host_display_name}</p>
+                      )}
                     </div>
                     {session.format && (
                       <Badge variant="secondary" className="capitalize flex-shrink-0">
@@ -450,40 +574,7 @@ function Dashboard({ data }: { data: DashboardData }) {
         </Card>
       )}
 
-      {user && liveMine.length > 0 && (
-        <Card>
-          <CardHeader className="pb-3">
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-lg flex items-center gap-2">
-                <Mic className="h-5 w-5 text-primary" aria-hidden />
-                My sessions
-              </CardTitle>
-              <ViewAll href={`/e/${event.slug}/sessions?filter=mine`} />
-            </div>
-          </CardHeader>
-          <CardContent className="pt-0">
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {liveMine.map((session) => {
-                const status = sessionStatusBadge(session.status)
-                return (
-                  <Link
-                    key={session.id}
-                    href={`/e/${event.slug}/sessions/${session.id}`}
-                    className="p-4 rounded-lg border hover:border-primary/50 hover:bg-muted/30 transition-all group"
-                  >
-                    <div className="flex items-start justify-between gap-2 mb-2">
-                      <p className="font-medium line-clamp-2 group-hover:text-primary transition-colors">{session.title}</p>
-                      <Badge variant={status.badge} className="flex-shrink-0">{status.label}</Badge>
-                    </div>
-                    <p className="text-xs text-muted-foreground capitalize">{session.format || 'session'}</p>
-                  </Link>
-                )
-              })}
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
+      {/* Sessions you're supporting — your own votes, never anyone else's. */}
       {user && supported.length > 0 && (
         <Card>
           <CardHeader className="pb-3">
@@ -496,35 +587,34 @@ function Dashboard({ data }: { data: DashboardData }) {
             </div>
           </CardHeader>
           <CardContent className="pt-0">
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            <ul className="grid gap-2 sm:grid-cols-2">
               {supported
                 .sort(([, a], [, b]) => b - a)
                 .slice(0, 6)
                 .map(([id, votes]) => (
-                  <Link
-                    key={id}
-                    href={`/e/${event.slug}/sessions/${id}`}
-                    className="p-4 rounded-lg border hover:border-primary/50 hover:bg-muted/30 transition-all group"
-                  >
-                    <p className="font-medium line-clamp-2 group-hover:text-primary transition-colors mb-2">
-                      {titles.get(id)?.title ?? 'Session'}
-                    </p>
-                    <div className="flex items-center justify-between text-sm">
-                      <span className="text-muted-foreground">Your votes</span>
-                      <span className="font-semibold text-primary">{votes}</span>
-                    </div>
-                  </Link>
+                  <li key={id}>
+                    <Link
+                      href={`/e/${event.slug}/sessions/${id}`}
+                      className="flex items-center justify-between gap-3 rounded-lg p-2.5 transition-colors hover:bg-muted/50"
+                    >
+                      <span className="min-w-0 flex-1 truncate font-medium">{titles.get(id)?.title ?? 'Session'}</span>
+                      <span className="shrink-0 text-sm text-muted-foreground">
+                        {plural(votes, 'vote')} from you
+                      </span>
+                    </Link>
+                  </li>
                 ))}
-            </div>
+            </ul>
           </CardContent>
         </Card>
       )}
 
       {/* Discoverability (design 2026-09-25 §2.3a): members can point their own assistant here. */}
-      {user && isMember && <AssistantCard gatheringName={event.name} />}
+      {user && isMember && <AssistantSection gatheringName={event.name} />}
 
-      {data.isOrganizer && data.stats.pending !== null && data.stats.pending > 0 && (
-        <Card className="border-signal-amber/30 bg-signal-amber/5">
+      {/* 7. Organizer banner. */}
+      {showOrganizerBanner && (
+        <Card className="border-signal-amber/30 bg-signal-amber/5" data-testid="organizer-banner">
           <CardContent className="pt-6">
             <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex items-center gap-4">
@@ -532,12 +622,12 @@ function Dashboard({ data }: { data: DashboardData }) {
                   <Clock className="h-6 w-6 text-signal-amber" aria-hidden />
                 </div>
                 <div>
-                  <h2 className="font-semibold">Awaiting review</h2>
-                  <p className="text-sm text-muted-foreground">{plural(data.stats.pending, 'session')} waiting for a decision</p>
+                  <h2 className="font-semibold">{organizerTodo.heading}</h2>
+                  <p className="text-sm text-muted-foreground">{organizerTodo.detail}</p>
                 </div>
               </div>
               <Button asChild>
-                <Link href={`/e/${event.slug}/admin`}>Review proposals</Link>
+                <Link href={`/e/${event.slug}/admin`}>Organizer workspace</Link>
               </Button>
             </div>
           </CardContent>

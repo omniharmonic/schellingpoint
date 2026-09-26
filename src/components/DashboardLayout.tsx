@@ -78,7 +78,6 @@ const ROUTE_LABELS: ReadonlyArray<readonly [suffix: string, label: string]> = [
   ['/settings/notifications', 'Notification preferences'],
   ['/notifications', 'Notifications'],
   ['/settings', 'Settings'],
-  ['/my-schedule', 'My schedule'],
   ['/propose', 'Propose a session'],
   ['/tickets', 'Tickets'],
   ['/checkin', 'Check-in'],
