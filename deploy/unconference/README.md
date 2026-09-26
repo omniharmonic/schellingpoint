@@ -69,7 +69,7 @@ key) and organizers must paste their key again. If you must rotate, tell the org
 
 ```sh
 ssh -i ~/.ssh/frontrange-twin root@2.29.37.247
-git clone -b atproto https://github.com/omniharmonic/schellingpoint.git /opt/unconference
+git clone -b main https://github.com/omniharmonic/schellingpoint.git /opt/unconference
 cd /opt/unconference
 install -m 600 /dev/null deploy/unconference/.env   # then paste the prepared env
 deploy/unconference/release.sh
@@ -77,6 +77,10 @@ deploy/unconference/release.sh
 
 `release.sh` pulls, backs up (when a stack is running), builds, starts Postgres and the PDS, runs
 migrations, starts everything, waits for `/api/health`, and runs the privacy audit.
+
+Production tracks `origin/main`. The former `atproto` branch has been merged into `main`;
+the web2 release is preserved at the `archive/web2-final` tag. Git pushes do not automatically
+release this Docker stack.
 
 ## Everyday operations
 
@@ -89,8 +93,18 @@ $C exec app npm run -s atproto:audit            # privacy audit against producti
 $C run --rm --no-deps --entrypoint /usr/local/bin/backup.sh backup   # backup now
 ```
 
-Roll back: `git checkout <previous commit> && deploy/unconference/release.sh` (the previous image is
-also tagged `unconference-app:rollback-<commit>`).
+The previous application image is tagged `unconference-app:rollback-<commit>`. After checking
+that it is compatible with the current database schema, restore that image without rebuilding:
+
+```sh
+RELEASE=rollback-<commit> $C up -d --no-build --no-deps app indexer
+curl --fail https://unconference.events/api/health
+$C exec -T app npm run -s atproto:audit
+```
+
+This rolls back application code, not database migrations. A schema rollback needs its own
+restore plan. Keep the checkout on `main`; `release.sh` pulls a tracking branch and cannot be
+used from a detached historical commit.
 
 A run counts as good only when every artifact it should have produced exists at a plausible size,
 locally and in the bucket (`pds-blocks.tar.gz.age` only once `/pds/blocks` exists). A missing one is
@@ -114,12 +128,12 @@ age -d -i ~/.config/unconference/backup-age.key pds-blocks.tar.gz.age | tar -xz 
 
 ## Payments activation
 
-**Not activated:** no Stripe key exists on this box or anywhere else, so paid checkout answers
-503 and free tickets work as usual. The *model* is now the right one — organizers are the
-merchant of record and are charged Stripe's processing fees directly, with unconference taking
-only the contribution as an application fee — and it is covered by tests, but Stripe has never
-answered any of it. Read [`docs/STRIPE_ACTIVATION.md`](../../docs/STRIPE_ACTIVATION.md) before
-touching anything here; it lists exactly what is implemented and what still needs a human.
+Paid checkout requires a configured Stripe platform and an eligible connected organizer
+account. Without a key, paid checkout answers 503; free tickets remain available. Organizers
+are the merchant of record and pay Stripe processing fees directly, with unconference taking
+the selected contribution as an application fee. Automated tests do not establish live payment
+readiness. Follow [`docs/STRIPE_ACTIVATION.md`](../../docs/STRIPE_ACTIVATION.md), verify the
+current protected environment, and complete its sandbox checklist before enabling live sales.
 
 Configure the server environment and recreate the app:
 

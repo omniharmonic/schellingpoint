@@ -1,4 +1,7 @@
-# unconference.events — AppView build plan (branch `atproto`)
+# unconference.events — AppView architecture and build plan
+
+> Promoted to the official `main` application on 2026-09-26. Earlier references to the
+> `atproto` branch describe the migration history. Production: https://unconference.events.
 
 Decided 2026-09-14 with Benjamin: build the ATProto instance **to the migration spec**
 (`docs/ATPROTO_MIGRATION_SPEC.md`) before deploying it: our own PDS, custodial email→DID

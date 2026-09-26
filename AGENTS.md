@@ -1,8 +1,9 @@
 # unconference.events (Schelling Point on ATProto) — Codex Instructions
 
-This is the `atproto` branch: Schelling Point rebuilt to `docs/ATPROTO_MIGRATION_SPEC.md` as an
-AT Protocol application. **There is no Supabase on this branch.** The web2 product (Vercel +
-hosted Supabase, schellingpoint.app) lives on `main`; do not merge this branch into `main`.
+The official application is unconference on AT Protocol, maintained on **`main`** and deployed
+at **https://unconference.events** on Hetzner. **There is no Supabase in the current app.**
+The former `atproto` development branch has been promoted to `main`; the previous web2 product
+is preserved at the `archive/web2-final` Git tag. Start new work from `main`.
 
 ## Start here
 1. `docs/ATPROTO_APPVIEW_PLAN.md` — architecture, contracts, file ownership, 31-item spec checklist.

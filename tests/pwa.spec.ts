@@ -136,14 +136,13 @@ test.describe('PWA: the service worker and the offline page', () => {
    * instead of the worker's offline fallback.
    */
   async function waitForWorker(page: Page) {
-    await page.waitForFunction(
-      async () => {
-        const registration = await navigator.serviceWorker.getRegistration()
-        return !!registration?.active && !!navigator.serviceWorker.controller
-      },
-      undefined,
-      { timeout: 60_000 },
-    )
+    // waitForFunction in our Playwright version treats an async predicate's Promise
+    // as truthy before it resolves. Poll the resolved value so offline mode cannot
+    // race worker installation or activation.
+    await expect.poll(() => page.evaluate(async () => {
+      const registration = await navigator.serviceWorker.getRegistration()
+      return registration?.active?.state === 'activated' && !!navigator.serviceWorker.controller
+    }), { timeout: 60_000 }).toBe(true)
   }
 
   test('sw.js is served as JavaScript and registers on a production build', async ({ page, request }) => {
@@ -161,12 +160,12 @@ test.describe('PWA: the service worker and the offline page', () => {
     await page.goto(`${prodBase}/`, { waitUntil: 'load' })
     await waitForWorker(page)
     // The worker precaches `/offline` during install; give that a moment to finish.
-    await page.waitForFunction(async () => {
+    await expect.poll(() => page.evaluate(async () => {
       for (const name of await caches.keys()) {
         if (await (await caches.open(name)).match('/offline')) return true
       }
       return false
-    }, undefined, { timeout: 30_000 })
+    }), { timeout: 30_000 }).toBe(true)
 
     await context.setOffline(true)
     try {

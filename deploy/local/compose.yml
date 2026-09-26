@@ -1,4 +1,4 @@
-# Local development stack for the unconference.events AppView (branch `atproto`).
+# Local development stack for the unconference.events AppView (official branch `main`).
 #
 #   postgres  the only database            127.0.0.1:55432  (unconference/unconference)
 #   plc       in-memory did:plc directory  127.0.0.1:2582   (state is lost on restart)

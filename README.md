@@ -1,224 +1,132 @@
-# SchellingPoint
+# unconference
 
-**Decentralized session scheduling for community-governed events.**
+**A shared space for people to shape their own gathering.**
 
-SchellingPoint is the official unconference coordination tool for [EthBoulder](https://ethboulder.xyz) — enabling participants to propose sessions, allocate voice through quadratic voting, and collectively shape the event schedule.
+[Open unconference.events](https://unconference.events) · [Code of conduct](https://unconference.events/codeofconduct) · [Production runbook](deploy/unconference/README.md)
 
----
+unconference brings proposals, collective prioritization, scheduling, tickets, and event-day coordination into one app. Organizers provide the structure; participants bring the sessions and help decide what happens.
 
-## The Vision
+The official application is built on **AT Protocol** and maintained on **`main`**. It runs at **https://unconference.events** on Hetzner, with its own Postgres database and personal data server (PDS). The earlier EthBoulder/Schelling Point web2 application is preserved at the Git tag [`archive/web2-final`](https://github.com/omniharmonic/schellingpoint/tree/archive/web2-final). Supabase and Vercel are not part of the current deployment.
 
-Traditional conferences are top-down: organizers decide what you'll hear, when you'll hear it, and from whom. SchellingPoint flips this model.
+## How a gathering works
 
-Named after economist Thomas Schelling's concept of [focal points](https://en.wikipedia.org/wiki/Focal_point_(game_theory)) — natural coordination solutions that emerge without explicit communication — SchellingPoint creates the conditions for a community to converge on the sessions that matter most to them.
+1. **Make a home for it.** Set the dates, timezone, participation rules, branding, venues, and tracks. Gatherings can be public or private.
+2. **Invite people and ideas.** Participants sign in with email or an existing ATProto account, including Bluesky. They can propose sessions, find collaborators, and publicly endorse ideas.
+3. **Choose what matters.** Quadratic voting gives participants a credit budget. Allocating `n` votes costs `n²` credits, so people can express stronger preferences while working within a shared limit.
+4. **Build and publish the program.** Organizers place sessions into venue slots, review scheduling suggestions and conflicts, and publish the schedule.
+5. **Gather.** Participants follow the program, save sessions, export calendars, get updates, and contribute resources. Organizers manage attendance and ticket check-in.
 
-**This is scheduling as a public good.** No backroom deals. No pay-to-play speaker slots. Just transparent, stake-weighted consensus on what deserves everyone's attention.
+The organizer workspace shows the current phase, relevant deadlines, and the next transition. Dates and phases are related but distinct: automatic progression must be enabled for the gathering; otherwise organizers advance phases themselves. The workspace explains which mode is active.
 
----
+## What is included
 
-## How It Works
+- **People and identity:** email sign-in, ATProto OAuth, Bluesky profile import, interests, profiles, and per-gathering participation.
+- **Sessions and support:** proposals, co-host invitations, public endorsements, private quadratic ballots, and an overview of activity and support.
+- **Organizer tools:** event settings, branded navigation and banners, bulk slot creation, venues, tracks, schedule builder, moderation, and member roles.
+- **Tickets:** free passes and a Stripe Connect integration for paid admission, refunds, and participation gating. Organizers choose a platform contribution from **1% to 100%**. Owner/admin voting does not require a ticket; normal voting windows and credit limits still apply.
+- **During and after the gathering:** personal schedules, calendar feeds, maps, session resources, member-only transcripts, and knowledge search. AI answers require an explicitly configured provider.
+- **Mobile and PWA:** responsive layouts, installable app icons, an offline fallback, and opt-in Web Push with per-category preferences.
 
-### For Participants
+Paid sales require a configured Stripe platform, signed webhooks, and an eligible connected organizer account. See [Stripe activation and verification](docs/STRIPE_ACTIVATION.md); an implemented checkout flow is not evidence that a deployment is ready to accept live payments.
 
-1. **Browse & Discover** — Explore proposed sessions across tracks like Privacy, DeSci, DAO Tooling, and more
-2. **Propose Sessions** — Have something to share? Submit your talk, workshop, or discussion
-3. **Vote with Credits** — You get 100 voice credits. Distribute them across sessions you want to see scheduled
-4. **Build Your Schedule** — Save favorites, add sessions to your calendar, share with friends
+For push, enable **Notifications on this device** in a gathering's notification settings, then select the Push categories. On iPhone/iPad, open the app from the Home Screen first. Signing out disconnects that device. Push payloads contain a generic update notice, not private gathering content.
 
-### The Quadratic Twist
+## ATProto and privacy
 
-SchellingPoint uses **quadratic voting** — a mechanism where the cost of additional votes increases quadratically:
+ATProto makes selected public contributions portable; it does not make the entire event database public.
 
-| Votes | Cost |
-|-------|------|
-| 1 vote | 1 credit |
-| 2 votes | 4 credits |
-| 3 votes | 9 credits |
-| 4 votes | 16 credits |
-| 5 votes | 25 credits |
+- Participants author their own public records. Gathering-level records are published by the gathering account through an audited publishing boundary.
+- Public schedules use `community.lexicon.calendar.event` with application-specific sidecar records. Borrowed lexicons are not extended with custom fields.
+- **Individual votes are never ATProto records.** Live ballot totals are hidden from everyone, including organizers. When a round closes, its linking key is destroyed; published results suppress small groups.
+- The overview shows public endorsements while voting is open and eligible published results after voting closes. Endorsements and private ballots are different signals.
+- Exact private locations, attendee-only details, transcripts, session credentials, and payment data stay behind application access controls. Public profile and participation publishing follows the relevant consent settings.
+- Browser requests go through the AppView API with an HttpOnly session cookie. Database access and ATProto credentials stay on the server.
 
-This means you can go deep on sessions you're passionate about, but it gets expensive. The result? Votes reflect genuine preference intensity, not just drive-by clicks. Minority interests with dedicated supporters can compete with mainstream topics that have shallow support.
+See the [architecture and contracts](docs/ATPROTO_APPVIEW_PLAN.md), [migration specification](docs/ATPROTO_MIGRATION_SPEC.md), and [ATProto implementation guide](src/lib/atproto/README.md).
 
-### For Organizers
+## Architecture
 
-- **Visual Schedule Builder** — Drag-and-drop sessions into venue time slots
-- **Venue Management** — Configure multiple venues with different capacities and availability windows
-- **Track Organization** — Group sessions thematically with track leads
-- **Hybrid Model Support** — Mix curated keynotes with community-voted unconference sessions
+| Component | Responsibility |
+| --- | --- |
+| Next.js 15 / React 19 | Web interface and server-side AppView API |
+| Postgres 16 / postgres.js | Application state, authorization, private ballots, and job queues |
+| ATProto PDS | Custodial identities and gathering repositories at `pds.unconference.events` |
+| Jetstream indexer | Public-record indexing, with scheduled reconciliation |
+| Scheduler | Publishing, voting and lifecycle transitions, notifications, and retention |
+| Caddy / Docker Compose | HTTPS routing and isolated services on Hetzner |
+| Resend / Stripe Connect / Web Push | Configurable email, paid ticketing, and device notifications |
 
----
+The production stack has its own containers, network, and volumes on `frontrange-twin-1`. It shares the machine with the Bioregional Twin but does not share application data or credentials.
 
-## The EthBoulder Connection
+## Local development
 
-SchellingPoint embodies the EthBoulder ethos: **Fork The Frontier.**
-
-EthBoulder isn't a typical crypto conference. It's a decentralized, community-governed gathering focused on:
-
-- **Open-source coordination** — Building tools and practices for collective action
-- **Public goods funding** — Sustaining the commons that benefit everyone
-- **Resilient infrastructure** — Systems that serve communities, not extract from them
-
-SchellingPoint is all three. It's open source. It treats attention as a public good to be allocated fairly. And it provides infrastructure for any community to coordinate their own unconference.
-
-### Why Quadratic Voting?
-
-Quadratic voting emerged from mechanism design research (notably by Glen Weyl and Vitalik Buterin) as a way to balance intensity of preference with broad participation. In traditional voting, a passionate minority loses to an apathetic majority. In plutocratic systems, wealth buys influence.
-
-Quadratic voting threads the needle: everyone has equal voice credits, but expressing strong preference costs more. It's democracy that respects both equality and intensity.
-
-For EthBoulder, this means:
-- **Niche topics get a fair shot** — A privacy workshop with 10 dedicated supporters can outcompete a generic talk with 50 lukewarm votes
-- **No gaming the system** — You can't cheaply flood votes across everything
-- **Skin in the game** — Your credit allocation reflects what you actually want to attend
-
----
-
-## For the Marketing Team
-
-### Key Messages
-
-**Tagline Options:**
-- "Your voice. Your schedule. Your unconference."
-- "Coordination is the killer app."
-- "Democracy for your attention."
-
-**Elevator Pitch:**
-> SchellingPoint lets EthBoulder attendees propose and vote on sessions using quadratic voting — a mechanism that balances passion with participation. The result is a schedule that emerges from collective intelligence, not top-down curation.
-
-**Why It Matters:**
-> In a world of algorithmic feeds and attention extraction, SchellingPoint returns agency to the community. You decide what's worth your time. And when hundreds of people make that choice together, something remarkable emerges: a schedule that no single organizer could have designed, but that reflects what the community actually wants.
-
-### Talking Points
-
-1. **It's credibly neutral** — No organizer picks winners. The community does.
-2. **It's Ethereum-native thinking** — Mechanism design applied to meatspace coordination.
-3. **It's open source** — Any community can fork it for their own events.
-4. **It respects minority voices** — Quadratic costs mean passionate niches can compete.
-5. **It's practical decentralization** — Not crypto theater, actual community governance.
-
-### Social Copy
-
-**Twitter/X:**
-> Your conference schedule shouldn't be decided in a back room.
->
-> At @EthBoulder, YOU vote on what sessions get scheduled. 100 credits. Quadratic voting. Community-driven.
->
-> This is what coordination looks like. 🗳️
-
-**Longer Form:**
-> Most conferences hand you a schedule. EthBoulder hands you a ballot.
->
-> SchellingPoint is our unconference coordination tool. Propose a session. Vote on others. Watch the schedule emerge from collective intelligence.
->
-> We use quadratic voting — the more you care, the more it costs. This isn't about popularity. It's about preference intensity. A privacy workshop with 10 true believers beats a generic talk with 50 meh votes.
->
-> This is EthBoulder. Fork the frontier. Shape the schedule.
-
----
-
-## For Onboarding Guides
-
-### Quick Start for Attendees
-
-**Step 1: Sign In**
-Visit [app.ethboulder.xyz](https://app.ethboulder.xyz) and sign in with your email. You'll receive a magic link — no password needed.
-
-**Step 2: Explore Sessions**
-Browse proposed sessions by track, format, or popularity. Each session shows its current vote count and the host's description.
-
-**Step 3: Allocate Your Votes**
-You have 100 voice credits. Click the + button on any session to add votes. Remember: votes cost quadratically (1 vote = 1 credit, 2 votes = 4 credits, etc.).
-
-**Step 4: Build Your Schedule**
-Heart sessions you want to attend. They'll appear in "My Schedule" with calendar export options.
-
-**Step 5: Propose a Session (Optional)**
-Have something to share? Hit "Propose Session" and tell us about your talk, workshop, or discussion. The community will vote on it.
-
-### FAQ
-
-**Q: What happens to my votes?**
-A: Your votes influence which proposed sessions get scheduled into unconference slots. Higher-voted sessions are more likely to be scheduled by organizers.
-
-**Q: Can I change my votes?**
-A: Yes! You can adjust your vote allocation anytime before voting closes.
-
-**Q: What's the difference between curated and unconference sessions?**
-A: Curated sessions (keynotes, featured speakers) are pre-scheduled by organizers. Unconference sessions are proposed by attendees and scheduled based on community votes.
-
-**Q: Why quadratic voting instead of normal voting?**
-A: Quadratic voting captures how much you care, not just what you like. It prevents people from spreading shallow votes everywhere and rewards genuine enthusiasm.
-
----
-
-## Technical Overview
-
-### Stack
-
-- **Framework:** Next.js 14 (App Router)
-- **Database:** Supabase (PostgreSQL + Auth + Row Level Security)
-- **Styling:** Tailwind CSS + shadcn/ui
-- **Deployment:** Vercel
-
-### Key Features
-
-- Magic link authentication
-- Real-time vote tallying with quadratic cost calculation
-- Drag-and-drop schedule builder for admins
-- Venue-specific time slot management
-- Track-based session organization
-- Calendar export (Google Calendar, ICS)
-- Mobile-responsive design
-
-### Data Model
-
-```
-profiles     — User accounts and admin status
-venues       — Physical spaces with capacity and features
-tracks       — Thematic groupings (Privacy, DeSci, etc.)
-time_slots   — Venue-specific availability windows
-sessions     — Proposed and scheduled sessions
-votes        — User vote allocations (quadratic)
-favorites    — Personal schedule saves
-```
-
----
-
-## Development
+Use **Node.js 22**, npm, and Docker Compose. The SQL test suite also needs `psql`. Local development uses a mock PLC directory and a development PDS; never point local tests at the real `plc.directory`.
 
 ```bash
-# Install dependencies
-npm install
-
-# Set up environment variables
+git clone https://github.com/omniharmonic/schellingpoint.git
+cd schellingpoint
+npm ci
 cp .env.example .env.local
-# Add your Supabase credentials
-
-# Run development server
-npm run dev
-
-# Open http://localhost:3000
 ```
 
-### Environment Variables
+Edit `.env.local` before starting. The database and local PDS URLs already match the development stack. Set:
 
+- `APP_DB_PASSWORD=unconference_app`
+- `PDS_ADMIN_PASSWORD=local-admin-password`
+- `ATPROTO_SESSION_SECRET` to a random string of at least 32 characters (`openssl rand -base64 48`).
+- `ATPROTO_CUSTODY_KEY` to exactly 32 random bytes encoded as hex (`openssl rand -hex 32`).
+- `APP_SECRETS_KEY` to 32 random bytes encoded as base64 (`openssl rand -base64 32`) if testing organizer-supplied AI credentials.
+
+Keep `PDS_PLC_URL=http://localhost:2582`, `PDS_HANDLE_DOMAIN=test`, and `RESEND_API_KEY` empty for local-only email sign-in.
+
+```bash
+npm run stack:up
+# Wait for Postgres, PLC, and PDS to become healthy.
+docker compose -f deploy/local/compose.yml ps
+
+set -a; source .env.local; set +a
+npm run db:migrate
+ALLOW_SEED=true npm run db:seed
+RESEND_API_KEY= npm run dev
 ```
-NEXT_PUBLIC_SUPABASE_URL=your-project-url
-NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
-SUPABASE_SERVICE_ROLE_KEY=your-service-key
-NEXT_PUBLIC_APP_URL=http://localhost:3000
+
+Open **http://localhost:3001**. Seed data includes `demo-gathering`, `draft-gathering`, and `past-gathering`. With mail disabled locally, the sign-in endpoint returns a development link. `node scripts/dev-login.mjs you@example.test` can obtain a local session for API tests.
+
+The mock PLC is in-memory. Restarting it loses its DID directory, so a reset must also clear the local PDS/database volumes. Follow the [local stack guide](deploy/local/README.md); this reset destroys local test data.
+
+## Verification
+
+With the local stack running and `.env.local` configured:
+
+```bash
+npm run typecheck
+npm run lexicons:validate
+npm run build
+npm test                  # keep the local dev server running in another terminal
+npm run test:sql
+npm run atproto:audit
 ```
 
----
+Tests create and clean up their own gatherings and accounts; they must not alter seeded events or production data. Production-only PWA checks can run against a production-mode server by setting `PWA_TEST_BASE_URL`; see [the PWA tests](tests/pwa.spec.ts).
 
-## Contributing
+## Deployment
 
-SchellingPoint is open source under the MIT license. We welcome contributions that align with the project's ethos of decentralized coordination and community governance.
+**Production: https://unconference.events — deploy from `main`.**
 
----
+The protected server environment is `deploy/unconference/.env`; templates contain no production credentials. From the configured Hetzner checkout:
 
-## Credits
+```bash
+cd /opt/unconference
+git switch main
+deploy/unconference/release.sh
+```
 
-Built with conviction for [EthBoulder](https://ethboulder.xyz) — the decentralized, community-governed Ethereum event in Boulder, Colorado.
+The release script pulls the checked-out branch, creates and verifies an encrypted backup, builds the image, applies migrations, starts the services, checks `/api/health`, and runs the ATProto privacy audit. Git pushes alone do not deploy this stack. Vercel Git deployments are explicitly disabled in `vercel.json`.
 
-**Fork the frontier. Shape the schedule.**
+Read the [production runbook](deploy/unconference/README.md) for DNS, secrets, backups, payment activation, Web Push, and operational checks. Do not change the PDS hostname or handle domain casually: existing DID documents depend on them.
+
+## Contributing and project history
+
+Start from `main`, use a focused feature branch, and follow [AGENTS.md](AGENTS.md). Preserve the server-side authorization and publishing boundaries, use the shared UI components, and run the verification appropriate to your change.
+
+The project began as Schelling Point for EthBoulder and is now a general-purpose unconference platform. Historical design notes and audits remain in `docs/`; their dated descriptions may refer to the former `atproto` branch or the archived web2 implementation. The current README, architecture contract, source code, and production runbook take precedence for setup and operations.
