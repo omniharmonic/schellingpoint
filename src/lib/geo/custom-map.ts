@@ -145,14 +145,19 @@ export function imageOnlyExtent(center: LatLng, aspect = 1): {
 /**
  * The coarse point a self-hosted session publishes (design §1.5). Normally the session's own pin
  * rounded to 2 decimals; on an image-only custom map the pin is a position on a picture, so the
- * gathering's centre — rounded the same way — is all that leaves.
+ * gathering's public centre — rounded the same way — is all that leaves.
+ *
+ * `gatheringCenter` is the centre of the gathering's located PUBLIC rooms. Without one, an
+ * image-only session publishes NOTHING: falling back to the pin would publish a position read off a
+ * picture as though it were a place, and there is no other point that may stand in — a private
+ * residence's cell is exactly what must not leave.
  */
 export function coarseSessionPoint(
   pin: LatLng | null,
   options: { customMap?: CustomMap | null; gatheringCenter?: LatLng | null } = {},
 ): LatLng | null {
   if (isImageOnly(options.customMap ?? null)) {
-    const center = options.gatheringCenter ?? pin
+    const center = options.gatheringCenter ?? null
     return center ? roundCoarse(center.lat, center.lng) : null
   }
   return pin ? roundCoarse(pin.lat, pin.lng) : null

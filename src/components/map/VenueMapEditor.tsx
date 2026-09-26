@@ -146,13 +146,18 @@ export function VenueMapEditor({
   const [uploading, setUploading] = React.useState(false)
   const [customBusy, setCustomBusy] = React.useState(false)
   const fileRef = React.useRef<HTMLInputElement>(null)
+  // The opacity slider is dragged, so it reads from local state and saves once the drag ends. A save
+  // per input event would round-trip forty times across one sweep, and disabling the control while
+  // any of them was in flight would drop the thumb out from under the pointer.
+  const [opacityDraft, setOpacityDraft] = React.useState<number | null>(null)
+  const opacity = opacityDraft ?? customMap?.opacity ?? CUSTOM_MAP_DEFAULT_OPACITY
   const gatheringCenter = React.useMemo(() => {
     const v = resolved.view
     return v ? { lat: v.center[1], lng: v.center[0] } : null
   }, [resolved.view])
   const shownCustomMap = React.useMemo<CustomMap | null>(
-    () => (customMap && cornerDraft ? { ...customMap, corners: cornerDraft } : customMap),
-    [customMap, cornerDraft],
+    () => (customMap ? { ...customMap, opacity, ...(cornerDraft ? { corners: cornerDraft } : {}) } : null),
+    [customMap, cornerDraft, opacity],
   )
   const layer = useCustomMapLayer(shownCustomMap, gatheringCenter)
 
@@ -264,11 +269,22 @@ export function VenueMapEditor({
     try {
       await onSaveCustomMap(next)
       setCornerDraft(null)
+      setOpacityDraft(null)
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'The floor plan could not be saved.')
     } finally {
       setCustomBusy(false)
     }
+  }
+
+  /** Write the opacity the slider was let go at, if it actually moved. */
+  const commitOpacity = async () => {
+    if (!customMap || opacityDraft === null) return
+    if (Math.abs(opacityDraft - customMap.opacity) < 1e-9) {
+      setOpacityDraft(null)
+      return
+    }
+    await saveCustom({ ...customMap, opacity: opacityDraft })
   }
 
   const onFile = async (file: File | null) => {
@@ -455,7 +471,10 @@ note.tone === 'amber' ? 'text-xs text-signal-amber' : 'text-xs text-muted-foregr
                       </Button>
                     </>
                   ) : (
-                    <Button type="button" size="sm" variant="outline" onClick={() => place(v)} loading={busy === v.id || v.geocode_status === 'pending'}>
+                    // "Place" stays live while a lookup is pending: it IS the fallback when the
+                    // background one is slow or never lands, so it must never be the thing a
+                    // stuck `pending` disables.
+                    <Button type="button" size="sm" variant="outline" onClick={() => place(v)} loading={busy === v.id}>
                       <Search className="mr-1.5 h-4 w-4" aria-hidden />
                       Place
                     </Button>
@@ -536,12 +555,14 @@ note.tone === 'amber' ? 'text-xs text-signal-amber' : 'text-xs text-muted-foregr
                     min={0.1}
                     max={1}
                     step={0.05}
-                    value={customMap.opacity}
-                    onChange={(e) => void saveCustom({ ...customMap, opacity: Number(e.target.value) })}
-                    disabled={customBusy}
+                    value={opacity}
+                    onChange={(e) => setOpacityDraft(Number(e.target.value))}
+                    onPointerUp={() => void commitOpacity()}
+                    onKeyUp={() => void commitOpacity()}
+                    onBlur={() => void commitOpacity()}
                     className="w-32"
                   />
-                  <span className="w-10 text-xs text-muted-foreground">{Math.round(customMap.opacity * 100)}%</span>
+                  <span className="w-10 text-xs text-muted-foreground">{Math.round(opacity * 100)}%</span>
                 </div>
               </div>
               <p className="text-xs text-muted-foreground">

@@ -70,9 +70,15 @@ export function addressLine(address: StructuredAddress): string {
   return parts(address).join(', ')
 }
 
-/** True when the address has anything at all to look up. */
+/**
+ * True when the address has something a geocoder could actually place: a street or a locality.
+ *
+ * A lone country or region is not an address — "US", or "Colorado" with nothing else, geocodes to
+ * the centroid of a country or a state, which as a room's pin is worse than no pin at all (and
+ * spends a lookup to get there).
+ */
 export function hasAddress(address: StructuredAddress): boolean {
-  return parts(address).length > 0
+  return [address.street, address.locality].some((p) => typeof p === 'string' && p.trim() !== '')
 }
 
 /**

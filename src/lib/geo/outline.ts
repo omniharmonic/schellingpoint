@@ -118,9 +118,11 @@ export function parseOutline(value: unknown, pin: LatLng | null): OutlinePolygon
   const ring = raw.map(pair)
   if (ring.length < 2) throw new OutlineError(`An outline needs at least ${OUTLINE_MIN_VERTICES} corners`)
   if (!same(ring[0]!, ring[ring.length - 1]!)) throw new OutlineError('An outline ring must be closed: the last corner repeats the first')
-  const vertices = ring.length - 1
-  if (vertices < OUTLINE_MIN_VERTICES) throw new OutlineError(`An outline needs at least ${OUTLINE_MIN_VERTICES} corners`)
-  if (vertices > OUTLINE_MAX_VERTICES) throw new OutlineError(`An outline can have at most ${OUTLINE_MAX_VERTICES} corners`)
+  // The cap counts what is stored; the floor counts DISTINCT corners, so a "triangle" of one point
+  // clicked three times, or a ring padded out with repeats, is not mistaken for a shape.
+  if (ring.length - 1 > OUTLINE_MAX_VERTICES) throw new OutlineError(`An outline can have at most ${OUTLINE_MAX_VERTICES} corners`)
+  const distinct = new Set(ring.slice(0, -1).map(([lng, lat]) => `${lng},${lat}`)).size
+  if (distinct < OUTLINE_MIN_VERTICES) throw new OutlineError(`An outline needs at least ${OUTLINE_MIN_VERTICES} corners`)
   if (!pin) throw new OutlineError('Place the room on the map before drawing its outline')
 
   const [[west, south], [east, north]] = outlineBbox(ring)

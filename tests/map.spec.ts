@@ -92,7 +92,7 @@ import {
 } from '../src/lib/geo/view'
 import { OUTLINE_MAX_VERTICES, OutlineError, outlineRing, parseOutline } from '../src/lib/geo/outline'
 import { CustomMapError, coarseSessionPoint, imageOnlyExtent, isImageOnly, parseCustomMap } from '../src/lib/geo/custom-map'
-import { roundCoarse } from '../src/lib/geo/coarse'
+import { hasAddress, roundCoarse } from '../src/lib/geo/coarse'
 import { shouldGeocodeOnSave } from '../src/lib/geo/venue-address'
 
 const IMAGE = `/uploads/ab/${'a'.repeat(64)}.png`
@@ -200,9 +200,29 @@ test('an outline is a closed ring of at most 64 corners near the room’s pin', 
   ]
   expect(parseOutline({ type: 'Polygon', coordinates: [bowtie] }, pin)).not.toBeNull()
 
+  // Corners are counted DISTINCT: one point clicked three times is not a triangle, and a ring
+  // padded out with repeats is not a shape. The cap still counts what would be stored.
+  const doubled = [square[0], square[0], square[1], square[2], square[0]]
+  expect(() => parseOutline({ type: 'Polygon', coordinates: [[square[0], square[0], square[0], square[0]]] }, pin)).toThrow(/at least 3/)
+  expect(parseOutline({ type: 'Polygon', coordinates: [doubled] }, pin)).not.toBeNull()
+
   // A stored value that is not an outline reads as no outline, never as a throw.
   expect(outlineRing({ type: 'Polygon', coordinates: [] })).toBeNull()
   expect(outlineRing(null)).toBeNull()
+})
+
+test('an address needs a street or a town: a lone country is not a place', () => {
+  expect(hasAddress({ street: '1500 Pearl St' })).toBe(true)
+  expect(hasAddress({ locality: 'Boulder' })).toBe(true)
+  // A country or a region on its own geocodes to the centroid of a country or a state, which as a
+  // room's pin is worse than no pin — and it spends a lookup to get there.
+  expect(hasAddress({ country: 'US' })).toBe(false)
+  expect(hasAddress({ region: 'CO', country: 'US' })).toBe(false)
+  expect(hasAddress({ postalCode: '80302' })).toBe(false)
+  expect(hasAddress({})).toBe(false)
+  // So a room with nothing but a country schedules no lookup when it is saved.
+  expect(shouldGeocodeOnSave({ country: 'US', latitude: null, geocoded_from: null })).toBe(false)
+  expect(shouldGeocodeOnSave({ locality: 'Boulder', latitude: null, geocoded_from: null })).toBe(true)
 })
 
 test('a custom map is an app-hosted image, in one of exactly two modes', () => {
@@ -750,6 +770,94 @@ test.describe('map', () => {
     await sql`update venues set is_private_residence = false where event_id = ${privateGathering.id}`
   })
 
+  test('map v2: image-only mode needs a public location, and never borrows a private residence’s', async () => {
+    // The hole this closes: the custom-map 409 only asked whether SOME room is public. A gathering
+    // whose only room ON THE MAP is a home — the public room typed but not yet geocoded — would pass
+    // that check and then publish the home's ≈1 km cell as every session's coarse point (design §1.5
+    // resolves the centre from the located rooms). Image-only mode now refuses that state outright.
+    const path = `/api/v1/events/${privateGathering.slug}/admin/custom-map`
+    const image = `/uploads/cd/${'b'.repeat(64)}.png`
+    const home = { lat: 41.1234, lng: -104.5678 }
+    const publicRoom = { lat: 40.7711, lng: -105.9922 }
+    const pin = { lat: 39.3311, lng: -106.4455 }
+    const at = (lng: number, lat: number) => [Math.round(lng * 1e6) / 1e6, Math.round(lat * 1e6) / 1e6]
+    const corners = [
+      at(publicRoom.lng - 0.002, publicRoom.lat + 0.002),
+      at(publicRoom.lng + 0.002, publicRoom.lat + 0.002),
+      at(publicRoom.lng + 0.002, publicRoom.lat - 0.002),
+      at(publicRoom.lng - 0.002, publicRoom.lat - 0.002),
+    ]
+    const [homeRoom, otherRoom] = privateGathering.venueIds
+    await sql`update venues set latitude = null, longitude = null, is_private_residence = false where event_id = ${privateGathering.id}`
+    await sql`update venues set is_private_residence = true, latitude = ${home.lat}, longitude = ${home.lng}, geocode_status = 'manual' where id = ${homeRoom}`
+
+    // Only a home is placed: the map has a centre, but not one that may leave.
+    const refused = await api(path, { method: 'PUT', cookie: owner.cookie, json: { custom_map: { image, corners: null, basemap: false } } })
+    expect(refused.status, refused.text).toBe(409)
+    expect(refused.body.code).toBe('NoPublicLocation')
+    const [nothing] = await sql<{ custom_map: unknown }[]>`select custom_map from events where id = ${privateGathering.id}`
+    expect(nothing!.custom_map).toBeNull()
+    // A georeferenced map is fine in the same state: its corners say where it goes, so no centre
+    // has to be derived from anything.
+    const georeferenced = await api(path, { method: 'PUT', cookie: owner.cookie, json: { custom_map: { image, corners, basemap: true } } })
+    expect(georeferenced.status, georeferenced.text).toBe(200)
+    // And the map area a member reads never fits itself around the home.
+    const area = await api(`/api/v1/events/${privateGathering.slug}/map`, { cookie: owner.cookie })
+    expect(area.status, area.text).toBe(200)
+
+    // Place the public room: now there is a centre, and it is that room's.
+    await sql`update venues set latitude = ${publicRoom.lat}, longitude = ${publicRoom.lng}, geocoded_from = 'x', geocode_status = 'ok' where id = ${otherRoom}`
+    const allowed = await api(path, { method: 'PUT', cookie: owner.cookie, json: { custom_map: { image, corners: null, basemap: false } } })
+    expect(allowed.status, allowed.text).toBe(200)
+
+    // A session placed on the picture publishes the PUBLIC room's cell — not the pin's, not the home's.
+    const created = await api('/api/v1/sessions', {
+      method: 'POST', cookie: owner.cookie,
+      json: {
+        event_slug: privateGathering.slug, title: `Indoor talk ${RUN}`, format: 'discussion', duration: 30,
+        is_self_hosted: true, custom_location: `Room 4 ${RUN}`,
+        location_lat: pin.lat, location_lng: pin.lng,
+      },
+    })
+    expect(created.status, created.text).toBe(201)
+    const indoorId = created.body.id as string
+    try {
+      const [stored] = await sql<{ public_geo: { lat: number; lng: number } | null }[]>`
+        select public_geo from sessions where id = ${indoorId}
+      `
+      expect(stored!.public_geo).toEqual({ lat: 40.77, lng: -105.99 })
+      expect(stored!.public_geo).not.toEqual({ lat: 41.12, lng: -104.57 })
+      expect(stored!.public_geo).not.toEqual({ lat: 39.33, lng: -106.45 })
+    } finally {
+      await sql`delete from sessions where id = ${indoorId}`
+      await api(path, { method: 'DELETE', cookie: owner.cookie })
+      await sql`update venues set latitude = null, longitude = null, geocoded_from = null, geocode_status = null, is_private_residence = false where event_id = ${privateGathering.id}`
+    }
+  })
+
+  test('map v2: a lookup that never lands is reported as failed, so the room can be placed by hand', async () => {
+    // `pending` is written with the save and cleared by the after() callback. If that callback never
+    // runs (a restart between the two), the room would say "Locating…" for ever and the editor's own
+    // fallback was disabled by it. The read derives `failed` once the row is two minutes old
+    // (migration 0041), and "Place" is never disabled by a pending status.
+    const admin = `/api/v1/events/${gathering.slug}/admin/venues`
+    await sql`update venues set geocode_status = 'pending' where id = ${outlineVenueId}`
+    const fresh = await api(admin, { cookie: owner.cookie })
+    expect(fresh.body.venues.find((v: any) => v.id === outlineVenueId).geocode_status).toBe('pending')
+
+    await sql`update venues set updated_at = now() - interval '3 minutes' where id = ${outlineVenueId}`
+    const stale = await api(admin, { cookie: owner.cookie })
+    expect(stale.body.venues.find((v: any) => v.id === outlineVenueId).geocode_status).toBe('failed')
+    // Only the read changed its mind; the row still says pending, so a save or "Place" can resume.
+    const [row] = await sql<{ status: string | null }[]>`select geocode_status as status from venues where id = ${outlineVenueId}`
+    expect(row!.status).toBe('pending')
+    // Any write refreshes the stamp, so a room that is genuinely waiting is not called failed.
+    const touched = await api(`${admin}/${outlineVenueId}`, { method: 'PATCH', cookie: owner.cookie, json: { capacity: 42 } })
+    expect(touched.status, touched.text).toBe(200)
+    expect(touched.body.venue.geocode_status).toBe('pending')
+    await sql`update venues set geocode_status = 'ok' where id = ${outlineVenueId}`
+  })
+
   test('map v2: the address search answers up to five candidates from its own cache namespace', async () => {
     const path = `/api/v1/events/${gathering.slug}/admin/geocode`
     const many = await api(path, { method: 'POST', cookie: owner.cookie, json: { query: SEARCH_QUERY, limit: 5 } })
@@ -834,6 +942,49 @@ test.describe('map', () => {
       })
       // Three corners plus the repeat that closes the ring.
       expect(stored.coordinates[0]).toHaveLength(4)
+
+      // The opacity slider saves once, when the drag ends — not on every input event — and it stays
+      // usable while that save is in flight.
+      const image = `/uploads/ef/${'c'.repeat(64)}.png`
+      const view = { center: [UI_POINT.lng, UI_POINT.lat] as [number, number], zoom: 16 }
+      const put = await api(`/api/v1/events/${gathering.slug}/admin/custom-map`, {
+        method: 'PUT', cookie: owner.cookie,
+        json: {
+          custom_map: {
+            image, opacity: 0.5, basemap: true,
+            corners: [
+              [view.center[0] - 0.002, view.center[1] + 0.002],
+              [view.center[0] + 0.002, view.center[1] + 0.002],
+              [view.center[0] + 0.002, view.center[1] - 0.002],
+              [view.center[0] - 0.002, view.center[1] - 0.002],
+            ],
+          },
+        },
+      })
+      expect(put.status, put.text).toBe(200)
+      try {
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 60_000 })
+        await page.locator('#venue-map').scrollIntoViewIfNeeded().catch(() => undefined)
+        const slider = page.locator('#custom-map-opacity')
+        await expect(slider).toBeVisible({ timeout: 30_000 })
+        let saves = 0
+        page.on('request', (req) => {
+          if (req.method() === 'PUT' && req.url().includes('/admin/custom-map')) saves += 1
+        })
+        const track = await slider.boundingBox()
+        expect(track).not.toBeNull()
+        const y = track!.y + track!.height / 2
+        await page.mouse.move(track!.x + track!.width * 0.4, y)
+        await page.mouse.down()
+        for (const fraction of [0.5, 0.6, 0.7, 0.85]) await page.mouse.move(track!.x + track!.width * fraction, y)
+        await page.mouse.up()
+        await page.waitForTimeout(1_500)
+        expect(saves, 'one save for the whole drag').toBe(1)
+        const [after] = await sql<{ custom_map: { opacity: number } }[]>`select custom_map from events where id = ${gathering.id}`
+        expect(after!.custom_map.opacity).toBeGreaterThan(0.5)
+      } finally {
+        await api(`/api/v1/events/${gathering.slug}/admin/custom-map`, { method: 'DELETE', cookie: owner.cookie })
+      }
 
       // Members see it on the gathering map, named, and clicking it behaves like a pin.
       const memberPage = await context.newPage()

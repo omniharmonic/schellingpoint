@@ -13,14 +13,18 @@
  * plan is a public asset, exactly like the gathering's logo, and the UI says so where it is chosen.
  *
  * A gathering whose every room is a private residence gets no custom map (409): a floor plan of a
- * home, on a public path, is the address the spec keeps out of everything (§8.1).
+ * home, on a public path, is the address the spec keeps out of everything (§8.1). Image-only mode
+ * additionally needs a located PUBLIC room (409 `NoPublicLocation`), because that is what it
+ * publishes as a session's coarse point: without one there is no centre that may leave, and a
+ * private residence's cell must never stand in for it.
  *
  * `events.custom_map` is app-side only. It is never published; the privacy audit's `geo` check
  * fails if a `custom_map` value ever appears in a record.
  */
 import { sql } from '@/lib/db'
 import { errorResponse, fail, json, readBody, requireOrganizer, rolesWith } from '@/lib/scheduling/admin-api'
-import { CustomMapError, CUSTOM_MAP_MAX_BYTES, parseCustomMap, readCustomMap } from '@/lib/geo/custom-map'
+import { CustomMapError, CUSTOM_MAP_MAX_BYTES, isImageOnly, parseCustomMap, readCustomMap } from '@/lib/geo/custom-map'
+import { gatheringCenter, loadEventMapData } from '@/lib/geo/event-map'
 
 export const dynamic = 'force-dynamic'
 
@@ -76,6 +80,14 @@ export async function PUT(request: Request, { params }: Params) {
       if (rooms.total > 0 && rooms.publicRooms === 0) {
         return fail(409, 'Every room here is a private residence, so there is no map to publish a floor plan on. Add a public room first.', {
           code: 'PrivateResidencesOnly',
+        })
+      }
+      // Image-only mode publishes the gathering's public centre for every session placed on the
+      // picture. A gathering placed only by a private residence has no such centre, and a home's
+      // point may not become one, so the mode is refused rather than quietly downgraded.
+      if (isImageOnly(customMap) && !gatheringCenter(await loadEventMapData(ctx.event.id))) {
+        return fail(409, 'An image-only map is centred on the gathering, so it needs a room with a public address on the map first (or a saved map area). Place one, or keep the street map underneath.', {
+          code: 'NoPublicLocation',
         })
       }
     }

@@ -31,7 +31,7 @@ export interface VenueMapCardProps {
   onChanged: () => Promise<void>
 }
 
-/** How long to keep re-reading while a background lookup is in flight. */
+/** How long to keep re-reading while a background lookup is in flight (12 x 2.5 s = 30 s). */
 const POLL_MS = 2_500
 const POLL_LIMIT = 12
 
@@ -43,28 +43,31 @@ export function VenueMapCard({ venues, base, canManage, onChanged }: VenueMapCar
   const [canEditCustomMap, setCanEditCustomMap] = React.useState(false)
   const [customBlocked, setCustomBlocked] = React.useState<string | null>(null)
 
-  const locating = venues.some((v) => v.geocode_status === 'pending')
-
-  // Design §1.1: the rooms place themselves in `after()`, so watch for the results.
+  // Which rooms are waiting, as a value that only changes when the answer does — a poll that
+  // changes nothing leaves this identical, so the effect below is not torn down and rebuilt on
+  // every tick, and the attempt count is not reset by one.
+  const pendingKey = React.useMemo(
+    () => venues.filter((v) => v.geocode_status === 'pending').map((v) => v.id).sort().join(','),
+    [venues],
+  )
+  const pollsRef = React.useRef(0)
+  // A fresh set of waiting rooms is a fresh budget.
   React.useEffect(() => {
-    if (!locating) return
-    let tries = 0
-    let stopped = false
-    const tick = async () => {
-      if (stopped || tries >= POLL_LIMIT) return
-      tries += 1
-      try {
-        await onChanged()
-      } catch {
-        // A failed re-read is not worth a message: the next tick tries again.
-      }
-    }
-    const timer = setInterval(() => void tick(), POLL_MS)
-    return () => {
-      stopped = true
-      clearInterval(timer)
-    }
-  }, [locating, onChanged])
+    pollsRef.current = 0
+  }, [pendingKey])
+
+  // Design §1.1: the rooms place themselves in `after()`, so watch for the results — but only for
+  // half a minute. A lookup that never lands is reported as failed by the server after two minutes,
+  // and the room's own "Place" button is the way out either way.
+  React.useEffect(() => {
+    if (!pendingKey) return
+    const timer = setInterval(() => {
+      pollsRef.current += 1
+      if (pollsRef.current >= POLL_LIMIT) clearInterval(timer)
+      void onChanged().catch(() => undefined)
+    }, POLL_MS)
+    return () => clearInterval(timer)
+  }, [pendingKey, onChanged])
 
   React.useEffect(() => {
     if (!canManage) return

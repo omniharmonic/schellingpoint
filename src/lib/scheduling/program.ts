@@ -211,7 +211,14 @@ export async function selectVenues(db: Sql, eventId: string, venueId?: string): 
            v.locality, v.region, v.postal_code, v.country, v.is_private_residence, v.notes,
            coalesce(v.is_primary, false) as is_primary, coalesce(v.allowed_formats, '{}') as allowed_formats,
            v.latitude::float8 as latitude, v.longitude::float8 as longitude, v.geocoded_from,
-           v.geocode_status, v.outline,
+           -- A pending lookup that never came back (a restart between the commit and the after()
+           -- callback) would say "Locating..." forever. Two minutes is long enough for a Nominatim
+           -- call behind the 1 req/s pacing, so after that the editor is told the truth and offers
+           -- "Place" instead. The stored value is untouched: a later save, or "Place", starts a
+           -- fresh lookup (migration 0041).
+           case when v.geocode_status = 'pending' and v.updated_at < now() - interval '2 minutes'
+                then 'failed' else v.geocode_status end as geocode_status,
+           v.outline,
            v.at_uri is not null as network_published,
            (select count(*)::int from time_slots t where t.venue_id = v.id and t.event_id = v.event_id) as slot_count,
            (select count(*)::int from sessions s

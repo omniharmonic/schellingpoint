@@ -155,10 +155,12 @@ export default function AdminSetupPage() {
 
   React.useEffect(() => { void load() }, [load])
 
-  const refreshVenues = async () => {
+  // Stable identity: the map card polls on this while a background geocode is in flight, and a new
+  // function every render would restart that effect (and its attempt counter) forever.
+  const refreshVenues = React.useCallback(async () => {
     const v = await apiFetch<{ venues: AdminVenue[] }>(`${base}/venues`)
     setVenues(v.venues)
-  }
+  }, [base])
 
   const resetVenueForm = () => {
     setShowVenueForm(false)

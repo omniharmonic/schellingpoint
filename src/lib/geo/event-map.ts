@@ -78,20 +78,30 @@ export function outlinesOf(data: EventMapData): MapOutline[] {
 }
 
 /**
- * The gathering's centre: the organizer's saved view when there is one, otherwise the middle of
- * its located rooms. Null when nothing places the gathering at all.
+ * The gathering's PUBLISHABLE centre: the organizer's saved view when there is one, otherwise the
+ * middle of its located PUBLIC rooms. Null when nothing public places the gathering.
+ *
+ * Private residences are excluded deliberately, and this is load-bearing rather than tidy. This
+ * centre is what an image-only custom map publishes as a session's `public_geo` (§1.5), so a
+ * gathering whose only located room is a home — its public room typed but not yet geocoded — would
+ * otherwise write that home's ≈1 km cell into calendar records. The rule for a home's point is that
+ * it never leaves the members boundary, in any form, so there is nothing to average it into: when
+ * no public room is located there is no centre, and the custom-map route refuses image-only mode.
  */
 export function gatheringCenter(data: EventMapData): LatLng | null {
-  const resolved = resolveFromRooms(data, { includePrivate: true })
-  const view = resolved.view
+  const view = resolveFromRooms(data, { includePrivate: false }).view
   if (!view) return null
   return { lat: view.center[1], lng: view.center[0] }
 }
 
 /**
  * The coarse point a self-hosted session should publish, given the gathering's map settings.
- * On an image-only custom map the pin is a position on a picture, so the gathering's centre
+ * On an image-only custom map the pin is a position on a picture, so the gathering's public centre
  * (rounded to 2 decimals) is all that leaves; otherwise the pin's own rounded point.
+ *
+ * With no public centre nothing is published at all — never the pin, and never a private
+ * residence's cell. The custom-map route will not save image-only mode in that state, so this is
+ * the belt to its braces.
  */
 export async function coarsePointForEvent(
   eventId: string,
