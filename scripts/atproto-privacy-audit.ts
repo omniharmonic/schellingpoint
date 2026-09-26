@@ -30,7 +30,9 @@
  *   9. geo           no gathering-written record carries a `community.lexicon.location.geo` within
  *                     0.005° of a private-residence venue's point or of a session's exact
  *                     `location_lat/lng`, unless it equals that session's coarse `public_geo`
- *                     (spec §8.1: exact points are attendee-only; only the ≈1 km point is published).
+ *                     (spec §8.1: exact points are attendee-only; only the ≈1 km point is published),
+ *                     AND no record in `at_records` carries a `venues.outline` ring or an
+ *                     `events.custom_map` value (design §1.4/§1.5: both are app-side only).
  *
  * Read-only. Output names collections, rkeys and counts — never a DID, handle or record body.
  */
@@ -355,6 +357,79 @@ async function main(): Promise<void> {
           const equalsCoarse = coarse !== null && Math.abs(g.lat - coarse.lat) < 1e-9 && Math.abs(g.lng - coarse.lng) < 1e-9
           if (!equalsCoarse) {
             findings.push({ check: 'geo', where: where(g.rec), detail: `${g.path} is within 0.005° of a session's exact location and is not its coarse point` })
+            break
+          }
+        }
+      }
+    }
+
+    /* ───────────── outlines and custom maps are app-side only (design §1.4, §1.5) ───────────── */
+    {
+      // A room's outline is a building footprint and a custom map is an organizer's floor plan
+      // pinned to real coordinates: neither is ever published, in any repo. The check is by value,
+      // not by field name — an outline smuggled into a description would still be caught.
+      const needles = new Set<string>()
+      let outlines = 0
+      let customMaps = 0
+      if (await tableExists(sql, 'venues')) {
+        const cols = await sql<{ column_name: string }[]>`
+          select column_name from information_schema.columns
+          where table_schema = 'public' and table_name = 'venues' and column_name = 'outline'
+        `
+        if (cols.length) {
+          const rows = await sql<{ outline: unknown }[]>`select outline from venues where outline is not null`
+          outlines = rows.length
+          for (const row of rows) {
+            const ring = (row.outline as { coordinates?: unknown[] } | null)?.coordinates?.[0]
+            if (!Array.isArray(ring)) continue
+            // Every vertex, as the pair a record would have to contain to leak the shape.
+            for (const point of ring as unknown[]) {
+              if (!Array.isArray(point) || point.length < 2) continue
+              needles.add(`${Number(point[0])},${Number(point[1])}`)
+            }
+          }
+        }
+      }
+      const eventCols = await sql<{ column_name: string }[]>`
+        select column_name from information_schema.columns
+        where table_schema = 'public' and table_name = 'events' and column_name = 'custom_map'
+      `
+      if (eventCols.length) {
+        const rows = await sql<{ custom_map: Record<string, unknown> | null }[]>`select custom_map from events where custom_map is not null`
+        customMaps = rows.length
+        for (const row of rows) {
+          const map = row.custom_map
+          if (!map) continue
+          if (typeof map.image === 'string' && map.image.length >= 8) needles.add(map.image)
+          const corners = map.corners
+          if (Array.isArray(corners)) {
+            for (const point of corners as unknown[]) {
+              if (!Array.isArray(point) || point.length < 2) continue
+              needles.add(`${Number(point[0])},${Number(point[1])}`)
+            }
+          }
+        }
+      }
+      counts['venue outlines'] = outlines
+      counts['custom maps'] = customMaps
+      counts['outline / custom-map values checked'] = needles.size
+      if (needles.size) {
+        const indexed = await sql<{ uri: string; did: string; collection: string; record: Record<string, unknown> }[]>`
+          select uri, did, collection, record from at_records
+        `
+        const candidates: Rec[] = [
+          ...indexed.map((r) => ({ ...r, source: 'index' as const })),
+          ...gatheringRecords.filter((r) => r.source === 'live'),
+        ]
+        for (const r of candidates) {
+          const flat = JSON.stringify(r.record)
+          for (const needle of needles) {
+            if (!flat.includes(needle)) continue
+            findings.push({
+              check: 'geo',
+              where: where(r),
+              detail: 'contains a venue outline vertex or a custom-map value, which are app-side only',
+            })
             break
           }
         }

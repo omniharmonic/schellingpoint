@@ -7,6 +7,11 @@
  * bottom sheet on mobile) with that place's sessions in time order, "Now"/"Next" emphasis and
  * favourite hearts. "Near me" uses browser geolocation only; the position never leaves the page.
  * When the map cannot load, the same data renders as a list.
+ *
+ * The area comes from `GET …/map` (design §1.2): the organizer's saved view when there is one,
+ * otherwise the fit of the located rooms. That read also carries the venue outlines members see —
+ * clicking one opens the room's sessions, exactly as its pin does — and the gathering's indoor map
+ * when the organizers uploaded one. None of the three is ever in a record.
  */
 import * as React from 'react'
 import Link from 'next/link'
@@ -20,6 +25,9 @@ import { useToast } from '@/components/ui/toast'
 import { PageHeader } from '@/components/PageHeader'
 import { DashboardLayout } from '@/components/DashboardLayout'
 import { GatheringMap, type MapHandle, type MapPin as Pin } from '@/components/map/GatheringMap'
+import { useCustomMapLayer } from '@/components/map/CustomMapLayer'
+import { useMapArea } from '@/components/map/useMapArea'
+import type { MapShape } from '@/components/map/types'
 import { setFavorite } from '@/components/SessionCard'
 import { useAuth } from '@/hooks/useAuth'
 import { useEvent } from '@/contexts/EventContext'
@@ -94,6 +102,8 @@ export function MapPageClient() {
   const [favoriteIds, setFavoriteIds] = React.useState<Set<string>>(new Set())
   const [toggling, setToggling] = React.useState<Set<string>>(new Set())
   const [now, setNow] = React.useState(() => Date.now())
+  // The resolved area, the outlines members see and the indoor map (design §1.2/§1.4/§1.5).
+  const area = useMapArea(event.slug)
 
   React.useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 60_000)
@@ -184,6 +194,17 @@ export function MapPageClient() {
     if (me) list.push({ id: 'me', lat: me.lat, lng: me.lng, label: 'You are here', kind: 'me' })
     return list
   }, [places, selectedPlace, me])
+
+  // Outlines behave like pins: the label carries the room's name and a click opens its sessions.
+  const shapes = React.useMemo<MapShape[]>(
+    () => area.outlines.map((o) => ({ id: `venue:${o.venue_id}`, label: o.name, ring: o.ring, selected: `venue:${o.venue_id}` === selectedPlace })),
+    [area.outlines, selectedPlace],
+  )
+  const gatheringCenter = React.useMemo(
+    () => (area.view ? { lat: area.view.center[1], lng: area.view.center[0] } : null),
+    [area.view],
+  )
+  const layer = useCustomMapLayer(area.customMap, gatheringCenter)
 
   const unplaced = React.useMemo(() => places.filter((p) => p.lat === null && p.sessions.length > 0), [places])
   const selected = places.find((p) => p.id === selectedPlace) ?? null
@@ -352,9 +373,14 @@ export function MapPageClient() {
           <div className="relative h-[55vh] min-h-[320px] flex-1 overflow-hidden rounded-lg border md:h-auto" data-testid="gathering-map">
             <GatheringMap
               pins={pins}
-              view={event.map ?? null}
+              view={area.view}
+              shapes={shapes}
+              image={layer.image}
+              basemap={layer.basemap}
+              clampTo={layer.clampTo}
               handleRef={handleRef}
               onPinClick={(id) => { if (id !== 'me') setSelectedPlace(id) }}
+              onShapeClick={(id) => setSelectedPlace(id)}
               onError={() => setMapFailed(true)}
             />
             {unplaced.length > 0 && (

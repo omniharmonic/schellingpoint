@@ -10,6 +10,7 @@
  */
 
 const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB, same as the server
+const FLOORPLAN_MAX_SIZE = 8 * 1024 * 1024; // design §1.5, same as the server
 const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
 
 export interface UploadResult {
@@ -21,8 +22,11 @@ export interface UploadResult {
 export interface UploadOptions {
   /** Slug of the gathering the image belongs to. Omit only while creating a gathering. */
   event?: string;
-  /** `avatar`: the signed-in account's own profile photo (≤ 2 MB). Never combined with `event`. */
-  purpose?: 'avatar';
+  /**
+   * `avatar`: the signed-in account's own profile photo (≤ 2 MB). Never combined with `event`.
+   * `floorplan`: a gathering's indoor map (≤ 8 MB, design §1.5). Always with `event`.
+   */
+  purpose?: 'avatar' | 'floorplan';
   /** Override the client-side size check (the server cap still applies). */
   maxSize?: number;
 }
@@ -39,7 +43,8 @@ function validateFile(file: File, maxSize: number): string | null {
 
 /** Upload an image and return its public URL (`/uploads/…`). */
 export async function uploadImage(file: File, options: UploadOptions = {}): Promise<UploadResult> {
-  const serverCap = options.purpose === 'avatar' ? 2 * 1024 * 1024 : MAX_FILE_SIZE;
+  const serverCap =
+    options.purpose === 'avatar' ? 2 * 1024 * 1024 : options.purpose === 'floorplan' ? FLOORPLAN_MAX_SIZE : MAX_FILE_SIZE;
   const validationError = validateFile(file, Math.min(options.maxSize ?? serverCap, serverCap));
   if (validationError) return { success: false, error: validationError };
 
@@ -97,6 +102,16 @@ export function uploadEventBanner(file: File, event?: string): Promise<UploadRes
  */
 export async function uploadAvatar(file: File): Promise<string> {
   const result = await uploadImage(file, { purpose: 'avatar' });
+  if (!result.success || !result.url) throw new Error(result.error || 'Upload failed.');
+  return result.url;
+}
+
+/** Upload a gathering's floor plan / indoor map (≤ 8 MB, PNG/JPEG/WebP). */
+export async function uploadFloorPlan(file: File, event: string): Promise<string> {
+  if (file.type && !['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
+    throw new Error('Upload the floor plan as a PNG, JPEG or WebP image.');
+  }
+  const result = await uploadImage(file, { event, purpose: 'floorplan' });
   if (!result.success || !result.url) throw new Error(result.error || 'Upload failed.');
   return result.url;
 }

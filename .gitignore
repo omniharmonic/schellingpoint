@@ -52,6 +52,7 @@ playwright-report/
 screenshots/
 
 .next-dev/
+.next-dev-*/
 
 # Local AppView uploads (production uses the uploads volume)
 .uploads/

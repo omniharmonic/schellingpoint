@@ -27,6 +27,7 @@ import {
 import { publishProposalFor, withdrawProposalFor, type AtprotoOutcome } from '../_lib/atproto'
 import { reconcileTimePreference, saveTimePreference } from '../_lib/time-preference'
 import { publicJson, publishedSessions } from '@/app/api/v1/schedule/public-read'
+import { coarsePointForEvent } from '@/lib/geo/event-map'
 
 type Params = { params: Promise<{ id: string }> }
 
@@ -174,6 +175,11 @@ export async function PATCH(request: Request, { params }: Params) {
   if (fields.track_id) {
     const tracks = await sql`select 1 from tracks where id = ${fields.track_id as string} and event_id = ${access.event.id}`
     if (!tracks.length) return jsonError(400, 'Choose one of this event’s tracks', { field: 'track_id' })
+  }
+
+  // Design §1.5: an image-only custom map publishes the gathering's centre for a session pin.
+  if (fields.public_geo && typeof fields.location_lat === 'number' && typeof fields.location_lng === 'number') {
+    fields.public_geo = await coarsePointForEvent(access.event.id, { lat: fields.location_lat, lng: fields.location_lng })
   }
 
   const statusChanged = typeof fields.status === 'string' && fields.status !== rel.status

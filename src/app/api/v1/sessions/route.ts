@@ -14,6 +14,7 @@ import {
   type EventAccess,
 } from './_lib/access'
 import { FieldError, parseSessionFields, parseTimePreference } from './_lib/validate'
+import { coarsePointForEvent } from '@/lib/geo/event-map'
 import { publishProposalFor, type AtprotoOutcome } from './_lib/atproto'
 import { reconcileTimePreference, saveTimePreference } from './_lib/time-preference'
 import { DAY_REGEX, publicJson, publishedSessions } from '@/app/api/v1/schedule/public-read'
@@ -102,6 +103,12 @@ export async function POST(request: Request) {
 
   const trackError = await checkTrack(access, fields.track_id)
   if (trackError) return trackError
+
+  // Design §1.5: on an image-only custom map a session's pin is a position on a picture, so the
+  // coarse point that leaves is the gathering's centre and nothing finer.
+  if (fields.public_geo && typeof fields.location_lat === 'number' && typeof fields.location_lng === 'number') {
+    fields.public_geo = await coarsePointForEvent(access.event.id, { lat: fields.location_lat, lng: fields.location_lng })
+  }
 
   const accountId = viewer.accountId
   const [{ max_proposals_per_user: cap }] = await sql<{ max_proposals_per_user: number | null }[]>`

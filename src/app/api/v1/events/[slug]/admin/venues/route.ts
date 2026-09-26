@@ -6,10 +6,13 @@
  * Writes run as the organizer's account so RLS applies; network records are refreshed after
  * commit when the gathering is already published (package F's `publishVenues`).
  */
+import { after } from 'next/server'
 import { asAccount, sql } from '@/lib/db'
 import { errorResponse, json, readBody, requireOrganizer, rolesWith, rolesWithAny } from '@/lib/scheduling/admin-api'
 import { parseVenue } from '@/lib/scheduling/inputs'
 import { loadEvent, selectVenues, syncProgramRecords } from '@/lib/scheduling/program'
+import { runVenueGeocode, shouldGeocodeOnSave } from '@/lib/geo/venue-geocode'
+import { venueRow } from './_lib/row'
 
 export const dynamic = 'force-dynamic'
 
@@ -36,15 +39,22 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
 
   try {
     const input = parseVenue(body)
+    // Design §1.1: a room saved with an address is placed on the map by the server, in `after()`.
+    // Nobody presses "Place" per room any more; a hand-dropped pin is never overwritten.
+    const locating = shouldGeocodeOnSave(input)
     const venue = await asAccount(ctx.viewer.accountId, async (tx) => {
       if (input.is_primary) {
         await tx`update venues set is_primary = false where event_id = ${ctx.event.id} and is_primary`
       }
-      const [row] = await tx<{ id: string }[]>`insert into venues ${tx({ ...input, event_id: ctx.event.id })} returning id`
-      const [created] = await selectVenues(tx, ctx.event.id, row.id)
-      return created
+      const row = { ...venueRow(tx, input), event_id: ctx.event.id, ...(locating ? { geocode_status: 'pending' } : {}) }
+      const [created] = await tx<{ id: string }[]>`insert into venues ${tx(row)} returning id`
+      const [listed] = await selectVenues(tx, ctx.event.id, created.id)
+      return listed
     })
     const network = await syncProgramRecords('venues', await loadEvent(ctx.event.id), ctx.viewer.accountId)
+    if (locating && venue) {
+      after(() => runVenueGeocode({ eventId: ctx.event.id, venueId: venue.id, callerUserId: ctx.viewer.accountId }).catch(() => undefined))
+    }
     return json({ venue, network }, { status: 201 })
   } catch (e) {
     return errorResponse(e, 'create venue')

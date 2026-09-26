@@ -5,6 +5,8 @@ import 'server-only'
  * bookkeeping (at_uri/at_cid) are never taken from the body.
  */
 import { parseTimeInTimezone } from '@/lib/events/timezone'
+import { OutlineError, parseOutline, type OutlinePolygon } from '@/lib/geo/outline'
+import type { GeocodeStatus } from '@/lib/geo/venue-address'
 import {
   HEX_COLOR,
   InputError,
@@ -40,6 +42,13 @@ export interface VenueInput {
   /** The address text the point was geocoded from (null when placed by hand). */
   geocoded_from: string | null
   geocoded_at: string | null
+  /** Migration 0036: `pending|ok|failed|manual` — what the editor says while an address is looked up. */
+  geocode_status: GeocodeStatus | null
+  /**
+   * Migration 0036: a GeoJSON Polygon drawn over the room. App-side only, never published, and
+   * never set for a private residence (409) — a footprint is as precise as an address.
+   */
+  outline: OutlinePolygon | null
 }
 
 function coordinate(body: Record<string, unknown>, field: 'latitude' | 'longitude'): number | null {
@@ -76,6 +85,8 @@ export function parseVenue(body: Record<string, unknown>, current?: VenueInput):
   if (!slug || !SLUG.test(slug)) throw new InputError('Slug may contain lowercase letters, numbers and single hyphens', 'slug')
   const country = has('country') ? text(body, 'country', { max: 2, label: 'Country' }) : current!.country
   if (country && !/^[A-Za-z]{2}$/.test(country)) throw new InputError('Country must be a two-letter code (for example US)', 'country')
+  const isPrivateResidence = has('is_private_residence') ? bool(body, 'is_private_residence', false) : current!.is_private_residence
+  const point = parseVenuePoint(body, current)
   return {
     name,
     slug,
@@ -87,19 +98,75 @@ export function parseVenue(body: Record<string, unknown>, current?: VenueInput):
     region: has('region') ? text(body, 'region', { max: 100, label: 'Region' }) : current!.region,
     postal_code: has('postal_code') ? text(body, 'postal_code', { max: 20, label: 'Postal code' }) : current!.postal_code,
     country: country ? country.toUpperCase() : null,
-    is_private_residence: has('is_private_residence') ? bool(body, 'is_private_residence', false) : current!.is_private_residence,
+    is_private_residence: isPrivateResidence,
     notes: has('notes') ? text(body, 'notes', { max: 1000, label: 'Notes' }) : current!.notes,
     is_primary: has('is_primary') ? bool(body, 'is_primary', false) : current!.is_primary,
     allowed_formats: has('allowed_formats') ? parseAllowedFormats(body) : current!.allowed_formats,
-    ...parseVenuePoint(body, current),
+    ...point,
+    outline: parseVenueOutline(body, current, { point, isPrivateResidence }),
   }
 }
 
-/** latitude/longitude/geocoded_from as a unit: a partial update merges over the current pin; the result must be a whole point or none. */
-function parseVenuePoint(body: Record<string, unknown>, current?: VenueInput): Pick<VenueInput, 'latitude' | 'longitude' | 'geocoded_from' | 'geocoded_at'> {
+/**
+ * The room's outline, whole or nothing (like its point): an absent `outline` key on a partial
+ * update keeps the shape that is stored, `null` removes it.
+ *
+ * A private residence may not have one — the footprint of a home is its exact location — so the
+ * route answers 409, whether the outline or the flag is what arrived.
+ */
+function parseVenueOutline(
+  body: Record<string, unknown>,
+  current: VenueInput | undefined,
+  resolved: { point: Pick<VenueInput, 'latitude' | 'longitude'>; isPrivateResidence: boolean },
+): OutlinePolygon | null {
+  const has = current === undefined || Object.prototype.hasOwnProperty.call(body, 'outline')
+  let outline: OutlinePolygon | null
+  if (!has) {
+    outline = current!.outline ?? null
+  } else {
+    const pin =
+      resolved.point.latitude !== null && resolved.point.longitude !== null
+        ? { lat: resolved.point.latitude, lng: resolved.point.longitude }
+        : null
+    try {
+      outline = parseOutline(body.outline ?? null, pin)
+    } catch (e) {
+      if (e instanceof OutlineError) throw new InputError(e.message, e.field)
+      throw e
+    }
+  }
+  if (outline && resolved.isPrivateResidence) {
+    throw new InputError(
+      'A private residence cannot have an outline on the map: its footprint is its address. Clear the outline first.',
+      'outline',
+      409,
+      'PrivateResidenceOutline',
+    )
+  }
+  // Removing the pin removes the shape that was anchored to it.
+  if (resolved.point.latitude === null) return null
+  return outline
+}
+
+/**
+ * latitude/longitude/geocoded_from as a unit: a partial update merges over the current pin; the
+ * result must be a whole point or none.
+ *
+ * `geocode_status` follows from how the point was placed, so the editor can tell the organizer
+ * what happened without a second field to keep in step: no point at all is no status, a point with
+ * no `geocoded_from` was dropped by hand (`manual`), a point that came with the address it was
+ * found from is `ok`. A save that schedules a background lookup sets `pending` over this.
+ */
+function parseVenuePoint(body: Record<string, unknown>, current?: VenueInput): Pick<VenueInput, 'latitude' | 'longitude' | 'geocoded_from' | 'geocoded_at' | 'geocode_status'> {
   const has = (field: string) => current === undefined || Object.prototype.hasOwnProperty.call(body, field)
   if (!has('latitude') && !has('longitude') && !has('geocoded_from')) {
-    return { latitude: current!.latitude, longitude: current!.longitude, geocoded_from: current!.geocoded_from, geocoded_at: current!.geocoded_at }
+    return {
+      latitude: current!.latitude,
+      longitude: current!.longitude,
+      geocoded_from: current!.geocoded_from,
+      geocoded_at: current!.geocoded_at,
+      geocode_status: current!.geocode_status ?? null,
+    }
   }
   const latitude = has('latitude') ? coordinate(body, 'latitude') : current?.latitude ?? null
   const longitude = has('longitude') ? coordinate(body, 'longitude') : current?.longitude ?? null
@@ -111,6 +178,7 @@ function parseVenuePoint(body: Record<string, unknown>, current?: VenueInput): P
     longitude,
     geocoded_from: latitude === null ? null : geocodedFrom,
     geocoded_at: latitude === null ? null : moved || !current?.geocoded_at ? new Date().toISOString() : current.geocoded_at,
+    geocode_status: latitude === null ? null : geocodedFrom === null ? 'manual' : 'ok',
   }
 }
 

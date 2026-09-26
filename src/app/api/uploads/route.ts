@@ -11,6 +11,8 @@ import type { EventRoleName } from '@/types/event'
  *
  *   event=<slug|id>   an event asset (logo, banner); the viewer must be one of its organizers
  *                     (owner/admin). ≤ 5 MB.
+ *   purpose=floorplan a gathering's indoor map (design §1.5); needs `event` and the same organizer
+ *                     check. ≤ 8 MB, and PNG/JPEG/WebP only (a GIF floor plan is a mistake).
  *   purpose=avatar    the signed-in account's own profile photo (package G's SettingsModal /
  *                     OnboardingModal). Any signed-in account, rate-limited. ≤ 2 MB.
  *   (neither)         the creation wizard, before the gathering exists: any signed-in
@@ -30,6 +32,9 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const LIMITS = { draft: 20, avatar: 10 } as const
 const WINDOW_MS = 60 * 60 * 1000
 const AVATAR_MAX_BYTES = 2 * 1024 * 1024
+/** Design §1.5: a floor plan is a detailed raster and gets more room than a logo. */
+const FLOORPLAN_MAX_BYTES = 8 * 1024 * 1024
+const PURPOSES = new Set(['avatar', 'floorplan'])
 type Bucket = Map<string, number[]>
 const g = globalThis as typeof globalThis & { __unconferenceUploadBuckets?: Bucket }
 const buckets: Bucket = (g.__unconferenceUploadBuckets ??= new Map())
@@ -57,9 +62,11 @@ export async function POST(request: Request) {
   if (viewer instanceof Response) return viewer
 
   // Refuse obviously oversized bodies before reading them (multipart overhead allowed).
+  // The purpose (and with it the real ceiling) is inside the body, so the header check uses the
+  // largest ceiling any purpose allows; the per-purpose cap is applied once the form is parsed.
   const declared = Number(request.headers.get('content-length') ?? '0')
-  if (Number.isFinite(declared) && declared > MAX_UPLOAD_BYTES + 64 * 1024) {
-    return err(413, 'Images can be at most 5 MB.', 'TooLarge')
+  if (Number.isFinite(declared) && declared > FLOORPLAN_MAX_BYTES + 64 * 1024) {
+    return err(413, `Images can be at most ${FLOORPLAN_MAX_BYTES / (1024 * 1024)} MB.`, 'TooLarge')
   }
 
   // Two different failures used to share one message, and it was the wrong message for the one
@@ -87,14 +94,15 @@ export async function POST(request: Request) {
   }
   const hasEvent = typeof eventRef === 'string' && eventRef.trim() !== ''
   const purposeValue = typeof purpose === 'string' ? purpose.trim() : ''
-  if (purposeValue && purposeValue !== 'avatar') return err(400, 'Unknown upload purpose.', 'InvalidBody')
+  if (purposeValue && !PURPOSES.has(purposeValue)) return err(400, 'Unknown upload purpose.', 'InvalidBody')
   if (purposeValue === 'avatar' && hasEvent) return err(400, 'A profile photo does not belong to an event.', 'InvalidBody')
+  if (purposeValue === 'floorplan' && !hasEvent) return err(400, 'A floor plan belongs to a gathering.', 'InvalidBody')
 
   // Check the file before spending a rate-limit slot on it.
   const file = form.get('file')
   if (!file || typeof file === 'string') return err(400, 'Choose an image to upload.', 'MissingFile')
   if (file.size === 0) return err(400, 'That file is empty.', 'EmptyFile')
-  const cap = purposeValue === 'avatar' ? AVATAR_MAX_BYTES : MAX_UPLOAD_BYTES
+  const cap = purposeValue === 'avatar' ? AVATAR_MAX_BYTES : purposeValue === 'floorplan' ? FLOORPLAN_MAX_BYTES : MAX_UPLOAD_BYTES
   if (file.size > cap) return err(413, `Images can be at most ${cap / (1024 * 1024)} MB.`, 'TooLarge')
 
   if (hasEvent) {
@@ -116,6 +124,9 @@ export async function POST(request: Request) {
   const bytes = new Uint8Array(await file.arrayBuffer())
   const kind = sniffImage(bytes)
   if (!kind) return err(415, 'Upload a PNG, JPEG, GIF or WebP image.', 'UnsupportedType')
+  // The custom-map route only accepts these three extensions, so refuse the fourth here rather
+  // than store a file the map could never reference.
+  if (purposeValue === 'floorplan' && kind === 'gif') return err(415, 'Upload the floor plan as a PNG, JPEG or WebP image.', 'UnsupportedType')
 
   try {
     const stored = await storeImage(bytes, kind)

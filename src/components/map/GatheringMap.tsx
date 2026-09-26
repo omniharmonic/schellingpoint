@@ -11,7 +11,7 @@ import { Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { MapCanvasProps } from './types'
 
-export type { MapHandle, MapPin, MapView } from './types'
+export type { LngLat, MapHandle, MapImage, MapPin, MapShape, MapView } from './types'
 
 const MapCanvas = dynamic(() => import('./MapCanvas'), {
   ssr: false,

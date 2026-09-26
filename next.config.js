@@ -19,8 +19,10 @@ const nextConfig = {
   },
 }
 
-// Keep production checks from replacing the running development server's chunks.
+// Keep production checks from replacing the running development server's chunks. A second dev
+// server on another port needs its own build directory too, or the two overwrite each other's
+// chunks and every route 500s: `NEXT_DEV_DIST_DIR=.next-dev-3007 next dev -p 3007`.
 module.exports = (phase) => ({
   ...nextConfig,
-  distDir: phase === PHASE_DEVELOPMENT_SERVER ? '.next-dev' : '.next',
+  distDir: phase === PHASE_DEVELOPMENT_SERVER ? process.env.NEXT_DEV_DIST_DIR || '.next-dev' : '.next',
 })

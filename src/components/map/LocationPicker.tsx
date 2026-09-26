@@ -3,7 +3,8 @@
 /**
  * Where a self-hosted session happens (spec §8.3/§8.4, proposer side): the address text
  * (`custom_location`, attendee-only) plus a pin (`location_lat/lng`, the same tier). "Find on
- * map" geocodes the typed address through our server (organizers and hosts only, rate-limited);
+ * map" geocodes the typed address through `useAddressLookup` — the shared lookup the venue editor's
+ * address search uses too (design §1.3), so there is one voice and one budget for both;
  * the pin can also be placed by clicking the map and dragged. Non-attendees only ever see the
  * rounded ≈1 km area, which is explained inline.
  */
@@ -12,8 +13,8 @@ import { Crosshair, MapPin, Search, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { Label } from '@/components/ui/label'
-import { apiFetch, ApiError } from '@/lib/api/client'
 import { roundCoarse } from '@/lib/geo/coarse'
+import { useAddressLookup } from './AddressSearch'
 import { GatheringMap, type MapHandle, type MapPin as Pin } from './GatheringMap'
 
 export interface LocationValue {
@@ -37,8 +38,8 @@ export interface LocationPickerProps {
 
 export function LocationPicker({ eventSlug, value, onChange, initialView, idPrefix = 'location', label = 'Location details', hint, disabled }: LocationPickerProps) {
   const handleRef = React.useRef<MapHandle | null>(null)
-  const [looking, setLooking] = React.useState(false)
-  const [lookupError, setLookupError] = React.useState<string | null>(null)
+  const lookup = useAddressLookup(eventSlug)
+  const { looking, error: lookupError, setError: setLookupError } = lookup
   const [lookupLabel, setLookupLabel] = React.useState<string | null>(null)
   const [placing, setPlacing] = React.useState(false)
   const hasPin = value.lat !== null && value.lng !== null
@@ -65,25 +66,11 @@ export function LocationPicker({ eventSlug, value, onChange, initialView, idPref
       setLookupError('Type the address first.')
       return
     }
-    setLooking(true)
-    setLookupError(null)
     setLookupLabel(null)
-    try {
-      const res = await apiFetch<{ result: { lat: number; lng: number; label: string } | null }>(`/api/v1/events/${encodeURIComponent(eventSlug)}/admin/geocode`, {
-        method: 'POST',
-        json: { query },
-      })
-      if (!res.result) {
-        setLookupError('No match for that address. Click the map to place the pin by hand.')
-        return
-      }
-      setLookupLabel(res.result.label)
-      setPoint(res.result.lat, res.result.lng)
-    } catch (e) {
-      setLookupError(e instanceof ApiError ? e.message : 'The address lookup failed. Click the map to place the pin by hand.')
-    } finally {
-      setLooking(false)
-    }
+    const [match] = await lookup.search({ query })
+    if (!match) return
+    setLookupLabel(match.label)
+    setPoint(match.lat, match.lng)
   }
 
   const coarse = hasPin ? roundCoarse(value.lat as number, value.lng as number) : null

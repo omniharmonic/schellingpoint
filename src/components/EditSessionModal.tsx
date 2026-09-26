@@ -23,6 +23,7 @@ import { SkillPicker } from '@/components/SkillPicker'
 import { RequiredFeaturesField, useRoomFeatures } from '@/components/RequiredFeatures'
 import { TimePreferences, type TimePreferenceValue, type TimeWindowValue } from '@/components/TimePreferences'
 import { LocationPicker } from '@/components/map/LocationPicker'
+import { useMapArea } from '@/components/map/useMapArea'
 import { SESSION_STATUS } from '@/lib/labels'
 import { allowedFormatOptions, MAX_TAGS, TIME_OPTIONS } from '@/lib/sessions/constants'
 import type { SessionView } from '@/app/api/v1/sessions/_lib/read'
@@ -98,6 +99,8 @@ interface EditSessionModalProps {
  */
 export function EditSessionModal({ isOpen, onClose, session, onSave }: EditSessionModalProps) {
   const event = useEvent()
+  // Design §1.2: the map opens on the derived area when the organizers saved no view.
+  const mapArea = useMapArea(event.slug)
   const { tracks } = useTracks(event.slug)
   const { vocabulary: roomFeatures } = useRoomFeatures(event.slug)
   const { toast } = useToast()
@@ -439,7 +442,7 @@ export function EditSessionModal({ isOpen, onClose, session, onSave }: EditSessi
                         idPrefix="edit-location"
                         value={{ address: form.customLocation, lat: form.locationLat, lng: form.locationLng }}
                         onChange={(next) => setForm((f) => ({ ...f, customLocation: next.address, locationLat: next.lat, locationLng: next.lng }))}
-                        initialView={event.map ? { center: event.map.center, zoom: event.map.zoom } : null}
+                        initialView={mapArea.view ? { center: mapArea.view.center, zoom: mapArea.view.zoom } : null}
                         hint="Shown only to confirmed attendees, hosts and organizers."
                       />
                     )}

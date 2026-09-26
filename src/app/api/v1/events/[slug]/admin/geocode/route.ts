@@ -2,7 +2,9 @@
  * POST /api/v1/events/[slug]/admin/geocode
  *   { query }                                              free text somebody typed
  *   { address: { street, locality, region, postal_code, country } }   a room's address in parts
+ *   { query, limit: 2..5 }                                 the editor's address search
  *   →  { result: { lat, lng, label } | null, cached }
+ *      { result, results: [{ lat, lng, label }], cached }  when `limit` is more than 1
  *
  * The parts form is what the map editor sends for a room, and it matters: a street line on its own
  * matches whichever same-named street the geocoder ranks first anywhere in the world, so the city,
@@ -23,7 +25,7 @@ import { sql } from '@/lib/db'
 import { assertSameOrigin, requireViewer } from '@/lib/auth/viewer'
 import { canSubmitProposals } from '@/lib/events/lifecycle'
 import { json, jsonError, loadEventAccess, readJsonObject } from '@/app/api/v1/sessions/_lib/access'
-import { chargeGeocodeQuota, geocode, GeocodeRateLimitError } from '@/lib/geo/geocode'
+import { chargeGeocodeQuota, geocode, geocodeCandidates, GEOCODE_MAX_CANDIDATES, GeocodeRateLimitError } from '@/lib/geo/geocode'
 import { addressLine, hasAddress, normalizeQuery, type StructuredAddress } from '@/lib/geo/coarse'
 import type { EventStatus } from '@/types/event'
 
@@ -87,6 +89,14 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
   if (body instanceof Response) return body
   const lookup = addressToLookUp(body)
   if (!lookup) return jsonError(400, 'Enter an address to look up', { field: 'query' })
+  // Design §1.3: the editor's address search offers a handful of candidates to pick from. One
+  // lookup either way, so the same 30/h budget covers it; the answers live in their own cache
+  // namespace so a list never overwrites the single result the rest of the app reads.
+  const rawLimit = body.limit
+  const limit = rawLimit === undefined || rawLimit === null ? 1 : Number(rawLimit)
+  if (!Number.isInteger(limit) || limit < 1 || limit > GEOCODE_MAX_CANDIDATES) {
+    return jsonError(400, `limit must be a whole number between 1 and ${GEOCODE_MAX_CANDIDATES}`, { field: 'limit' })
+  }
 
   try {
     await chargeGeocodeQuota(sql, viewer.accountId)
@@ -101,6 +111,10 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
   }
 
   try {
+    if (limit > 1) {
+      const { results, cached } = await geocodeCandidates(lookup, limit)
+      return json({ result: results[0] ?? null, results, cached })
+    }
     const { result, cached } = await geocode(lookup)
     return json({ result, cached })
   } catch (e) {

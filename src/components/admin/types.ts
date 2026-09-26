@@ -15,6 +15,8 @@ export interface AdminSession {
   host_id: string | null
   /** The host's own display name. */
   host_display_name: string | null
+  /** The host account's DID, so the builder's host line can link to their profile (design §3.2). */
+  host_did: string | null
   /** Organizer-typed speaker name for a host-less session: organizer-only, never published. */
   listed_host_name: string | null
   topic_tags: string[] | null
@@ -82,6 +84,10 @@ export interface AdminVenue {
   latitude?: number | null
   longitude?: number | null
   geocoded_from?: string | null
+  /** Migration 0036: how the pin got there / how the background lookup went. */
+  geocode_status?: 'pending' | 'ok' | 'failed' | 'manual' | null
+  /** Migration 0036: the room's outline (GeoJSON Polygon). App-side only; never published. */
+  outline?: { type: 'Polygon'; coordinates: [number, number][][] } | null
   network_published: boolean
   slot_count: number
   scheduled_count: number

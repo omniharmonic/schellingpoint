@@ -52,6 +52,7 @@ export interface AdminSessionRow {
   host_id: string | null
   /** The host account's own display name (self-written); null for host-less sessions. */
   host_display_name: string | null
+  host_did: string | null
   /** Organizer-typed name for a host-less session. Organizer-only, never published (R9). */
   listed_host_name: string | null
   topic_tags: string[] | null
@@ -90,6 +91,7 @@ export async function listAdminSessions(eventId: string, db: Sql = sql, sessionI
   return db<AdminSessionRow[]>`
     select s.id, s.title, s.description, s.format, s.duration, s.status, s.host_id,
            case when s.host_id is not null then p.display_name end as host_display_name,
+           case when s.host_id is not null then ha.did end as host_did,
            l.host_name as listed_host_name,
            s.topic_tags, s.time_preferences, s.track_id, s.venue_id, s.time_slot_id, s.published_slot_id,
            s.session_type, s.is_votable, s.expected_attendance, s.required_features, s.rejection_reason,
@@ -105,6 +107,7 @@ export async function listAdminSessions(eventId: string, db: Sql = sql, sessionI
            case when tr.id is not null then json_build_object('id', tr.id, 'name', tr.name, 'color', tr.color) end as track
     from sessions s
     left join profiles p on p.id = s.host_id
+    left join accounts ha on ha.id = s.host_id
     left join session_host_listings l on l.session_id = s.id and l.event_id = s.event_id
     left join venues v on v.id = s.venue_id and v.event_id = s.event_id
     left join time_slots t on t.id = s.time_slot_id and t.event_id = s.event_id
@@ -191,6 +194,10 @@ export interface AdminVenue {
   latitude: number | null
   longitude: number | null
   geocoded_from: string | null
+  /** Migration 0036: `pending|ok|failed|manual` for the background address lookup. */
+  geocode_status: 'pending' | 'ok' | 'failed' | 'manual' | null
+  /** Migration 0036: the room's outline as a GeoJSON Polygon. App-side only; never published. */
+  outline: { type: 'Polygon'; coordinates: [number, number][][] } | null
   network_published: boolean
   slot_count: number
   scheduled_count: number
@@ -204,6 +211,7 @@ export async function selectVenues(db: Sql, eventId: string, venueId?: string): 
            v.locality, v.region, v.postal_code, v.country, v.is_private_residence, v.notes,
            coalesce(v.is_primary, false) as is_primary, coalesce(v.allowed_formats, '{}') as allowed_formats,
            v.latitude::float8 as latitude, v.longitude::float8 as longitude, v.geocoded_from,
+           v.geocode_status, v.outline,
            v.at_uri is not null as network_published,
            (select count(*)::int from time_slots t where t.venue_id = v.id and t.event_id = v.event_id) as slot_count,
            (select count(*)::int from sessions s

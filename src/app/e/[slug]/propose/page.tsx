@@ -28,6 +28,7 @@ import { SkillPicker } from '@/components/SkillPicker'
 import { RequiredFeaturesField, useRoomFeatures } from '@/components/RequiredFeatures'
 import { TimePreferences, type TimePreferenceValue } from '@/components/TimePreferences'
 import { LocationPicker } from '@/components/map/LocationPicker'
+import { useMapArea } from '@/components/map/useMapArea'
 import {
   allowedDurationOptions,
   allowedFormatOptions,
@@ -90,6 +91,8 @@ export default function ProposePage() {
   const router = useRouter()
   const { user, profile, isLoading: authLoading } = useAuth()
   const event = useEvent()
+  // Design §1.2: the map opens on the derived area when the organizers saved no view.
+  const mapArea = useMapArea(event.slug)
   const proposalsClosed = !isParticipationOpen(event, 'propose')
 
   const { tracks } = useTracks(event.slug)
@@ -553,7 +556,7 @@ export default function ProposePage() {
                         setCustomLocation(next.address)
                         setLocationPoint({ lat: next.lat, lng: next.lng })
                       }}
-                      initialView={event.map ? { center: event.map.center, zoom: event.map.zoom } : null}
+                      initialView={mapArea.view ? { center: mapArea.view.center, zoom: mapArea.view.zoom } : null}
                     />
 
                     <div className="space-y-2">

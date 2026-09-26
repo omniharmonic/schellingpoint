@@ -8,11 +8,14 @@
  * whose calendar event is already on the network blocks the delete: moving or cancelling
  * it is destructive and goes through the schedule builder's approval flow.
  */
+import { after } from 'next/server'
 import { asAccount } from '@/lib/db'
 import { errorResponse, fail, isUuid, json, readBody, requireOrganizer, rolesWith } from '@/lib/scheduling/admin-api'
 import { parseVenue, type VenueInput } from '@/lib/scheduling/inputs'
 import { loadEvent, selectVenues, syncProgramRecords, type NetworkSyncResult } from '@/lib/scheduling/program'
+import { runVenueGeocode, shouldGeocodeOnSave } from '@/lib/geo/venue-geocode'
 import { JOB_THRESHOLD_SESSIONS } from '@/lib/atproto/publish-jobs'
+import { venueRow } from '../_lib/row'
 
 /**
  * A room's point or private-residence flag is also carried by every published calendar event in
@@ -54,12 +57,14 @@ export async function PATCH(request: Request, { params }: Params) {
 
   try {
     let geoChanged = false
+    let locating = false
     const venue = await asAccount(ctx.viewer.accountId, async (tx) => {
       const [current] = await tx<VenueInput[]>`
         select name, slug, capacity, coalesce(features, '{}') as features, style, address, locality, region,
                postal_code, country, is_private_residence, notes, coalesce(is_primary, false) as is_primary,
                coalesce(allowed_formats, '{}') as allowed_formats,
-               latitude::float8 as latitude, longitude::float8 as longitude, geocoded_from, geocoded_at
+               latitude::float8 as latitude, longitude::float8 as longitude, geocoded_from, geocoded_at,
+               geocode_status, outline
         from venues where id = ${id} and event_id = ${ctx.event.id}
         for update
       `
@@ -69,10 +74,13 @@ export async function PATCH(request: Request, { params }: Params) {
         (next.latitude ?? null) !== (current.latitude ?? null)
         || (next.longitude ?? null) !== (current.longitude ?? null)
         || next.is_private_residence !== current.is_private_residence
+      // Design §1.1: an address that changed schedules its own lookup after the save.
+      locating = shouldGeocodeOnSave(next, current)
       if (next.is_primary && !current.is_primary) {
         await tx`update venues set is_primary = false where event_id = ${ctx.event.id} and is_primary and id <> ${id}`
       }
-      await tx`update venues set ${tx(next)} where id = ${id} and event_id = ${ctx.event.id}`
+      const row = { ...venueRow(tx, next), ...(locating ? { geocode_status: 'pending' } : {}) }
+      await tx`update venues set ${tx(row)} where id = ${id} and event_id = ${ctx.event.id}`
       const [updated] = await selectVenues(tx, ctx.event.id, id)
       return updated
     })
@@ -80,6 +88,9 @@ export async function PATCH(request: Request, { params }: Params) {
     const event = await loadEvent(ctx.event.id)
     const network = await syncProgramRecords('venues', event, ctx.viewer.accountId)
     const sessions = geoChanged ? await refreshRoomSessions(event, id, ctx.viewer.accountId) : undefined
+    if (locating) {
+      after(() => runVenueGeocode({ eventId: ctx.event.id, venueId: id, callerUserId: ctx.viewer.accountId }).catch(() => undefined))
+    }
     return json({ venue, network: sessions ? { ...network, sessions } : network })
   } catch (e) {
     return errorResponse(e, 'update venue')
