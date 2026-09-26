@@ -6,11 +6,19 @@
  * with the NotificationBell beside it. Signed out, it renders a "Sign in" link that returns to
  * the current page.
  *
- * It owns the Account modal (`SettingsModal`) and the `?settings=1` deep link, so a shell only
- * needs to render `<WorkspaceUserMenu />` once — in the sidebar footer and again inside the
- * mobile drawer if it wants both (each instance manages its own modal state).
- *
  *   <div className="border-t p-3"><WorkspaceUserMenu /></div>
+ *
+ * `variant="avatar"` is the mobile header's one-tap version (design §2.1): just the avatar, and
+ * it opens the Account modal directly on its Profile tab instead of a menu.
+ *
+ * The Account modal itself (`SettingsModal`) and the `?settings=1` deep link belong to
+ * `AccountModalProvider`, so a shell that has more than one way in — a header avatar and a
+ * "Account" row in the More sheet — opens one dialog, not two. Wrap the shell once:
+ *
+ *   <AccountModalProvider gathering={{ slug, name }}>…shell…</AccountModalProvider>
+ *
+ * and call `useAccountModal()?.open()` from anywhere inside. Without a provider the menu falls
+ * back to owning a dialog of its own, so `<WorkspaceUserMenu />` still works on its own.
  */
 
 import * as React from 'react'
@@ -32,34 +40,82 @@ import { useAuth, viewerDisplayName, viewerInitial } from '@/hooks/useAuth'
 import { useEvent } from '@/contexts/EventContext'
 import { cn } from '@/lib/utils'
 
+/* ─────────────────────────── the one Account modal ─────────────────────────── */
+
+const AccountModalContext = React.createContext<{ open: () => void } | null>(null)
+
+/** Whoever is inside an `AccountModalProvider` can open the shell's Account modal. */
+export function useAccountModal(): { open: () => void } | null {
+  return React.useContext(AccountModalContext)
+}
+
+/**
+ * Owns the shell's Account modal and the `?settings=1` deep link (used by the ATProto
+ * "Link a Bluesky account" hint), so every entry point opens the same dialog.
+ */
+export function AccountModalProvider({
+  gathering,
+  children,
+}: {
+  gathering?: { slug: string; name: string | null } | null
+  children: React.ReactNode
+}) {
+  const [open, setOpen] = React.useState(false)
+  useSettingsDeepLink(true, setOpen)
+  const value = React.useMemo(() => ({ open: () => setOpen(true) }), [])
+  return (
+    <AccountModalContext.Provider value={value}>
+      {children}
+      <SettingsModal isOpen={open} onClose={() => setOpen(false)} gathering={gathering} />
+    </AccountModalContext.Provider>
+  )
+}
+
+/**
+ * `?settings=1` on any page inside a workspace opens the Account modal, then leaves the URL clean.
+ * `enabled` is false for a menu that delegates to a provider, so the link is claimed exactly once.
+ */
+function useSettingsDeepLink(enabled: boolean, open: (value: boolean) => void) {
+  React.useEffect(() => {
+    if (!enabled || typeof window === 'undefined') return
+    const url = new URL(window.location.href)
+    if (url.searchParams.get('settings') === '1') {
+      open(true)
+      url.searchParams.delete('settings')
+      window.history.replaceState(null, '', url.pathname + (url.search || '') + url.hash)
+    }
+  }, [enabled, open])
+}
+
+/* ──────────────────────────────── the menu ──────────────────────────────── */
+
 export interface WorkspaceUserMenuProps {
   className?: string
-  /** Called before the Account modal opens (close a mobile drawer, for example). */
+  /** Called before the Account modal opens (close a sheet or a drawer, for example). */
   onOpenAccount?: () => void
   /** Where sign-out lands; defaults to the gathering page. */
   signOutTo?: string
   /** Render the NotificationBell beside the menu (off when the shell's top bar already has one). */
   withBell?: boolean
+  /** `avatar` is the mobile header's single tap straight to Account; `menu` is the full block. */
+  variant?: 'menu' | 'avatar'
 }
 
-export function WorkspaceUserMenu({ className, onOpenAccount, signOutTo, withBell = true }: WorkspaceUserMenuProps) {
+export function WorkspaceUserMenu({
+  className,
+  onOpenAccount,
+  signOutTo,
+  withBell = true,
+  variant = 'menu',
+}: WorkspaceUserMenuProps) {
   const pathname = usePathname()
   const router = useRouter()
   const event = useEvent()
   const { user, profile, signOut } = useAuth()
-  const [showAccount, setShowAccount] = React.useState(false)
-
-  // Deep link: any page inside a workspace can open the Account modal with ?settings=1
-  // (used by the ATProto "Link a Bluesky account" hint).
-  React.useEffect(() => {
-    if (typeof window === 'undefined') return
-    const url = new URL(window.location.href)
-    if (url.searchParams.get('settings') === '1') {
-      setShowAccount(true)
-      url.searchParams.delete('settings')
-      window.history.replaceState(null, '', url.pathname + (url.search || '') + url.hash)
-    }
-  }, [])
+  const shared = useAccountModal()
+  // Only a menu outside a provider keeps a dialog (and the deep link) of its own.
+  const [localAccount, setLocalAccount] = React.useState(false)
+  useSettingsDeepLink(!shared, setLocalAccount)
 
   const handleSignOut = async () => {
     await signOut()
@@ -67,6 +123,13 @@ export function WorkspaceUserMenu({ className, onOpenAccount, signOutTo, withBel
   }
 
   if (!user) {
+    if (variant === 'avatar') {
+      return (
+        <Button asChild variant="ghost" size="sm" className={className}>
+          <Link href={`/login?returnTo=${encodeURIComponent(pathname || `/e/${event.slug}`)}`}>Sign in</Link>
+        </Button>
+      )
+    }
     return (
       <Button asChild variant="secondary" size="sm" className={cn('w-full', className)}>
         <Link href={`/login?returnTo=${encodeURIComponent(pathname || `/e/${event.slug}`)}`}>Sign in</Link>
@@ -77,7 +140,44 @@ export function WorkspaceUserMenu({ className, onOpenAccount, signOutTo, withBel
   const name = viewerDisplayName(profile, user)
   const openAccount = () => {
     onOpenAccount?.()
-    setShowAccount(true)
+    if (shared) shared.open()
+    else setLocalAccount(true)
+  }
+  const fallbackModal = shared ? null : (
+    <SettingsModal
+      isOpen={localAccount}
+      onClose={() => setLocalAccount(false)}
+      gathering={{ slug: event.slug, name: event.name }}
+    />
+  )
+  const avatar = (
+    <span className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-full border border-border bg-muted text-xs font-medium text-muted-foreground">
+      {profile?.avatar_url ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={profile.avatar_url} alt="" className="h-full w-full object-cover" referrerPolicy="no-referrer" />
+      ) : (
+        viewerInitial(profile, user)
+      )}
+    </span>
+  )
+
+  if (variant === 'avatar') {
+    return (
+      <>
+        <button
+          type="button"
+          onClick={openAccount}
+          aria-label={`Account, ${name}`}
+          className={cn(
+            'inline-flex h-11 w-11 items-center justify-center rounded-full transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+            className
+          )}
+        >
+          {avatar}
+        </button>
+        {fallbackModal}
+      </>
+    )
   }
 
   return (
@@ -90,14 +190,7 @@ export function WorkspaceUserMenu({ className, onOpenAccount, signOutTo, withBel
               className="flex min-h-10 min-w-0 flex-1 items-center gap-2 rounded-lg px-1.5 text-left transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               aria-label={`Account menu for ${name}`}
             >
-              <span className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-full border border-border bg-muted text-xs font-medium text-muted-foreground">
-                {profile?.avatar_url ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img src={profile.avatar_url} alt="" className="h-full w-full object-cover" referrerPolicy="no-referrer" />
-                ) : (
-                  viewerInitial(profile, user)
-                )}
-              </span>
+              {avatar}
               <span className="min-w-0 flex-1">
                 <span className="block truncate text-sm font-medium leading-tight">{name}</span>
                 {user.handle && profile?.display_name && (
@@ -130,11 +223,7 @@ export function WorkspaceUserMenu({ className, onOpenAccount, signOutTo, withBel
         </DropdownMenu>
         {withBell && <NotificationBell />}
       </div>
-      <SettingsModal
-        isOpen={showAccount}
-        onClose={() => setShowAccount(false)}
-        gathering={{ slug: event.slug, name: event.name }}
-      />
+      {fallbackModal}
     </>
   )
 }

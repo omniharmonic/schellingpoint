@@ -392,7 +392,9 @@ export function MapPageClient() {
 
           {selected && (
             <aside
-              className="fixed inset-x-0 bottom-0 z-30 max-h-[55vh] overflow-y-auto rounded-t-xl border bg-background p-4 shadow-lg md:static md:max-h-none md:w-80 md:shrink-0 md:rounded-lg md:shadow-none"
+              /* The sheet sits above the floating bar on a phone (design §2.4); on desktop it is
+                 a static column again and the offset folds away. */
+              className="above-mobile-bar fixed inset-x-0 z-30 max-h-[55vh] overflow-y-auto rounded-t-xl border bg-background p-4 shadow-lg md:static md:max-h-none md:w-80 md:shrink-0 md:rounded-lg md:shadow-none"
               aria-label={`Sessions at ${selected.name}`}
               data-testid="map-panel"
             >

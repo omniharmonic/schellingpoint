@@ -71,6 +71,9 @@
     --favorite-foreground: 0 0% 100%;
     --radius: 0.75rem;
     --workspace-header-h: 76px;
+    /* The floating mobile utility bar (MobileTabBar): its own height, and the gap it is inset by. */
+    --mobile-bar-h: 58px;
+    --mobile-bar-inset: 12px;
   }
   .dark {
     color-scheme: dark;
@@ -129,7 +132,13 @@
   .card-hover { transition: border-color .18s ease, box-shadow .18s ease; }
   .card-hover:hover { border-color: hsl(var(--primary) / .45); box-shadow: 0 4px 20px hsl(var(--foreground) / .04); }
   .interactive { @apply transition-colors duration-200; }
-  .pb-safe { padding-bottom: calc(env(safe-area-inset-bottom) + 5rem); }
+  /* Clearance for the floating mobile bar: inset + bar + breathing room, plus the home indicator.
+     Desktop has no bar, so the padding folds away and the shell's own padding is all there is. */
+  .pb-safe { padding-bottom: calc(env(safe-area-inset-bottom) + var(--mobile-bar-inset) + var(--mobile-bar-h) + 18px); }
+  /* The bar itself: floating, inset from three edges, pill radius, on --surface-1. */
+  .mobile-bar { bottom: calc(env(safe-area-inset-bottom) + var(--mobile-bar-inset)); left: var(--mobile-bar-inset); right: var(--mobile-bar-inset); }
+  /* Anything else pinned to the bottom on mobile (the map's place sheet) sits above the bar. */
+  .above-mobile-bar { bottom: calc(env(safe-area-inset-bottom) + var(--mobile-bar-inset) + var(--mobile-bar-h) + 8px); }
   .mono { font-family: ui-monospace, monospace; }
   .section-rule { @apply flex items-center gap-4 text-sm font-semibold text-foreground; }
   .section-rule::after { content: ''; @apply flex-1 h-px bg-border; }
@@ -278,6 +287,11 @@
   .schedule-session { @apply border-foreground/15 border-l-4 border-l-primary bg-card; }
   .schedule-session h3 { @apply text-base font-semibold; }
   .calendar-workspace { @apply bg-card rounded-2xl border border-foreground/20; }
+}
+@media (min-width: 768px) {
+  /* No floating bar on desktop, so nothing has to clear it. */
+  .pb-safe { padding-bottom: 0; }
+  .above-mobile-bar { bottom: auto; }
 }
 @media (max-width: 1023px) {
   .story-chapter { min-height: auto; padding-block: 2rem; }

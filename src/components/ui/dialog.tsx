@@ -20,6 +20,9 @@
  *
  * Every DialogContent must contain a DialogTitle (pass `hideClose` to drop the × button,
  * e.g. when an unsaved-changes guard owns dismissal; pair it with `onInteractOutside`).
+ *
+ * `variant="bottom"` makes it a sheet anchored to the bottom edge (the mobile More sheet,
+ * design §2.2); everything else about it — focus trap, Escape, backdrop — is unchanged.
  */
 
 import * as React from 'react'
@@ -54,20 +57,35 @@ const SIZE = {
   xl: 'sm:max-w-4xl',
 } as const
 
+/**
+ * `center` is the default modal. `bottom` is the mobile sheet (design §2.2): it rises from the
+ * bottom edge, keeps clear of the home indicator, and is otherwise the same dialog — Radix still
+ * traps focus, Escape and the backdrop still close it.
+ */
+const VARIANT = {
+  center:
+    'left-1/2 top-1/2 w-[calc(100%-2rem)] max-h-[calc(100dvh-2rem)] -translate-x-1/2 -translate-y-1/2 rounded-2xl border p-6 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95',
+  bottom:
+    'inset-x-0 bottom-0 mx-auto w-full max-h-[calc(100dvh-5rem)] rounded-t-2xl border-t px-4 pt-5 pb-[max(1.25rem,calc(env(safe-area-inset-bottom)+0.75rem))] data-[state=closed]:slide-out-to-bottom data-[state=open]:slide-in-from-bottom',
+} as const
+
 export interface DialogContentProps extends React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content> {
   size?: keyof typeof SIZE
+  /** `bottom` anchors the dialog to the bottom edge as a sheet; the default is a centred modal. */
+  variant?: keyof typeof VARIANT
   /** Omit the top-right close button (the footer must then offer a way out). */
   hideClose?: boolean
 }
 
 const DialogContent = React.forwardRef<React.ElementRef<typeof DialogPrimitive.Content>, DialogContentProps>(
-  ({ className, children, size = 'md', hideClose, ...props }, ref) => (
+  ({ className, children, size = 'md', variant = 'center', hideClose, ...props }, ref) => (
     <DialogPortal>
       <DialogOverlay />
       <DialogPrimitive.Content
         ref={ref}
         className={cn(
-          'fixed left-1/2 top-1/2 z-50 grid w-[calc(100%-2rem)] max-h-[calc(100dvh-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 overflow-y-auto rounded-2xl border bg-card p-6 text-card-foreground shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95',
+          'fixed z-50 grid gap-4 overflow-y-auto bg-card text-card-foreground shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0',
+          VARIANT[variant],
           SIZE[size],
           className
         )}
