@@ -266,3 +266,192 @@ test.describe('production regressions: uploads, session navigation, map tiles', 
     }
   })
 })
+
+/**
+ * Profiles (design §3): on `main` the session host card had a "View full profile" link and the
+ * `atproto` popover had no way out (fact-finding, Profiles). The link is back, and it leads to a
+ * real page at `/e/[slug]/people/[did]` whose interests lead back to a filtered People page.
+ */
+test.describe('a host name leads to their profile', () => {
+  test.skip(!isLocal || !process.env.PDS_URL || !process.env.PDS_ADMIN_PASSWORD, 'needs the local stack: DATABASE_URL on localhost, PDS_URL, PDS_ADMIN_PASSWORD')
+  test.describe.configure({ mode: 'serial' })
+
+  let sql: postgres.Sql
+  let gathering: TestGathering
+  let host: TestAccount
+  let viewer: TestAccount
+  let sessionId = ''
+  const interest = 'Soil carbon'
+
+  test.beforeAll(async () => {
+    test.setTimeout(180_000)
+    sql = postgres(databaseUrl, { max: 4, onnotice: () => {} })
+    // Created with proposals open so the session insert passes the proposal-window trigger, then
+    // moved to live, which is the state the session page is read in.
+    gathering = await createTestGathering(sql, { tag: 'profilelink', status: 'proposals_open', withProgram: true })
+    ;[host, viewer] = await Promise.all([
+      createTestAccount('profile-host', { sql }),
+      createTestAccount('profile-viewer', { sql }),
+    ])
+    await sql`insert into event_members (event_id, user_id, role) values
+                (${gathering.id}, ${host.id}, 'attendee'), (${gathering.id}, ${viewer.id}, 'owner')`
+    await sql`update profiles set display_name = 'Robin Hostwell', onboarding_completed = true,
+                affiliation = 'Soil Commons', looking_for = 'People running compost sites',
+                interests = ${sql.array([interest, 'Water'])}
+              where id = ${host.id}`
+    await sql`update profiles set display_name = 'Viewing Organizer', onboarding_completed = true where id = ${viewer.id}`
+    const [slot] = await sql<{ id: string; venue_id: string }[]>`
+      select id, venue_id from time_slots where event_id = ${gathering.id} and is_break = false order by start_time limit 1
+    `
+    const [session] = await sql<{ id: string }[]>`
+      insert into sessions (event_id, title, format, duration, host_id, status, time_slot_id, venue_id)
+      values (${gathering.id}, 'Compost at scale', 'workshop', 60, ${host.id}, 'scheduled', ${slot.id}, ${slot.venue_id})
+      returning id
+    `
+    sessionId = session.id
+    await sql`update events set status = 'live' where id = ${gathering.id}`
+  })
+
+  test.afterAll(async () => {
+    await gathering?.cleanup()
+    await Promise.all([host, viewer].filter(Boolean).map((a) => a.cleanup()))
+    await sql?.end({ timeout: 5 })
+  })
+
+  /** A page signed in as `who`, failing the test on any uncaught client error. */
+  async function pageAs(browser: import('@playwright/test').Browser, who: TestAccount) {
+    const context = await browser.newContext({ baseURL: base, viewport: { width: 1280, height: 900 } })
+    const [name, ...rest] = who.cookie.split('=')
+    await context.addCookies([{ name, value: rest.join('='), url: base }])
+    const page = await context.newPage()
+    const errors: string[] = []
+    page.on('pageerror', (e) => errors.push(e.message))
+    return { page, errors, close: () => context.close() }
+  }
+
+  test('host popover → View profile → the profile page, whose interests filter People', async ({ browser }) => {
+    const { page, errors, close: closeContext } = await pageAs(browser, viewer)
+    const context = { close: closeContext }
+    try {
+      await page.goto(`/e/${gathering.slug}/sessions/${sessionId}`)
+      await page.getByRole('button', { name: /Hosted by Robin Hostwell/ }).click()
+      const viewProfile = page.getByRole('link', { name: 'View profile' })
+      await expect(viewProfile).toBeVisible()
+      await viewProfile.click()
+
+      await expect(page).toHaveURL(new RegExp(`/e/${gathering.slug}/people/`))
+      const profile = page.getByTestId('member-profile')
+      await expect(profile.getByRole('heading', { name: 'Robin Hostwell', level: 1 })).toBeVisible()
+      await expect(profile.getByText('Soil Commons')).toBeVisible()
+      await expect(profile.getByText('People running compost sites')).toBeVisible()
+      // The session they host here is listed, and leads back to it.
+      await expect(profile.getByRole('link', { name: 'Compost at scale' })).toBeVisible()
+
+      // Each interest is a link to People filtered by it.
+      await page.getByTestId('profile-interests').getByRole('link', { name: interest }).click()
+      await expect(page).toHaveURL(/\/participants\?interest=/)
+      expect(new URL(page.url()).searchParams.get('interest')).toBe(interest)
+      await expect(page.getByRole('button', { name: interest, pressed: true })).toBeVisible()
+      // Robin lists it; the organizer does not, so the chip really narrowed the list.
+      await expect(page.getByRole('link', { name: 'Robin Hostwell' })).toBeVisible()
+      await expect(page.getByRole('link', { name: 'Viewing Organizer' })).toHaveCount(0)
+
+      // The sort control writes itself into the URL, so a sorted view is a link.
+      await page.getByLabel('Sort people').selectOption('joined')
+      await expect(page).toHaveURL(/sort=joined/)
+      expect(new URL(page.url()).searchParams.get('interest')).toBe(interest)
+
+      // `?highlight=` still opens the quick-look dialog it always did.
+      await page.goto(`/e/${gathering.slug}/participants?highlight=${host.id}`)
+      const dialog = page.getByRole('dialog')
+      await expect(dialog.getByRole('link', { name: 'Robin Hostwell' })).toBeVisible()
+      await expect(dialog.getByRole('link', { name: 'View full profile' })).toBeVisible()
+      expect(errors).toEqual([])
+    } finally {
+      await context.close()
+    }
+  })
+
+  test('Account shows the three per-gathering sharing switches, and saving one sticks', async ({ browser }) => {
+    const { page, errors, close } = await pageAs(browser, host)
+    try {
+      // `?settings=1` opens the Account modal with this gathering in context.
+      await page.goto(`/e/${gathering.slug}/participants?settings=1`)
+      const sharing = page.getByTestId('gathering-sharing')
+      await expect(sharing).toBeVisible()
+      await expect(sharing.getByText(/What you share at/)).toBeVisible()
+      const email = sharing.getByRole('switch', { name: 'Show my email address' })
+      await expect(email).toHaveAttribute('aria-checked', 'false')
+      await email.click()
+      await expect(email).toHaveAttribute('aria-checked', 'true')
+
+      // The switch is optimistic; the row is the truth, so poll for it.
+      const membership = async () => {
+        const [row] = await sql<{ share_email: boolean; share_contact: boolean }[]>`
+          select share_email, share_contact from event_members
+          where event_id = ${gathering.id} and user_id = ${host.id}
+        `
+        return row
+      }
+      await expect.poll(membership, { timeout: 10_000 }).toEqual({ share_email: true, share_contact: true })
+
+      // And a fellow member now sees the address on the profile page.
+      const seen = await page.request.get(
+        `${base}/api/v1/events/${gathering.slug}/participants/${encodeURIComponent(host.did)}`,
+        { headers: { cookie: viewer.cookie } },
+      )
+      expect((await seen.json()).member.email).toBe(host.email)
+      expect(errors).toEqual([])
+    } finally {
+      await close()
+    }
+  })
+
+  test('the gathering onboarding asks for interests, looking-for, handle and the switches, and can be skipped', async ({ browser }) => {
+    const newcomer = await createTestAccount('profile-new', { sql })
+    try {
+      await sql`insert into event_members (event_id, user_id, role) values (${gathering.id}, ${newcomer.id}, 'attendee')`
+      await sql`update profiles set onboarding_completed = false where id = ${newcomer.id}`
+      const { page, errors, close } = await pageAs(browser, newcomer)
+      try {
+        await page.goto(`/e/${gathering.slug}/participants`)
+        await page.getByRole('button', { name: 'Skip to your profile' }).click()
+        await page.getByLabel('Display name').fill('Newly Arrived')
+        await page.getByRole('button', { name: 'Continue' }).click()
+        await page.getByRole('button', { name: 'Continue' }).click()
+
+        // One step: interests, looking-for, the messaging handle and both sharing switches.
+        await expect(page.getByText('Connecting with people here')).toBeVisible()
+        await page.getByLabel('Add your own topic').fill('Worm bins')
+        await page.getByRole('button', { name: 'Add topic' }).click()
+        await page.getByLabel(/What are you looking for/).fill('A compost mentor')
+        await page.getByLabel(/Messaging handle/).fill('newly_arrived')
+        await page.getByRole('switch', { name: 'Show my email address' }).click()
+        await page.getByRole('button', { name: 'Save profile' }).click()
+
+        await expect(page.getByText('Connecting with people here')).toBeHidden()
+        const [profile] = await sql<{ interests: string[]; looking_for: string; telegram: string }[]>`
+          select interests, looking_for, telegram from profiles where id = ${newcomer.id}
+        `
+        expect(profile).toEqual({ interests: ['Worm bins'], looking_for: 'A compost mentor', telegram: 'newly_arrived' })
+        await expect
+          .poll(
+            async () => {
+              const [row] = await sql<{ share_email: boolean; share_contact: boolean }[]>`
+                select share_email, share_contact from event_members
+                where event_id = ${gathering.id} and user_id = ${newcomer.id}
+              `
+              return row
+            },
+            { timeout: 10_000 },
+          )
+          .toEqual({ share_email: true, share_contact: true })
+        expect(errors).toEqual([])
+      } finally {
+        await close()
+      }
+    } finally {
+      await newcomer.cleanup()
+    }
+  })
+})

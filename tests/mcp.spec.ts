@@ -369,8 +369,15 @@ test.describe('mcp server', () => {
     expect(scheduled.start).toMatch(/^\d{2}:\d{2}$/)
     expect(scheduled.room).toBeTruthy()
     expect(scheduled.hosts[0].display_name).toBe('MCP Host')
-    // Never anybody's identifiers.
-    expect(schedule.text).not.toContain('did:')
+    // Every host carries a link to their profile in this gathering (design §3.2).
+    // Absolute, so an assistant can open it; the origin is whatever NEXT_PUBLIC_APP_URL says.
+    expect(scheduled.hosts[0].profile_url).toMatch(/^https?:\/\//)
+    expect(scheduled.hosts[0].profile_url).toContain(`/e/${gathering.slug}/people/${encodeURIComponent(member.did)}`)
+    // Never anybody's identifiers — the host's own DID appears only inside that profile URL, and
+    // only percent-encoded as a path segment (hence the `%3A` unescaping before the match).
+    const decoded = schedule.text.replace(/%3A/gi, ':')
+    const dids = new Set(decoded.match(/did:(?:plc|web):[A-Za-z0-9._:-]+/g) ?? [])
+    expect([...dids], `unexpected DIDs: ${[...dids].join(', ')}`).toEqual([member.did])
     expect(schedule.text).not.toContain(member.email)
     expect(schedule.text).not.toContain(member.id)
 
@@ -385,6 +392,7 @@ test.describe('mcp server', () => {
     const ok = await callTool(memberToken, 'get_session', { slug: gathering.slug, session_id: sessionId })
     expect(ok.isError).toBe(false)
     expect(ok.data.transcript.available).toBe(true)
+    expect(ok.data.hosts[0].profile_url).toContain(`/e/${gathering.slug}/people/${encodeURIComponent(member.did)}`)
 
     const crossEvent = await callTool(memberToken, 'get_session', { slug: gathering.slug, session_id: elsewhereSessionId })
     expect(crossEvent.isError).toBe(true)

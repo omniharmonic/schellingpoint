@@ -14,6 +14,8 @@ import {
   ensRpcUrls,
 } from '../src/app/api/me/ens/ens'
 import { normalizeAvatarUrl, normalizeEnsName, normalizeTelegram, validateProfilePatch } from '../src/app/api/me/profile/validate'
+import { SORTS, defaultSort, isSortKey, sortParticipants, type SortKey } from '../src/app/e/[slug]/people/sort'
+import type { MemberCardData } from '../src/app/e/[slug]/people/shared'
 
 // People, profiles, the members-only directory and the public AppView reads (work package G),
 // against the running dev server (:3001, mail disabled) and the local stack (Postgres :55432,
@@ -95,10 +97,57 @@ test.describe('people primitives', () => {
     expect(normalizeAvatarUrl('https://tracker.example/pixel.png', { appOrigin: origin, current: null }).ok).toBe(false)
     expect(normalizeAvatarUrl('/uploads/avatars/a.png', { appOrigin: origin, current: null }).ok).toBe(true)
     expect(normalizeAvatarUrl('/uploads/../etc/passwd', { appOrigin: origin, current: null }).ok).toBe(false)
-    const tooMany = validateProfilePatch({ interests: Array.from({ length: 11 }, (_, i) => `t${i}`) }, { appOrigin: origin, currentAvatarUrl: null })
-    expect(tooMany.ok).toBe(false)
     const unknown = validateProfilePatch({ is_admin: true }, { appOrigin: origin, currentAvatarUrl: null })
     expect(unknown).toMatchObject({ ok: false, field: 'is_admin' })
+  })
+
+  test('interests cap is 15: fifteen pass, sixteen are refused', () => {
+    const topics = (n: number) => Array.from({ length: n }, (_, i) => `Topic ${i + 1}`)
+    const ok = validateProfilePatch({ interests: topics(15) }, { appOrigin: origin, currentAvatarUrl: null })
+    expect(ok).toMatchObject({ ok: true })
+    expect((ok as { ok: true; value: { interests: string[] } }).value.interests).toHaveLength(15)
+
+    const refused = validateProfilePatch({ interests: topics(16) }, { appOrigin: origin, currentAvatarUrl: null })
+    expect(refused).toMatchObject({ ok: false, field: 'interests' })
+    expect((refused as { ok: false; error: string }).error).toContain('15')
+  })
+
+  test('the People sort orders by overlap, name, join date and role', () => {
+    const person = (over: Partial<MemberCardData> & { id: string }): MemberCardData => ({
+      did: `did:plc:${over.id}`,
+      handle: null,
+      display_name: null,
+      avatar_url: null,
+      affiliation: null,
+      bio: null,
+      building: null,
+      interests: null,
+      telegram: null,
+      ens: null,
+      role: 'attendee',
+      is_self: false,
+      ...over,
+    })
+    const zoe = person({ id: 'z', display_name: 'Zoe', role: 'attendee', joined_at: '2026-09-01T00:00:00Z' })
+    const abe = person({ id: 'a', display_name: 'Abe', role: 'owner', joined_at: '2026-09-03T00:00:00Z' })
+    const mia = person({ id: 'm', display_name: 'Mia', role: 'volunteer', joined_at: '2026-09-02T00:00:00Z' })
+    const list = [zoe, abe, mia]
+    const overlap = new Map([['m', 3], ['z', 1]])
+
+    const ids = (sort: SortKey) => sortParticipants(list, sort, overlap).map((p) => p.id)
+    expect(ids('name')).toEqual(['a', 'm', 'z'])
+    expect(ids('joined')).toEqual(['a', 'm', 'z'])
+    expect(ids('role')).toEqual(['a', 'm', 'z'])
+    // Mia shares three of the viewer's interests, Zoe one, Abe none; ties fall back to name.
+    expect(ids('shared')).toEqual(['m', 'z', 'a'])
+    // Sorting never mutates the list it was handed.
+    expect(list.map((p) => p.id)).toEqual(['z', 'a', 'm'])
+    // Overlap is the default only when the viewer has interests of their own to match on.
+    expect(defaultSort(true)).toBe('shared')
+    expect(defaultSort(false)).toBe('name')
+    expect(isSortKey('joined')).toBe(true)
+    expect(isSortKey('votes')).toBe(false)
+    expect(Object.keys(SORTS)).toEqual(['shared', 'name', 'joined', 'role'])
   })
 })
 
@@ -239,7 +288,9 @@ test.describe('people API', () => {
     expect(body.me).toMatchObject({ role: 'owner', directory_listing: true, public_role: false })
     const bobCard = body.participants.find((p: { did: string }) => p.did === bob.did)
     expect(bobCard).toMatchObject({ display_name: 'Bob Builder', telegram: 'bob_builder', ens: null, role: 'attendee', is_self: false })
-    expect(Object.keys(bobCard)).not.toContain('email')
+    // `email` is a key, but null until its holder shares it in this gathering (design §3.3): the
+    // address itself never appears in the payload.
+    expect(bobCard.email).toBeNull()
     expect(text.match(EMAIL_PATTERN)).toBeNull()
     expect(text).not.toContain('bob.eth') // unverified
 
@@ -268,12 +319,90 @@ test.describe('people API', () => {
     expect(coMember.status).toBe(200)
     const body = await coMember.json()
     expect(body.member).toMatchObject({ did: bob.did, telegram: 'bob_builder' })
-    expect(body.member.email).toBeUndefined()
+    // `email` is present but null: bob has not shared it in the gathering they have in common.
+    expect(body.member.email).toBeNull()
     // Only gatherings both belong to: not alice's public gathering, which bob is not in.
     expect(body.gatherings.map((g: { slug: string }) => g.slug)).toEqual([privateSlug])
 
     const self = await get(`/api/v1/members/${stranger.did}`, stranger)
     expect(self.status).toBe(200)
+  })
+
+  test('email reaches fellow members only with share_email, and only in that gathering', async () => {
+    // Default off: bob's address is nowhere in the directory, and `email` is explicitly null so the
+    // UI can tell "not shared" from "an older server that never sends it".
+    const before = await get(`/api/v1/events/${privateSlug}/participants`, alice)
+    const beforeText = await before.text()
+    expect(beforeText).not.toContain(bob.email)
+    const beforeCard = JSON.parse(beforeText).participants.find((p: { did: string }) => p.did === bob.did)
+    expect(beforeCard.email).toBeNull()
+
+    const on = await send('PATCH', `/api/v1/events/${privateSlug}/participants/me`, bob, { share_email: true })
+    const onBody = await on.json()
+    expect(on.status, JSON.stringify(onBody)).toBe(200)
+    expect(onBody).toMatchObject({ share_email: true, share_contact: true, has_email: true })
+
+    const shared = await (await get(`/api/v1/events/${privateSlug}/participants`, alice)).json()
+    expect(shared.participants.find((p: { did: string }) => p.did === bob.did).email).toBe(bob.email)
+    expect(shared.me).toMatchObject({ share_email: false, share_contact: true })
+
+    // The per-gathering card the profile page reads agrees, and carries only this gathering's
+    // sessions plus the switches of THIS gathering.
+    const card = await get(`/api/v1/events/${privateSlug}/participants/${bob.did}`, alice)
+    const cardBody = await card.json()
+    expect(card.status, JSON.stringify(cardBody)).toBe(200)
+    expect(cardBody.member).toMatchObject({ did: bob.did, email: bob.email, telegram: 'bob_builder', bluesky: false })
+    expect(Array.isArray(cardBody.sessions)).toBe(true)
+
+    // A stranger — not a member of this gathering — gets 404, and no trace of the address.
+    const outsider = await get(`/api/v1/events/${privateSlug}/participants/${bob.did}`, stranger)
+    expect(outsider.status).toBe(404)
+    expect(await outsider.text()).not.toContain(bob.email)
+    expect((await get(`/api/v1/events/${privateSlug}/participants/${bob.did}`)).status).toBe(404)
+
+    // Alice is a member of the public gathering; bob is not. Nothing of his is reachable there.
+    const elsewhere = await get(`/api/v1/events/${publicSlug}/participants/${bob.did}`, alice)
+    expect(elsewhere.status).toBe(404)
+    expect(await elsewhere.text()).not.toContain(bob.email)
+
+    // Turning the switch off hides it again on the next read.
+    await send('PATCH', `/api/v1/events/${privateSlug}/participants/me`, bob, { share_email: false })
+    expect(await (await get(`/api/v1/events/${privateSlug}/participants`, alice)).text()).not.toContain(bob.email)
+
+    // And the messaging handle has its own switch, on by default.
+    await send('PATCH', `/api/v1/events/${privateSlug}/participants/me`, bob, { share_contact: false })
+    const hidden = await (await get(`/api/v1/events/${privateSlug}/participants`, alice)).json()
+    expect(hidden.participants.find((p: { did: string }) => p.did === bob.did).telegram).toBeNull()
+    // His own card obeys the same switches: the page tells him what members here see, so with
+    // sharing off it shows him nothing either.
+    const own = await (await get(`/api/v1/events/${privateSlug}/participants/${bob.did}`, bob)).json()
+    expect(own.member).toMatchObject({ telegram: null, email: null, is_self: true })
+    await send('PATCH', `/api/v1/events/${privateSlug}/participants/me`, bob, { share_contact: true })
+    const shown = await (await get(`/api/v1/events/${privateSlug}/participants/${bob.did}`, bob)).json()
+    expect(shown.member).toMatchObject({ telegram: 'bob_builder', email: null })
+
+    // The switches are the member's own: `role` is still refused, and so is a cross-site PATCH.
+    expect((await send('PATCH', `/api/v1/events/${privateSlug}/participants/me`, bob, { share_email: 'yes' })).status).toBe(400)
+    expect(
+      (await send('PATCH', `/api/v1/events/${privateSlug}/participants/me`, bob, { share_email: true }, { origin: 'https://evil.example' })).status,
+    ).toBe(403)
+  })
+
+  test('the profile route answers 404 to a non-member of a private gathering', async () => {
+    // The page itself is a client component: the members-only answer is the API's, and the HTML a
+    // non-member is served must carry nothing about the person.
+    const api = await get(`/api/v1/events/${privateSlug}/participants/${bob.did}`, stranger)
+    expect(api.status).toBe(404)
+    const page = await get(`/e/${privateSlug}/people/${encodeURIComponent(bob.did)}`, stranger)
+    const html = await page.text()
+    for (const secret of ['Bob Builder', 'bob_builder', bob.email, bob.id]) {
+      expect(html, `the profile page leaks ${secret} to a non-member`).not.toContain(secret)
+    }
+    // A DID that is not a member here, and one that is not a DID at all, answer the same way.
+    expect((await get(`/api/v1/events/${privateSlug}/participants/${fakeDid()}`, alice)).status).toBe(404)
+    expect((await get(`/api/v1/events/${privateSlug}/participants/not-a-did`, alice)).status).toBe(404)
+    // `…/participants/me` is a sibling of `[did]` and still its own route.
+    expect((await get(`/api/v1/events/${privateSlug}/participants/me`, alice)).status).toBe(200)
   })
 
   test('directory opt-out hides a member from the list and their card', async () => {

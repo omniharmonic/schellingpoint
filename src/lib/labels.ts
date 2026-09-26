@@ -179,3 +179,31 @@ export const MERGED_SESSION: StatusLabel = { label: 'Merged', badge: 'muted' }
  * ballot token, is the honest arithmetic.
  */
 export const MERGE_VOTE_COPY = 'Votes combine; no bonus, because votes are unlinkable.'
+
+// ── Membership roles (people, design §3) ─────────────────────────────────────
+
+/** Mirrors `event_members_role_check` (migration 0001). */
+export type MemberRoleName = 'owner' | 'admin' | 'moderator' | 'track_lead' | 'volunteer' | 'attendee'
+
+/**
+ * How a person's role in a gathering is named wherever members see each other (the People
+ * directory, the profile page). `attendee` has no badge — it is the default, and labelling it
+ * would put a tag on everyone.
+ */
+export const MEMBER_ROLE: Record<MemberRoleName, string> = {
+  owner: 'Owner',
+  admin: 'Admin',
+  moderator: 'Moderator',
+  track_lead: 'Track lead',
+  volunteer: 'Volunteer',
+  attendee: 'Participant',
+}
+
+/** The roles shown as a badge on a member card: everything but the default. */
+export const ORGANIZER_ROLES: readonly string[] = ['owner', 'admin', 'moderator']
+
+/** The badge label for a role, or undefined for a plain participant (and for anything unknown). */
+export function memberRoleBadge(role: string | null | undefined): string | undefined {
+  if (!role || role === 'attendee') return undefined
+  return (MEMBER_ROLE as Record<string, string>)[role]
+}

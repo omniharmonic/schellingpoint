@@ -11,7 +11,9 @@ import 'server-only'
  *   - the corpus export only for organizers.
  *
  * What never leaves, whatever the account's role (plan §3, spec §10 and the R9 filter):
- *   - anybody else's DID, email, messaging handle or account id;
+ *   - anybody else's email, messaging handle or account id;
+ *   - anybody else's DID, except inside the `profile_url` of a host or co-host whose name this
+ *     member can already read — the members-only profile page the website links to (design §3.2);
  *   - exact addresses or private-home pins (a self-hosted session is its coarse public place);
  *   - vote counts, ballots, or anything from a round that has not closed;
  *   - attendee-only logistics (the Telegram group link, the exact location) — the assistant is
@@ -87,10 +89,17 @@ function endOf(s: SessionView): string | null {
   return s.time_slot?.end_time ?? s.self_hosted_end_time ?? null
 }
 
-/** A person as the assistant may see them: the name they chose, and their public handle. */
-function people(s: SessionView): { display_name: string | null; handle: string | null }[] {
-  const out = s.host ? [{ display_name: s.host.display_name, handle: s.host.handle }] : []
-  for (const c of s.cohosts) out.push({ display_name: c.display_name, handle: c.handle })
+/**
+ * A person as the assistant may see them: the name they chose, their public handle, and a link to
+ * their profile in this gathering (design §3.2) when the read model gave us their DID — it does
+ * only for a member, which every MCP principal is. The URL is the one link in this server that
+ * carries another person's DID; it addresses the members-only profile page of someone whose name
+ * the assistant is already reading, and it is the same URL the website's own cards link to.
+ */
+function people(s: SessionView, slug: string): { display_name: string | null; handle: string | null; profile_url: string | null }[] {
+  const link = (did: string | null | undefined) => (did ? `${publicUrl()}/e/${slug}/people/${encodeURIComponent(did)}` : null)
+  const out = s.host ? [{ display_name: s.host.display_name, handle: s.host.handle, profile_url: link(s.host.did) }] : []
+  for (const c of s.cohosts) out.push({ display_name: c.display_name, handle: c.handle, profile_url: link(c.did) })
   return out
 }
 
@@ -122,7 +131,7 @@ function listed(s: SessionView, slug: string, timeZone: string) {
     start: clock(startOf(s), timeZone),
     end: clock(endOf(s), timeZone),
     room: room(s),
-    hosts: people(s),
+    hosts: people(s, slug),
     unclaimed: s.unclaimed,
     description: s.description,
     link: sessionLink(slug, s.id),
@@ -188,7 +197,8 @@ export function buildMcpServer(principal: AssistantPrincipal): McpServer {
       description:
         'The sessions of one gathering that have a time, grouped by day in the gathering’s own time ' +
         'zone: start and end, the room (for a session someone hosts at their own place, only the ' +
-        'coarse public place they chose — never an address), and the hosts by display name and handle. ' +
+        'coarse public place they chose — never an address), and the hosts by display name, handle and ' +
+        'a link to their profile in this gathering. ' +
         'Pass `day` as YYYY-MM-DD to get one day.',
       inputSchema: {
         slug: z.string().min(1).describe('The gathering slug, from list_my_gatherings.'),

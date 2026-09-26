@@ -54,8 +54,9 @@ import { uploadAvatar } from '@/lib/storage/upload'
  *
  * Tabs
  *   Profile        name, photo, bio, organization, "What are you building?", "What I'm looking
- *                  for" (§6), messaging handle (§4 generic naming), interests, directory listing
- *                  for the current gathering.
+ *                  for" (§6), messaging handle (§4 generic naming), interests, and what the
+ *                  viewer shares in the gathering in view — directory listing, messaging handle
+ *                  and email address, each the viewer's own per-gathering switch (design §3.3).
  *   Identity       handle/DID, "Re-sync from my Bluesky profile" (OAuth accounts), publish
  *                  proposals to my repo, take ownership (custodial), ENS.
  *   Notifications  a link to the per-gathering preferences page.
@@ -117,7 +118,7 @@ export const PROFILE_INPUT_LIMITS = {
   building: 500,
   lookingFor: 200,
   telegram: 120,
-  interests: 10,
+  interests: 15,
   interestLength: 40,
 } as const
 
@@ -680,7 +681,7 @@ export function AccountPanel({ gathering, onDirtyChange, onCancel, active = true
               )}
             </div>
 
-            {gathering && <DirectoryListing slug={gathering.slug} name={gathering.name} />}
+            {gathering && <GatheringSharingSection slug={gathering.slug} name={gathering.name} />}
 
             <div className="flex flex-col gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
               <div className="min-w-0 flex-1">
@@ -1085,62 +1086,121 @@ function AssistantConnections({ active }: { active: boolean }) {
   )
 }
 
-/** "Show me in the directory" for the current gathering (event_members.directory_listing). */
-function DirectoryListing({ slug, name }: { slug: string; name: string | null }) {
+/**
+ * What the viewer shares in ONE gathering (`event_members`): the directory listing, the messaging
+ * handle and the email address (design §3.3). Three switches, saved one at a time, each the
+ * viewer's own — an organizer can never set them, and none of them reaches a record.
+ *
+ * Renders nothing when the viewer is not a member of the gathering in view.
+ */
+interface GatheringSharing {
+  directory_listing: boolean
+  share_contact: boolean
+  share_email: boolean
+  has_telegram: boolean
+  has_email: boolean
+}
+
+type SharingField = keyof Pick<GatheringSharing, 'directory_listing' | 'share_contact' | 'share_email'>
+
+function GatheringSharingSection({ slug, name }: { slug: string; name: string | null }) {
   const id = React.useId()
   const { toast } = useToast()
-  const [listed, setListed] = React.useState<boolean | null>(null)
-  const [busy, setBusy] = React.useState(false)
+  const [settings, setSettings] = React.useState<GatheringSharing | null>(null)
+  const [busy, setBusy] = React.useState<SharingField | null>(null)
   const [error, setError] = React.useState<string | null>(null)
+  const where = name || 'this gathering'
 
   React.useEffect(() => {
     let cancelled = false
-    apiFetch<{ directory_listing: boolean }>(`/api/v1/events/${encodeURIComponent(slug)}/participants/me`, { cache: 'no-store' })
+    apiFetch<GatheringSharing>(`/api/v1/events/${encodeURIComponent(slug)}/participants/me`, { cache: 'no-store' })
       .then((res) => {
-        if (!cancelled) setListed(res.directory_listing)
+        if (!cancelled) setSettings(res)
       })
       .catch(() => {
         // Not a member of this gathering (or signed out): nothing to show.
-        if (!cancelled) setListed(null)
+        if (!cancelled) setSettings(null)
       })
     return () => {
       cancelled = true
     }
   }, [slug])
 
-  if (listed === null) return null
+  if (!settings) return null
 
-  const update = async (value: boolean) => {
-    setBusy(true)
+  const update = async (field: SharingField, value: boolean) => {
+    setBusy(field)
     setError(null)
-    const previous = listed
-    setListed(value)
+    const previous = settings
+    setSettings({ ...settings, [field]: value })
     try {
-      const res = await apiFetch<{ directory_listing: boolean }>(`/api/v1/events/${encodeURIComponent(slug)}/participants/me`, {
+      const res = await apiFetch<GatheringSharing>(`/api/v1/events/${encodeURIComponent(slug)}/participants/me`, {
         method: 'PATCH',
-        json: { directory_listing: value },
+        json: { [field]: value },
       })
-      setListed(res.directory_listing)
-      toast({ title: res.directory_listing ? 'You are listed in the directory' : 'You are hidden from the directory', variant: 'success' })
+      setSettings(res)
+      const titles: Record<SharingField, [string, string]> = {
+        directory_listing: ['You are listed in the directory', 'You are hidden from the directory'],
+        share_contact: ['Members here can see your messaging handle', 'Your messaging handle is hidden here'],
+        share_email: ['Members here can see your email address', 'Your email address is hidden here'],
+      }
+      toast({ title: titles[field][res[field] ? 0 : 1], variant: 'success' })
     } catch (err) {
-      setListed(previous)
+      setSettings(previous)
       setError(err instanceof Error ? err.message : 'Could not save that setting.')
     } finally {
-      setBusy(false)
+      setBusy(null)
     }
   }
 
-  return (
-    <div className="flex items-start justify-between gap-4 rounded-lg border border-border p-3">
-      <label htmlFor={id} className="text-sm cursor-pointer">
-        <span className="font-medium">Show me in the directory</span>
-        <span className="block text-xs text-muted-foreground mt-0.5">
-          Other members of {name || 'this gathering'} can see your profile on the People page. Your email is never shown.
-        </span>
-        {error && <span role="alert" className="block text-xs text-destructive mt-1">{error}</span>}
+  const row = (field: SharingField, label: string, hint: React.ReactNode, disabled = false) => (
+    <div className="flex items-start justify-between gap-4 py-3 first:pt-0 last:pb-0">
+      <label htmlFor={`${id}-${field}`} className="text-sm cursor-pointer">
+        <span className="font-medium">{label}</span>
+        <span className="block text-xs text-muted-foreground mt-0.5">{hint}</span>
       </label>
-      <Switch id={id} checked={listed} onCheckedChange={update} disabled={busy} />
+      <Switch
+        id={`${id}-${field}`}
+        checked={settings[field]}
+        onCheckedChange={(value) => update(field, value)}
+        disabled={busy !== null || disabled}
+      />
     </div>
+  )
+
+  return (
+    <section className="rounded-lg border border-border p-3" aria-labelledby={`${id}-heading`} data-testid="gathering-sharing">
+      <h3 id={`${id}-heading`} className="text-sm font-medium">
+        What you share at {where}
+      </h3>
+      <p className="mt-0.5 text-xs text-muted-foreground">
+        Each gathering is separate. Nothing here is ever published on the network.
+      </p>
+      <div className="mt-2 divide-y divide-border">
+        {row(
+          'directory_listing',
+          'Show me in the directory',
+          <>Other members of {where} can see your profile on the People page.</>,
+        )}
+        {row(
+          'share_contact',
+          'Show my messaging handle',
+          settings.has_telegram
+            ? <>Members of {where} can see the handle on your profile and message you there.</>
+            : <>Add a messaging handle above and members of {where} will be able to see it.</>,
+          !settings.has_telegram,
+        )}
+        {row(
+          'share_email',
+          'Show my email address',
+          settings.has_email
+            ? <>Off by default. Members of {where} can email you directly. Turning it off hides it again.</>
+            : <>This account has no email address, so there is nothing to share.</>,
+          !settings.has_email,
+        )}
+      </div>
+      {error && <p role="alert" className="mt-2 text-xs text-destructive">{error}</p>}
+    </section>
   )
 }
 

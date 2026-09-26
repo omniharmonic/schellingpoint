@@ -3,6 +3,7 @@
 import { isParticipationOpen } from '@/lib/events/lifecycle'
 import * as React from 'react'
 import Link from 'next/link'
+import { profileHref } from '@/app/e/[slug]/people/shared'
 import { useRouter } from 'next/navigation'
 import {
   ArrowLeft,
@@ -411,6 +412,20 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
                               </div>
                               <Badge variant="muted" className="mb-2">{active.role}</Badge>
                               {active.bio && <p className="mb-1 line-clamp-3 text-sm text-muted-foreground">{active.bio}</p>}
+                              {/* The popover had no way out before (fact-finding, Profiles): the
+                                  name now leads to this gathering's profile page (design §3.2).
+                                  `did` reaches members only, so a signed-out reader sees no link. */}
+                              {active.did && (
+                                <p className="mt-2">
+                                  <Link
+                                    href={profileHref(event.slug, active.did)}
+                                    className="text-sm font-medium text-primary hover:underline"
+                                    onClick={() => setShowHostCard(null)}
+                                  >
+                                    View profile
+                                  </Link>
+                                </p>
+                              )}
                             </div>
                             <button
                               type="button"

@@ -10,7 +10,7 @@ import { NO_STORE, memberCardColumns, type Participant } from './people'
  *
  *   GET /api/v1/events/[slug]/participants
  *     → { participants: Participant[],
- *         me: { role, directory_listing, public_role },
+ *         me: { role, directory_listing, public_role, share_email, share_contact },
  *         sharedInterests: { id, interests: string[] }[] }
  *
  *   404  no such gathering, or a private/draft one the viewer is not a member of
@@ -19,6 +19,14 @@ import { NO_STORE, memberCardColumns, type Participant } from './people'
  *        members-only)
  *
  * Members who opted out (`directory_listing = false`) are omitted, except to themselves.
+ *
+ * A card carries the person's messaging handle only where they left `share_contact` on (default
+ * on) and their email only where they turned `share_email` on for THIS gathering (default off) —
+ * `memberCardColumns` applies both (design §3.3). A non-member never reaches this route at all.
+ *
+ * The list is not paged: the whole roster of one gathering comes back in one response, so the
+ * People page sorts and filters it in the browser (design §3.4) and this route keeps its one
+ * deterministic order (name, then DID).
  *
  * `sharedInterests` is "People who share your interests" (release design §6): computed here for
  * the viewer only, from interest overlap with the listed members, ordered by overlap. It is never
@@ -62,7 +70,8 @@ export async function GET(request: Request, { params }: { params: Promise<{ slug
 
   const [participants, [me]] = await Promise.all([
     sql<Participant[]>`
-      select ${memberCardColumns()}, m.role, (m.user_id = ${viewer.accountId}) as is_self
+      select ${memberCardColumns(sql`m.share_contact`, sql`m.share_email`)},
+        m.role, m.joined_at, (m.user_id = ${viewer.accountId}) as is_self
       from event_members m
       join accounts a on a.id = m.user_id
       join profiles p on p.id = m.user_id
@@ -70,8 +79,8 @@ export async function GET(request: Request, { params }: { params: Promise<{ slug
         and (m.directory_listing or m.user_id = ${viewer.accountId})
       order by lower(coalesce(nullif(p.display_name, ''), a.handle, a.did)), a.did
     `,
-    sql<{ role: EventRoleName; directory_listing: boolean; public_role: boolean }[]>`
-      select role, directory_listing, public_role
+    sql<{ role: EventRoleName; directory_listing: boolean; public_role: boolean; share_email: boolean; share_contact: boolean }[]>`
+      select role, directory_listing, public_role, share_email, share_contact
       from event_members where event_id = ${event.id} and user_id = ${viewer.accountId}
     `,
   ])

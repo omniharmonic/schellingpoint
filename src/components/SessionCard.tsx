@@ -14,6 +14,7 @@ import { formatLabel } from '@/lib/sessions/constants'
 import { cn } from '@/lib/utils'
 import type { SessionView } from '@/app/api/v1/sessions/_lib/read'
 import { hostByline } from '@/app/api/v1/sessions/_lib/byline'
+import { profileHref } from '@/app/e/[slug]/people/shared'
 
 const formatIcons: Record<string, React.ReactNode> = {
   talk: <Mic className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden />,
@@ -123,8 +124,17 @@ export function SessionCard({
             </h3>
           </Link>
 
+          {/* The byline links to the host's profile in this gathering when we know their DID —
+              the read model sends it to members only, so a public card stays plain text
+              (design §3.2). */}
           <p className={cn('text-xs text-muted-foreground', !session.host && 'italic')}>
-            {hostByline(session)}
+            {session.host?.did ? (
+              <Link href={profileHref(eventSlug, session.host.did)} className="not-italic hover:text-primary hover:underline">
+                {hostByline(session)}
+              </Link>
+            ) : (
+              hostByline(session)
+            )}
             {hostHandle && <span className="ml-1.5 not-italic">@{hostHandle}</span>}
           </p>
 

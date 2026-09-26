@@ -3,7 +3,7 @@
 import * as React from 'react'
 import { Suspense } from 'react'
 import Link from 'next/link'
-import { useSearchParams } from 'next/navigation'
+import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import {
   Loader2,
   Users,
@@ -12,6 +12,7 @@ import {
   Building2,
   Rocket,
   Send,
+  Mail,
   Hexagon,
   Hash,
   User,
@@ -20,6 +21,7 @@ import {
   EyeOff,
   Compass,
   Sparkles,
+  ArrowUpRight,
 } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -28,6 +30,7 @@ import { Input } from '@/components/ui/input'
 import { Checkbox } from '@/components/ui/checkbox'
 import { FilterChip } from '@/components/ui/filter-chip'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Select } from '@/components/ui/select'
 import { DashboardLayout } from '@/components/DashboardLayout'
 import { PageHeader } from '@/components/PageHeader'
 import { useAuth } from '@/hooks/useAuth'
@@ -35,32 +38,30 @@ import { useEvent, useEventRole, JoinGatheringButton } from '@/contexts/EventCon
 import { ReportButton } from '@/components/ReportButton'
 import { apiFetch, ApiError } from '@/lib/api/client'
 import { plural, truncate } from '@/lib/format'
+import { ORGANIZER_ROLES, memberRoleBadge } from '@/lib/labels'
 import { cn } from '@/lib/utils'
+import {
+  BlueskyLink,
+  MemberAvatar,
+  ViewProfileLink,
+  messagingLink,
+  nameOf,
+  profileHref,
+  type MemberCardData,
+} from '../people/shared'
+import { SORTS, defaultSort, isSortKey, sortParticipants, type SortKey } from '../people/sort'
 
 /** Shape of GET /api/v1/events/[slug]/participants → participants[]. */
-interface Participant {
-  id: string
-  did: string
-  handle: string | null
-  display_name: string | null
-  avatar_url: string | null
-  affiliation: string | null
-  bio: string | null
-  building: string | null
-  interests: string[] | null
-  /** "What I'm looking for" (release design §6). */
-  looking_for?: string | null
-  telegram: string | null
-  ens: string | null
-  role: string
-  is_self: boolean
-}
+type Participant = MemberCardData
 
 interface MySettings {
   role: string
   directory_listing: boolean
   public_role: boolean
   publish_roles?: boolean
+  /** Design §3.3: the viewer's per-gathering contact sharing. Older API builds omit them. */
+  share_contact?: boolean
+  share_email?: boolean
 }
 
 interface SharedInterests {
@@ -73,45 +74,6 @@ interface ParticipantsResponse {
   me: MySettings | null
   /** People who share the viewer's interests, computed server-side for the viewer only. */
   sharedInterests?: SharedInterests[]
-}
-
-const ORGANIZER_ROLES = ['owner', 'admin', 'moderator']
-
-const ROLE_LABELS: Record<string, string> = {
-  owner: 'Owner',
-  admin: 'Admin',
-  moderator: 'Moderator',
-  track_lead: 'Track lead',
-  volunteer: 'Volunteer',
-}
-
-/** Display name → @handle → "Member" (release design §5.3). */
-function nameOf(p: Participant): string {
-  return p.display_name?.trim() || (p.handle ? `@${p.handle}` : 'Member')
-}
-
-/** Avatar fallback: first letter of the name, else of the handle, else "M". */
-function initialOf(p: Participant): string {
-  return (p.display_name?.trim() || p.handle || 'Member').replace(/^@/, '').charAt(0).toUpperCase() || 'M'
-}
-
-/**
- * The messaging handle is free text (Telegram, Signal, Matrix…). It becomes a link only when it
- * parses as a Telegram username or an http(s) URL; otherwise it is shown as plain text.
- */
-function messagingLink(value: string): { href: string | null; label: string } {
-  const trimmed = value.trim()
-  const telegram = /^@?([A-Za-z0-9_]{5,32})$/.exec(trimmed)
-  if (telegram) return { href: `https://t.me/${encodeURIComponent(telegram[1])}`, label: `@${telegram[1]}` }
-  if (/^https?:\/\//i.test(trimmed)) {
-    try {
-      const url = new URL(trimmed)
-      return { href: url.toString(), label: `${url.hostname}${url.pathname === '/' ? '' : url.pathname}` }
-    } catch {
-      return { href: null, label: trimmed }
-    }
-  }
-  return { href: null, label: trimmed }
 }
 
 export default function ParticipantsPage() {
@@ -142,6 +104,8 @@ function ParticipantsContent() {
   // Membership is explicit (Join); reload once the role settles.
   const { isMember, isLoading: roleLoading } = useEventRole()
   const searchParams = useSearchParams()
+  const router = useRouter()
+  const pathname = usePathname()
   const highlight = searchParams.get('highlight')
 
   const [participants, setParticipants] = React.useState<Participant[]>([])
@@ -149,9 +113,34 @@ function ParticipantsContent() {
   const [me, setMe] = React.useState<MySettings | null>(null)
   const [state, setState] = React.useState<LoadState>({ kind: 'loading' })
   const [search, setSearch] = React.useState('')
-  const [selectedInterests, setSelectedInterests] = React.useState<Set<string>>(new Set())
   const [selected, setSelected] = React.useState<Participant | null>(null)
   const highlightHandledRef = React.useRef(false)
+
+  // Sort and interest filters live in the URL so a filtered view is a link someone can send
+  // (design §3.4). `?interest=` may repeat; the chips are AND, as they were.
+  const sortParam = searchParams.get('sort')
+  const interestParams = React.useMemo(() => searchParams.getAll('interest').filter(Boolean), [searchParams])
+  const selectedInterests = React.useMemo(() => new Set(interestParams), [interestParams])
+
+  const setQuery = React.useCallback(
+    (next: { sort?: SortKey | null; interests?: string[] }) => {
+      const params = new URLSearchParams(searchParams.toString())
+      if (next.sort !== undefined) {
+        if (next.sort) params.set('sort', next.sort)
+        else params.delete('sort')
+      }
+      if (next.interests !== undefined) {
+        params.delete('interest')
+        for (const i of next.interests) params.append('interest', i)
+      }
+      // `?highlight=` is a one-shot: it has opened its card by now, and keeping it would reopen
+      // the dialog on every filter change.
+      params.delete('highlight')
+      const query = params.toString()
+      router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false })
+    },
+    [pathname, router, searchParams],
+  )
 
   const load = React.useCallback(async () => {
     try {
@@ -212,8 +201,20 @@ function ParticipantsContent() {
     })
   }, [participants, search, selectedInterests])
 
-  const organizers = filtered.filter((p) => ORGANIZER_ROLES.includes(p.role))
-  const others = filtered.filter((p) => !ORGANIZER_ROLES.includes(p.role))
+  // Interest overlap with the viewer, as the server computed it: the input to the default sort.
+  const sharedCounts = React.useMemo(
+    () => new Map(shared.map((s) => [s.id, s.interests.length] as const)),
+    [shared],
+  )
+  const viewerHasInterests = React.useMemo(
+    () => (participants.find((p) => p.is_self)?.interests?.length ?? 0) > 0,
+    [participants],
+  )
+  const sort: SortKey = isSortKey(sortParam) ? sortParam : defaultSort(viewerHasInterests)
+  const sorted = React.useMemo(() => sortParticipants(filtered, sort, sharedCounts), [filtered, sort, sharedCounts])
+
+  const organizers = sorted.filter((p) => ORGANIZER_ROLES.includes(p.role))
+  const others = sorted.filter((p) => !ORGANIZER_ROLES.includes(p.role))
   const byId = React.useMemo(() => new Map(participants.map((p) => [p.id, p])), [participants])
   const sharedPeople = shared
     .map((s) => ({ person: byId.get(s.id), interests: s.interests }))
@@ -290,15 +291,29 @@ function ParticipantsContent() {
         )}
 
         <div className="space-y-4">
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" aria-hidden="true" />
-            <Input
-              aria-label="Search people"
-              placeholder="Search by name, handle, affiliation or what people are looking for"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="pl-10"
-            />
+          <div className="flex flex-col gap-3 sm:flex-row">
+            <div className="relative flex-1">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" aria-hidden="true" />
+              <Input
+                aria-label="Search people"
+                placeholder="Search by name, handle, affiliation or what people are looking for"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="pl-10"
+              />
+            </div>
+            <Select
+              aria-label="Sort people"
+              value={sort}
+              onChange={(e) => setQuery({ sort: e.target.value as SortKey })}
+              wrapperClassName="sm:w-72"
+            >
+              {(Object.entries(SORTS) as [SortKey, string][]).map(([value, label]) => (
+                <option key={value} value={value} disabled={value === 'shared' && !viewerHasInterests}>
+                  {label}
+                </option>
+              ))}
+            </Select>
           </div>
 
           {allInterests.length > 0 && (
@@ -308,18 +323,19 @@ function ParticipantsContent() {
                 <FilterChip
                   key={interest}
                   pressed={selectedInterests.has(interest)}
-                  onClick={() => {
-                    const next = new Set(selectedInterests)
-                    if (next.has(interest)) next.delete(interest)
-                    else next.add(interest)
-                    setSelectedInterests(next)
-                  }}
+                  onClick={() =>
+                    setQuery({
+                      interests: selectedInterests.has(interest)
+                        ? interestParams.filter((i) => i !== interest)
+                        : [...interestParams, interest],
+                    })
+                  }
                 >
                   {interest}
                 </FilterChip>
               ))}
               {selectedInterests.size > 0 && (
-                <Button variant="ghost" size="sm" onClick={() => setSelectedInterests(new Set())} className="text-muted-foreground">
+                <Button variant="ghost" size="sm" onClick={() => setQuery({ interests: [] })} className="text-muted-foreground">
                   Clear all
                 </Button>
               )}
@@ -327,7 +343,7 @@ function ParticipantsContent() {
           )}
         </div>
 
-        {filtered.length === 0 ? (
+        {sorted.length === 0 ? (
           <Card>
             <CardContent className="py-12 text-center">
               <Users className="h-12 w-12 mx-auto mb-4 text-muted-foreground" aria-hidden="true" />
@@ -338,7 +354,7 @@ function ParticipantsContent() {
                 {participants.length === 0 ? 'Members appear here once they join.' : 'Try adjusting your search or filters.'}
               </p>
               {filtering && (
-                <Button variant="outline" className="mt-6" onClick={() => { setSearch(''); setSelectedInterests(new Set()) }}>
+                <Button variant="outline" className="mt-6" onClick={() => { setSearch(''); setQuery({ interests: [] }) }}>
                   Clear filters
                 </Button>
               )}
@@ -434,8 +450,9 @@ function DirectorySettings({
           <label htmlFor={`${id}-listing`} className="cursor-pointer">
             <span className="font-medium">List me in this directory</span>
             <span className="block text-xs text-muted-foreground mt-0.5">
-              Other members of this gathering can see your name, photo, affiliation, interests, what you’re looking
-              for, and your messaging handle. Your email is never shown.
+              Other members of this gathering can see your name, photo, affiliation, interests and what you’re
+              looking for. Your messaging handle and your email address are separate switches, in Account →
+              Profile — your email is off unless you turn it on.
             </span>
           </label>
         </div>
@@ -467,43 +484,33 @@ function DirectorySettings({
   )
 }
 
-function Avatar({ participant, size }: { participant: Participant; size: 'sm' | 'lg' }) {
-  const [failed, setFailed] = React.useState(false)
-  const dims = size === 'sm' ? 'h-12 w-12 text-lg' : 'h-20 w-20 border-2 border-border text-2xl'
-  const organizer = ORGANIZER_ROLES.includes(participant.role)
-  return (
-    <div className={cn('rounded-full bg-muted flex items-center justify-center overflow-hidden flex-shrink-0', dims)} aria-hidden="true">
-      {participant.avatar_url && !failed ? (
-        <img
-          src={participant.avatar_url}
-          alt=""
-          className="h-full w-full object-cover"
-          referrerPolicy="no-referrer"
-          onError={() => setFailed(true)}
-        />
-      ) : (
-        <span className={cn('font-medium', organizer ? 'text-primary' : 'text-muted-foreground')}>{initialOf(participant)}</span>
-      )}
-    </div>
-  )
-}
-
 function ParticipantCard({ participant, shared, onClick }: { participant: Participant; shared?: string[]; onClick: () => void }) {
-  const roleLabel = ROLE_LABELS[participant.role]
+  const event = useEvent()
+  const roleLabel = memberRoleBadge(participant.role)
   const showHandle = participant.handle && participant.display_name?.trim()
   return (
-    <Card className="card-hover cursor-pointer border-border/50 hover:border-primary/30">
-      <button type="button" className="w-full text-left" onClick={onClick}>
-        <CardContent className="p-4">
-          <div className="flex items-start gap-3">
-            <Avatar participant={participant} size="sm" />
-            <div className="flex-1 min-w-0">
+    <Card className="card-hover border-border/50 hover:border-primary/30">
+      <CardContent className="p-4">
+        <div className="flex items-start gap-3">
+          <button type="button" className="text-left" onClick={onClick} aria-label={`Open ${nameOf(participant)}’s card`}>
+            <MemberAvatar person={participant} size="sm" />
+          </button>
+          <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2 flex-wrap">
-                <span className="font-medium truncate">{nameOf(participant)}</span>
+                {/* The name is the link to the profile page (design §3.2); the card itself still
+                    opens the quick-look dialog the directory has always had. */}
+                <Link href={profileHref(event.slug, participant.did)} className="font-medium truncate hover:text-primary hover:underline">
+                  {nameOf(participant)}
+                </Link>
                 {roleLabel && <Badge variant="default">{roleLabel}</Badge>}
                 {participant.is_self && <Badge variant="outline">You</Badge>}
               </div>
-              {showHandle && <p className="text-xs text-muted-foreground truncate">@{participant.handle}</p>}
+              {showHandle && (
+                <p className="flex items-center gap-1.5 text-xs text-muted-foreground truncate">
+                  <span className="truncate">@{participant.handle}</span>
+                  <BlueskyLink person={participant} />
+                </p>
+              )}
               {participant.affiliation && (
                 <p className="text-sm text-muted-foreground truncate">{participant.affiliation}</p>
               )}
@@ -530,17 +537,23 @@ function ParticipantCard({ participant, shared, onClick }: { participant: Partic
                   )}
                 </div>
               ) : null}
-            </div>
+            <button
+              type="button"
+              onClick={onClick}
+              className="mt-2 text-xs font-medium text-muted-foreground hover:text-primary"
+            >
+              Quick look
+            </button>
           </div>
-        </CardContent>
-      </button>
+        </div>
+      </CardContent>
     </Card>
   )
 }
 
 function ProfileDialog({ participant, onClose }: { participant: Participant | null; onClose: () => void }) {
   const event = useEvent()
-  const roleLabel = participant ? ROLE_LABELS[participant.role] : undefined
+  const roleLabel = participant ? memberRoleBadge(participant.role) : undefined
   const messaging = participant?.telegram ? messagingLink(participant.telegram) : null
 
   return (
@@ -550,16 +563,22 @@ function ProfileDialog({ participant, onClose }: { participant: Participant | nu
           <>
             <div className="relative p-6 bg-gradient-to-br from-primary/10 to-transparent">
               <div className="flex items-start gap-4 pr-8">
-                <Avatar participant={participant} size="lg" />
+                <MemberAvatar person={participant} size="lg" />
                 <DialogHeader className="min-w-0 flex-1 pr-0">
                   <div className="flex items-center gap-2 flex-wrap">
-                    <DialogTitle className="text-xl">{nameOf(participant)}</DialogTitle>
+                    {/* The card header links to the profile page; the dialog stays the quick look. */}
+                    <DialogTitle className="text-xl">
+                      <Link href={profileHref(event.slug, participant.did)} className="hover:text-primary hover:underline">
+                        {nameOf(participant)}
+                      </Link>
+                    </DialogTitle>
                     {roleLabel && <Badge variant="default">{roleLabel}</Badge>}
                   </div>
                   {participant.handle && (
                     <p className="text-sm text-muted-foreground flex items-center gap-1 truncate">
                       <AtSign className="h-3.5 w-3.5" aria-hidden="true" />
-                      {participant.handle}
+                      <span className="truncate">{participant.handle}</span>
+                      <BlueskyLink person={participant} />
                     </p>
                   )}
                   {participant.affiliation && (
@@ -610,7 +629,7 @@ function ProfileDialog({ participant, onClose }: { participant: Participant | nu
                 </div>
               )}
 
-              {(messaging || participant.ens) && (
+              {(messaging || participant.email || participant.ens) && (
                 <div className="flex flex-col gap-2 pt-4 border-t">
                   {messaging && (
                     <div className="flex items-center gap-2 text-sm">
@@ -622,6 +641,14 @@ function ProfileDialog({ participant, onClose }: { participant: Participant | nu
                       ) : (
                         <span className="break-all">{messaging.label}</span>
                       )}
+                    </div>
+                  )}
+                  {participant.email && (
+                    <div className="flex items-center gap-2 text-sm">
+                      <Mail className="h-4 w-4 text-muted-foreground flex-shrink-0" aria-hidden="true" />
+                      <a href={`mailto:${participant.email}`} className="text-primary hover:underline break-all">
+                        {participant.email}
+                      </a>
                     </div>
                   )}
                   {participant.ens && (
@@ -641,6 +668,12 @@ function ProfileDialog({ participant, onClose }: { participant: Participant | nu
                 </div>
               )}
 
+              <p className="pt-1">
+                <ViewProfileLink slug={event.slug} did={participant.did} className="inline-flex items-center gap-1">
+                  View full profile
+                  <ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" />
+                </ViewProfileLink>
+              </p>
               {participant.is_self && (
                 <p className="text-xs text-muted-foreground flex items-center gap-1">
                   <EyeOff className="h-3.5 w-3.5" aria-hidden="true" />

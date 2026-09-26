@@ -508,33 +508,56 @@ test.describe('sessions & participation API', () => {
   })
 
   test('list and detail JSON carry no vote counts, emails, Telegram/ENS or foreign DIDs', async () => {
-    const views = [
+    // Outside the membership boundary: signed out.
+    const outside = [
       await api(`/api/v1/events/${openSlug}/sessions`),
-      await api(`/api/v1/events/${openSlug}/sessions`, { cookie: stranger.cookie }),
-      await api(`/api/v1/events/${openSlug}/sessions?sort=title`, { cookie: organizer.cookie }),
       await api(`/api/v1/events/${openSlug}/sessions/${sessionId}`),
+    ]
+    // Inside it: members of this gathering, who may open these people's profile pages. `stranger`
+    // joined earlier in this serial suite by saving a favourite, so their view is a member's.
+    const inside = [
+      await api(`/api/v1/events/${openSlug}/sessions`, { cookie: stranger.cookie }),
       await api(`/api/v1/events/${openSlug}/sessions/${sessionId}`, { cookie: stranger.cookie }),
+      await api(`/api/v1/events/${openSlug}/sessions?sort=title`, { cookie: organizer.cookie }),
       await api(`/api/v1/events/${openSlug}/sessions/${sessionId}`, { cookie: organizer.cookie }),
     ]
-    for (const v of views) {
+    for (const v of [...outside, ...inside]) {
       expect(v.status).toBe(200)
-      for (const forbidden of ['total_votes', 'voter_count', 'total_credits', 'email', 'host_name', '"telegram"', '"ens"', '"did"', 'user_id', 'host_id']) {
+      for (const forbidden of ['total_votes', 'voter_count', 'total_credits', 'email', 'host_name', '"telegram"', '"ens"', 'user_id', 'host_id']) {
         expect(v.text, forbidden).not.toContain(forbidden)
       }
-      for (const secret of [proposer.email, cohost.email, `tg_${RUN}`, `tgc_${RUN}`, `ens${RUN}.eth`, cohost.did, stranger.did, organizer.did, proposer.id, cohost.id]) {
+      for (const secret of [proposer.email, cohost.email, `tg_${RUN}`, `tgc_${RUN}`, `ens${RUN}.eth`, stranger.did, organizer.did, proposer.id, cohost.id]) {
         expect(v.text, 'no private value').not.toContain(secret)
       }
-      // The only DID present is the proposer's, inside their own public proposal URI.
+    }
+    for (const v of outside) {
+      // No `did` field at all, and the only DID anywhere is the proposer's, inside their own
+      // public proposal URI.
+      expect(v.text, '"did"').not.toContain('"did"')
+      expect(v.text, 'a co-host DID').not.toContain(cohost.did)
       const dids = v.text.match(/did:[a-z]+:[a-z0-9]+/g) ?? []
       for (const did of dids) expect([proposer.did, mintedGatheringDid, demo.actor_did]).toContain(did)
     }
-    const detail = views[4].body.session
+    for (const v of inside) {
+      // A member additionally gets the DID of each host and accepted co-host, so their name can
+      // link to the members-only profile page at /e/[slug]/people/[did] (design §3.2). Each of
+      // those DIDs is already in a record its own holder wrote (the proposal, the co-host
+      // confirmation); nobody else's DID appears.
+      const dids = v.text.match(/did:[a-z]+:[a-z0-9]+/g) ?? []
+      expect(dids.length).toBeGreaterThan(0)
+      for (const did of dids) expect([proposer.did, cohost.did, mintedGatheringDid, demo.actor_did]).toContain(did)
+    }
+    const detail = inside[1].body.session
     expect(detail.host.display_name).toBe(`Proposer ${RUN}`)
     expect(detail.host.handle).toMatch(new RegExp(`\\.${handleDomain}$`))
     expect(detail.cohosts).toHaveLength(1)
     expect(detail.cohosts[0].display_name).toBe(`Cohost ${RUN}`)
     expect(detail.viewer).toEqual({ is_host: false, is_cohost: false, is_organizer: false, can_edit_content: false, can_edit: false, can_manage: false })
-    expect(views[5].body.session.viewer.is_organizer).toBe(true)
+    expect(inside[3].body.session.viewer.is_organizer).toBe(true)
+    expect(inside[3].body.session.host.did).toBe(proposer.did)
+    expect(inside[3].body.session.cohosts[0].did).toBe(cohost.did)
+    // Signed out, the same session names nobody's DID but the proposal author's, in its URI.
+    expect(outside[1].body.session.host.did).toBeUndefined()
   })
 
   test('a co-host steps down (deleting their record); the author withdraws the proposal', async () => {

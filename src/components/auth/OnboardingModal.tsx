@@ -15,6 +15,7 @@ import {
   ChevronRight,
   ChevronLeft,
   Users,
+  Compass,
   Vote,
   Heart,
   Mic,
@@ -24,6 +25,7 @@ import {
 import type { Profile } from '@/hooks/useAuth'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Switch } from '@/components/ui/switch'
 import { FilterChip } from '@/components/ui/filter-chip'
 import { cn } from '@/lib/utils'
 import { apiFetch } from '@/lib/api/client'
@@ -122,6 +124,11 @@ export function OnboardingModal({ email, initialProfile, onComplete, suggestedTo
   const [telegram, setTelegram] = React.useState(initialProfile?.telegram ?? '')
   const [interests, setInterests] = React.useState<string[]>(initialProfile?.interests ?? [])
   const [customInterest, setCustomInterest] = React.useState('')
+  const [lookingFor, setLookingFor] = React.useState(initialProfile?.looking_for ?? '')
+  // The two per-gathering sharing switches (design §3.3). Defaults match migration 0038: the
+  // messaging handle is shared, the email address is not.
+  const [shareContact, setShareContact] = React.useState(true)
+  const [shareEmail, setShareEmail] = React.useState(false)
 
   // Total steps: 4 intro slides + 3 profile steps = 7
   const introStepCount = slides.length
@@ -178,9 +185,23 @@ export function OnboardingModal({ email, initialProfile, onComplete, suggestedTo
           building,
           telegram,
           interests,
+          looking_for: lookingFor,
           onboarding_completed: true,
         },
       })
+      // The sharing switches belong to this gathering's membership, not to the profile, so they
+      // go to the membership route. A viewer who is not a member of this gathering (or who
+      // onboarded outside one) has nothing to save; that failure must not lose the profile.
+      if (eventSlug) {
+        try {
+          await apiFetch(`/api/v1/events/${encodeURIComponent(eventSlug)}/participants/me`, {
+            method: 'PATCH',
+            json: { share_contact: shareContact, share_email: shareEmail },
+          })
+        } catch {
+          /* not a member here, or an older server: the profile is saved either way */
+        }
+      }
       onComplete()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not save your profile. Please try again.')
@@ -327,37 +348,11 @@ export function OnboardingModal({ email, initialProfile, onComplete, suggestedTo
               </p>
             </div>
 
-            <div className="space-y-2">
-              <label htmlFor="onboarding-telegram" className="text-sm font-medium flex items-center gap-2">
-                <Send className="h-4 w-4" aria-hidden="true" />
-                Messaging handle <Optional />
-              </label>
-              <Input
-                id="onboarding-telegram"
-                placeholder="@name or a link"
-                value={telegram}
-                maxLength={PROFILE_INPUT_LIMITS.telegram}
-                onChange={(e) => setTelegram(e.target.value)}
-              />
-              <p className="text-xs text-muted-foreground">
-                Telegram, Signal, Matrix — whatever you use. Members only. You can verify an ENS name later from your account.
-              </p>
-            </div>
-
-            {email && (
-              <div className="p-4 rounded-lg bg-muted/30 border">
-                <div className="flex items-center gap-2 text-sm">
-                  <Mail className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
-                  <span className="text-muted-foreground">Email:</span>
-                  <span className="font-medium">{email}</span>
-                </div>
-                <p className="text-xs text-muted-foreground mt-1">Never shown to other people.</p>
-              </div>
-            )}
           </div>
         )
       case 3:
         return (
+          <div className="space-y-6">
           <fieldset className="space-y-4">
             <legend className="space-y-1">
               <span className="text-sm font-medium flex items-center gap-2">
@@ -426,6 +421,72 @@ export function OnboardingModal({ email, initialProfile, onComplete, suggestedTo
               <p className="text-xs text-muted-foreground">That’s {ONBOARDING_MAX_INTERESTS} topics — you can add more later from your account.</p>
             )}
           </fieldset>
+
+          <div className="space-y-2">
+            <label htmlFor="onboarding-looking-for" className="text-sm font-medium flex items-center gap-2">
+              <Compass className="h-4 w-4" aria-hidden="true" />
+              What are you looking for? <Optional />
+            </label>
+            <Input
+              id="onboarding-looking-for"
+              placeholder="Collaborators for a local energy co-op"
+              value={lookingFor}
+              maxLength={PROFILE_INPUT_LIMITS.lookingFor}
+              onChange={(e) => setLookingFor(e.target.value)}
+            />
+            <p className="text-xs text-muted-foreground">
+              Who you’d like to meet, or what you hope to find here. Members only.
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <label htmlFor="onboarding-telegram" className="text-sm font-medium flex items-center gap-2">
+              <Send className="h-4 w-4" aria-hidden="true" />
+              Messaging handle <Optional />
+            </label>
+            <Input
+              id="onboarding-telegram"
+              placeholder="@name or a link"
+              value={telegram}
+              maxLength={PROFILE_INPUT_LIMITS.telegram}
+              onChange={(e) => setTelegram(e.target.value)}
+            />
+            <p className="text-xs text-muted-foreground">
+              Telegram, Signal, Matrix — whatever you use. You can verify an ENS name later from your account.
+            </p>
+          </div>
+
+          {/* The two per-gathering sharing switches (design §3.3). Only meaningful inside a
+              gathering: outside one there is no membership row to write them to. */}
+          {eventSlug && (
+            <div className="space-y-3 rounded-lg border p-3">
+              <p className="text-sm font-medium">What fellow members here can see</p>
+              <div className="flex items-start justify-between gap-4">
+                <label htmlFor="onboarding-share-contact" className="text-sm cursor-pointer">
+                  <span>Show my messaging handle</span>
+                  <span className="block text-xs text-muted-foreground mt-0.5">
+                    Members of this gathering can message you there. You can change this any time.
+                  </span>
+                </label>
+                <Switch id="onboarding-share-contact" checked={shareContact} onCheckedChange={setShareContact} />
+              </div>
+              {email && (
+                <div className="flex items-start justify-between gap-4">
+                  <label htmlFor="onboarding-share-email" className="text-sm cursor-pointer">
+                    <span className="flex items-center gap-1.5">
+                      <Mail className="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />
+                      Show my email address
+                    </span>
+                    <span className="block text-xs text-muted-foreground mt-0.5">
+                      {email} — off unless you turn it on, and only for members of this gathering.
+                    </span>
+                  </label>
+                  <Switch id="onboarding-share-email" checked={shareEmail} onCheckedChange={setShareEmail} />
+                </div>
+              )}
+            </div>
+          )}
+          </div>
         )
       default:
         return null
@@ -436,7 +497,7 @@ export function OnboardingModal({ email, initialProfile, onComplete, suggestedTo
     if (isIntroStep) {
       return `How it works (${step}/${introStepCount})`
     }
-    const titles = ['Your profile', 'Contact & projects', 'Your interests']
+    const titles = ['Your profile', 'What you’re building', 'Connecting with people here']
     return titles[profileStep - 1]
   }
 
@@ -514,6 +575,22 @@ export function OnboardingModal({ email, initialProfile, onComplete, suggestedTo
             <div className="text-center">
               <Button variant="link" size="sm" className="text-muted-foreground" onClick={() => setStep(introStepCount + 1)}>
                 Skip to your profile
+              </Button>
+            </div>
+          )}
+
+          {/* The last step is skippable: everything on it is optional, and saving it empty is a
+              real answer (design §3.6). */}
+          {step === totalSteps && (
+            <div className="text-center">
+              <Button
+                variant="link"
+                size="sm"
+                className="text-muted-foreground"
+                onClick={handleSubmit}
+                disabled={isSubmitting || isUploading}
+              >
+                Skip for now
               </Button>
             </div>
           )}

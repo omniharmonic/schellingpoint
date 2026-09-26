@@ -41,6 +41,7 @@ interface CohostJson {
   display_name: string | null
   avatar_url: string | null
   handle: string | null
+  did: string | null
 }
 
 interface SessionRow {
@@ -85,6 +86,8 @@ interface SessionRow {
   host_bio: string | null
   host_affiliation: string | null
   host_handle: string | null
+  /** The host account's DID (not `sessions.host_did`, which records who wrote the proposal). */
+  host_account_did: string | null
   listed_as: string | null
   track_id: string | null
   track_name: string | null
@@ -120,6 +123,13 @@ export interface PersonView {
   display_name: string | null
   handle: string | null
   avatar_url: string | null
+  /**
+   * Their DID, so the UI can link the name to `/e/[slug]/people/[did]` (design §3.2). Members
+   * only: absent from every public read, where the name and handle are all a reader gets. A
+   * host's DID is not a secret from the network — their own proposal record carries it — but the
+   * profile page it links to is members-only, so a public card would offer a link to a 404.
+   */
+  did?: string | null
 }
 
 export interface SessionView {
@@ -268,6 +278,7 @@ async function queryRows(access: EventAccess, filters: SessionListFilters, sessi
       case when s.author_inactive_at is null then hp.bio end as host_bio,
       case when s.author_inactive_at is null then hp.affiliation end as host_affiliation,
       case when s.author_inactive_at is null then ha.handle end as host_handle,
+      case when s.author_inactive_at is null then ha.did end as host_account_did,
       hl.host_name as listed_as,
       s.track_id, t.name as track_name, t.slug as track_slug, t.color as track_color,
       s.venue_id, v.name as venue_name, v.capacity as venue_capacity, v.features as venue_features,
@@ -278,7 +289,7 @@ async function queryRows(access: EventAccess, filters: SessionListFilters, sessi
       (
         select coalesce(json_agg(json_build_object(
           'id', c.id, 'user_id', c.user_id, 'display_order', c.display_order,
-          'display_name', cp.display_name, 'avatar_url', cp.avatar_url, 'handle', ca.handle
+          'display_name', cp.display_name, 'avatar_url', cp.avatar_url, 'handle', ca.handle, 'did', ca.did
         ) order by c.display_order asc nulls last, c.added_at asc), '[]'::json)
         from session_cohosts c
         left join profiles cp on cp.id = c.user_id
@@ -319,8 +330,13 @@ async function queryRows(access: EventAccess, filters: SessionListFilters, sessi
   `
 }
 
-function person(display_name: string | null, handle: string | null, avatar_url: string | null): PersonView {
-  return { display_name, handle, avatar_url }
+function person(
+  display_name: string | null,
+  handle: string | null,
+  avatar_url: string | null,
+  opts: { did?: string | null; isMember: boolean },
+): PersonView {
+  return { display_name, handle, avatar_url, ...(opts.isMember ? { did: opts.did ?? null } : {}) }
 }
 
 /** The self-hosted point by tier: exact with attendee details, else the stored coarse point, re-rounded. */
@@ -367,7 +383,7 @@ export function serializeSession(row: SessionRow, access: EventAccess, detail: b
     updated_at: row.updated_at,
     host: row.host_id
       ? {
-          ...person(row.host_display_name, row.host_handle, row.host_avatar_url),
+          ...person(row.host_display_name, row.host_handle, row.host_avatar_url, { did: row.host_account_did, isMember }),
           // Self-written profile text stays within the gathering (spec §10: profile → members).
           ...(detail && (isMember || isHost) ? { bio: row.host_bio, affiliation: row.host_affiliation } : {}),
         }
@@ -376,7 +392,7 @@ export function serializeSession(row: SessionRow, access: EventAccess, detail: b
     unclaimed: !row.host_id,
     cohosts: cohostRows.map((c) => ({
       id: c.id,
-      ...person(c.display_name, c.handle, c.avatar_url),
+      ...person(c.display_name, c.handle, c.avatar_url, { did: c.did, isMember }),
       is_viewer: !!viewerId && c.user_id === viewerId,
     })),
     track: row.track_id && row.track_name

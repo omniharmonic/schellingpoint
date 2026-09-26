@@ -45,7 +45,8 @@ import { cn } from '@/lib/utils'
 import { EN_DASH, plural } from '@/lib/format'
 import { formatClock, minutesToTime, timeToMinutes, SLOT_LENGTH_OPTIONS } from '@/lib/scheduling/slot-blocks'
 import { PublishJobProgress } from '@/components/PublishJobProgress'
-import { hostLabel, type AdminSession, type AdminSessionsResponse, type AdminTimeSlot, type AdminVenue, type RoundStatus } from '@/components/admin/types'
+import { type AdminSession, type AdminSessionsResponse, type AdminTimeSlot, type AdminVenue, type RoundStatus } from '@/components/admin/types'
+import { HostLine } from '@/components/admin/HostLine'
 import { AudienceClusters } from '@/components/admin/AudienceClusters'
 import { AutoScheduleRun, type HillClimbStats, type SchedulerStage } from '@/components/admin/AutoScheduleRun'
 import { QualityChip, QualityScore, useDraftQuality, type QualityReport } from '@/components/admin/ScheduleQuality'
@@ -750,7 +751,7 @@ export default function AdminSchedulePage() {
                           {session.duration && <span className="text-xs text-muted-foreground">{session.duration} min</span>}
                         </div>
                         <h3 className="text-sm font-medium line-clamp-2">{session.title}</h3>
-                        {hostLabel(session) && <p className="text-xs text-muted-foreground mt-1">{hostLabel(session)}</p>}
+                        <HostLine session={session} slug={event.slug} className="mt-1" />
                         <div className="flex flex-wrap items-center gap-1 mt-2">
                           {session.track && (
                             <Badge variant="secondary" className="text-xs" style={{ backgroundColor: session.track.color ?? undefined }}>{session.track.name}</Badge>
@@ -922,7 +923,7 @@ export default function AdminSchedulePage() {
                               )}
                             </div>
                             <h3 className="text-xs font-medium line-clamp-2 mt-1">{session.title}</h3>
-                            {hostLabel(session) && <p className="text-xs text-muted-foreground mt-0.5 truncate">{hostLabel(session)}</p>}
+                            <HostLine session={session} slug={event.slug} className="mt-0.5 truncate" />
                             {keepApart.map((c) => {
                               const other = c.a === session.id ? c.b : c.a
                               return (
