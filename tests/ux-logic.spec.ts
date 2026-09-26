@@ -53,7 +53,7 @@ test('event day filters preserve calendar boundaries across daylight saving', ()
 
 
 import { addressIsPlaced, addressLine, geocodeParams } from '../src/lib/geo/coarse'
-import { directionsHref } from '../src/lib/geo/directions'
+import { directionsHref, directionsPlatform } from '../src/lib/geo/directions'
 
 // A street line on its own matches whichever same-named street a geocoder ranks first, anywhere
 // in the world — an organizer's Boulder venue arrived in Falls Church, Virginia. The city, region
@@ -90,6 +90,17 @@ test('directions carry the whole address, and fall back to a point only without 
   // A self-hosted session with a pin and no address: coordinates are all there is.
   expect(directionsHref({ lat: 40.0176, lng: -105.2797 }))
     .toBe('https://www.google.com/maps/dir/?api=1&destination=40.0176,-105.2797')
+
+  // iOS has no `geo:` handler (Safari: "the address is invalid"); it gets an Apple Maps link.
+  expect(directionsHref({ query: full, lat: 40.0176, lng: -105.2797 }, 'ios'))
+    .toBe(`https://maps.apple.com/?daddr=${encodeURIComponent(full)}`)
+  expect(directionsHref({ lat: 40.0176, lng: -105.2797 }, 'ios')).toBe('https://maps.apple.com/?daddr=40.0176,-105.2797')
+  // Android keeps `geo:` so the OS can offer whichever maps app is installed.
+  expect(directionsHref({ query: full, lat: 40.0176, lng: -105.2797 }, 'android'))
+    .toBe(`geo:40.0176,-105.2797?q=${encodeURIComponent(full)}`)
+  expect(directionsPlatform('Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Safari/604.1')).toBe('ios')
+  expect(directionsPlatform('Mozilla/5.0 (Linux; Android 15; Pixel 9) Chrome/130')).toBe('android')
+  expect(directionsPlatform('Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7) Safari/605.1.15')).toBe('other')
 
   // Nothing to point at, no link.
   expect(directionsHref({})).toBeNull()
