@@ -9,9 +9,16 @@ import {
   copyDayRooms,
   countSlots,
   generateSlots,
+  MAX_TEMPLATES,
+  MAX_TEMPLATES_CHARS,
+  MAX_TEMPLATE_DAYS,
+  MAX_TEMPLATE_ROOMS,
+  mirrorTiming,
   newPlan,
   newRoomPattern,
   planToTemplate,
+  roomSkips,
+  skippedTimes,
   slotsForRoom,
   syncRooms,
   type DayPlan,
@@ -105,6 +112,18 @@ test('"same as first room" pulls a row back into lockstep, but never its closed 
   expect(rows[2]).toMatchObject({ start: '13:00', end: '14:00', slotMinutes: 120 })
 })
 
+test('"same times every day" mirrors the hours and leaves each day its own closures', () => {
+  const sunday = [room('a', { end: '13:00' }), room('b', { sameAsFirst: true, end: '13:00' })]
+  const saturday = [room('a', { closed: true }), room('b', { sameAsFirst: false, closed: true })]
+  const mirrored = mirrorTiming(sunday, saturday)
+  expect(mirrored.map((r) => r.end)).toEqual(['13:00', '13:00'])
+  // Closing the Garden on the Sunday must not close it on the Saturday too.
+  expect(mirrored.map((r) => r.closed)).toEqual([true, true])
+  expect(mirrorTiming(saturday, sunday).map((r) => r.closed)).toEqual([false, false])
+  // The lockstep tick belongs to the day it was ticked on.
+  expect(mirrorTiming(sunday, saturday).map((r) => r.sameAsFirst)).toEqual([false, false])
+})
+
 test('copy from another day carries its hours and its closures, room by room', () => {
   const from = [room('a', { end: '13:00' }), room('b', { closed: true, sameAsFirst: false })]
   const to = newPlan(['2026-05-02'], ['a', 'b'])[0].rooms
@@ -123,6 +142,23 @@ test('conflicts are the generated slots that overlap availability already in the
   expect(conflictKeys(slots, [{ venueId: 'b', dayDate: '2026-05-01', startTime: '10:30', endTime: '10:45' }]).size).toBe(0)
   expect(conflictKeys(slots, [{ venueId: 'a', dayDate: '2026-05-02', startTime: '10:30', endTime: '10:45' }]).size).toBe(0)
   expect(conflictKeys(slots, [{ venueId: 'a', dayDate: '2026-05-01', startTime: '12:00', endTime: '13:00' }]).size).toBe(0)
+})
+
+test('a wall clock the timezone skips is caught before the POST, not by the route', () => {
+  // America/Denver goes forward at 02:00 on 2026-03-08: 02:00–02:59 does not exist that morning.
+  const spring = generateSlots([{ dayDate: '2026-03-08', rooms: [room('a', { start: '01:00', end: '05:00', slotMinutes: 30 })] }])
+  const skipped = skippedTimes(spring, 'America/Denver')
+  expect([...skipped].sort()).toEqual(['2026-03-08|02:00', '2026-03-08|02:30'])
+  expect(roomSkips(skipped, spring)).toBe(true)
+  // The 01:30 slot is caught by its end, the 01:00 slot by neither end.
+  expect(roomSkips(skipped, spring.filter((s) => s.startTime === '01:30'))).toBe(true)
+  expect(roomSkips(skipped, spring.filter((s) => s.startTime === '01:00'))).toBe(false)
+
+  // The same hours the day before, and the same hours in a timezone without the transition, are fine.
+  expect(skippedTimes(generateSlots([{ dayDate: '2026-03-07', rooms: [room('a', { start: '01:00', end: '05:00', slotMinutes: 30 })] }]), 'America/Denver').size).toBe(0)
+  expect(skippedTimes(spring, 'UTC').size).toBe(0)
+  // Falling back repeats an hour rather than losing one, so nothing is blocked on 2026-11-01.
+  expect(skippedTimes(generateSlots([{ dayDate: '2026-11-01', rooms: [room('a', { start: '01:00', end: '05:00', slotMinutes: 30 })] }]), 'America/Denver').size).toBe(0)
 })
 
 test('a template saves the shape and applies it to another gathering rooms and days', () => {
@@ -153,6 +189,33 @@ test('a template saves the shape and applies it to another gathering rooms and d
   expect(generateSlots([applied[0]]).filter((s) => s.venueId === 'n2')).toEqual([])
 })
 
+test('two rooms with the same name are matched by position, never by name', () => {
+  const names: Record<string, string> = { v1: 'Studio', v2: 'Studio', v3: 'Garden' }
+  const plan: DayPlan[] = [{
+    dayDate: '2026-05-01',
+    rooms: [
+      room('v1', { end: '11:00' }),
+      room('v2', { end: '12:00', sameAsFirst: false }),
+      room('v3', { end: '13:00', sameAsFirst: false }),
+    ],
+  }]
+  const template = planToTemplate('Studios', plan, (id) => names[id] ?? null)
+  expect(template.days[0].rooms.map((r) => `${r.room} ${r.end}`)).toEqual(['Studio 11:00', 'Studio 12:00', 'Garden 13:00'])
+
+  // Both sides have two Studios: each keeps the pattern at its own position rather than both
+  // collapsing onto whichever the map happened to keep.
+  const applied = applyTemplate(template, ['2026-09-01'], [
+    { id: 'n1', name: 'Studio' }, { id: 'n2', name: 'Studio' }, { id: 'n3', name: 'Garden' },
+  ])
+  expect(applied[0].rooms.map((r) => r.end)).toEqual(['11:00', '12:00', '13:00'])
+  // The uniquely named room is still matched by name wherever it now sits; the ambiguous ones
+  // take the pattern at their position, which is all a duplicated name can honestly give them.
+  const moved = applyTemplate(template, ['2026-09-01'], [
+    { id: 'n3', name: 'Garden' }, { id: 'n1', name: 'Studio' }, { id: 'n2', name: 'Studio' },
+  ])
+  expect(moved[0].rooms.map((r) => `${r.venueId} ${r.end}`)).toEqual(['n3 13:00', 'n1 12:00', 'n2 13:00'])
+})
+
 test('the templates validator keeps anything that is not a named list of days out', () => {
   const good = [{ name: 'Shape', days: [{ rooms: [{ room: 'Main Hall', start: '09:00', end: '17:00', slotMinutes: 60, breakMinutes: 15, closed: false }] }] }]
   const checked = checkTemplates(good)
@@ -174,9 +237,33 @@ test('the templates validator keeps anything that is not a named list of days ou
     [{ name: 'a', days: [{ rooms: [{ start: '09:00', end: '17:00', slotMinutes: 60, breakMinutes: 999 }] }] }],
     [{ name: 'a', days: [{ rooms: [{ start: '09:00', end: '17:00', slotMinutes: 60 }] }] }, { name: 'A', days: [{ rooms: [] }] }], // same name twice
     Array.from({ length: 11 }, (_, i) => ({ name: `t${i}`, days: [{ rooms: [] }] })),
+    // Past the day and room bounds.
+    [{ name: 'a', days: Array.from({ length: MAX_TEMPLATE_DAYS + 1 }, () => ({ rooms: [] })) }],
+    [{ name: 'a', days: [{ rooms: Array.from({ length: MAX_TEMPLATE_ROOMS + 1 }, () => ({ start: '09:00', end: '17:00', slotMinutes: 60 })) }] }],
   ]) {
     expect(checkTemplates(bad).ok, JSON.stringify(bad).slice(0, 60)).toBe(false)
   }
+  // Exactly at the bounds is fine.
+  expect(checkTemplates([{ name: 'a', days: Array.from({ length: MAX_TEMPLATE_DAYS }, () => ({ rooms: [] })) }]).ok).toBe(true)
+  expect(checkTemplates([{ name: 'a', days: [{ rooms: Array.from({ length: MAX_TEMPLATE_ROOMS }, () => ({ start: '09:00', end: '17:00', slotMinutes: 60 })) }] }]).ok).toBe(true)
+})
+
+test('a template list too large to store is refused here, not by the column', () => {
+  // The room name is the only free-text field, so it is where size comes from. 31 days × 60 rooms
+  // of long names is well past the serialized ceiling.
+  const roomAt = (n: number) => ({ room: `Room ${'n'.repeat(100)} ${n}`.slice(0, 120), start: '09:00', end: '17:00', slotMinutes: 60, breakMinutes: 0, closed: false })
+  const huge = Array.from({ length: MAX_TEMPLATES }, (_, t) => ({
+    name: `shape ${t}`,
+    days: Array.from({ length: MAX_TEMPLATE_DAYS }, () => ({ rooms: Array.from({ length: MAX_TEMPLATE_ROOMS }, (_, r) => roomAt(r)) })),
+  }))
+  expect(JSON.stringify(huge).length).toBeGreaterThan(MAX_TEMPLATES_CHARS)
+  const checked = checkTemplates(huge)
+  expect(checked.ok).toBe(false)
+  expect(checked.ok === false && checked.error).toMatch(/too large/)
+  // A realistic shape — three days, ten rooms, long names — is nowhere near the ceiling.
+  const real = [{ name: 'shape', days: Array.from({ length: 3 }, () => ({ rooms: Array.from({ length: 10 }, (_, r) => roomAt(r)) })) }]
+  expect(JSON.stringify(real).length).toBeLessThan(MAX_TEMPLATES_CHARS)
+  expect(checkTemplates(real).ok).toBe(true)
 })
 
 /* ───────────────────────── the route and the editor ───────────────────────── */
@@ -190,6 +277,10 @@ test.describe('slot templates and the bulk block editor', () => {
   let owner: TestAccount
   let moderator: TestAccount
   let outsider: TestAccount
+  /** A private gathering the outsider is not in: its slug must not even resolve for them. */
+  let hidden: TestGathering
+  /** A second gathering of the owner's, to prove a PUT never reaches past the resolved event. */
+  let other: TestGathering
   let venueIds: string[] = []
 
   const url = (slug: string) => `/api/v1/events/${slug}/admin/slot-templates`
@@ -234,10 +325,19 @@ test.describe('slot templates and the bulk block editor', () => {
               on conflict (event_id, user_id) do update set role = 'owner'`
     await raw`insert into event_members (event_id, user_id, role) values (${gathering.id}, ${moderator.id}, 'moderator')
               on conflict (event_id, user_id) do update set role = 'moderator'`
+
+    hidden = await createTestGathering(raw, { tag: 'blockshid', status: 'draft', visibility: 'private' })
+    other = await createTestGathering(raw, { tag: 'blocksoth', status: 'scheduling' })
+    for (const g of [hidden, other]) {
+      await raw`insert into event_members (event_id, user_id, role) values (${g.id}, ${owner.id}, 'owner')
+                on conflict (event_id, user_id) do update set role = 'owner'`
+    }
   })
 
   test.afterAll(async () => {
     await gathering?.cleanup()
+    await hidden?.cleanup()
+    await other?.cleanup()
     await owner?.cleanup()
     await moderator?.cleanup()
     await outsider?.cleanup()
@@ -263,6 +363,36 @@ test.describe('slot templates and the bulk block editor', () => {
     expect((await api(url(gathering.slug), { cookie: owner.cookie })).body.templates).toEqual([])
   })
 
+  test('a private gathering answers 404 to a non-member, on both verbs', async () => {
+    // Not 403: a stranger must not learn that this slug is a gathering at all (spec §8).
+    expect((await api(url(hidden.slug), { cookie: outsider.cookie })).status).toBe(404)
+    expect((await api(url(hidden.slug))).status).toBe(404)
+    const write = await api(url(hidden.slug), { method: 'PUT', cookie: outsider.cookie, json: { templates: [TEMPLATE] } })
+    expect(write.status).toBe(404)
+    // Its owner, of course, is let in.
+    expect((await api(url(hidden.slug), { cookie: owner.cookie })).status).toBe(200)
+    const [row] = await raw<{ slot_templates: unknown[] }[]>`select slot_templates from events where id = ${hidden.id}`
+    expect(row.slot_templates).toEqual([])
+  })
+
+  test('a refused bulk save names the slot it refused, and leaves nothing behind', async () => {
+    const [row] = await raw<{ day: string }[]>`select start_date::text as day from events where id = ${gathering.id}`
+    const slot = (over: Record<string, unknown> = {}) => ({ venue_id: venueIds[0], day_date: row.day, start: '09:00', end: '10:00', ...over })
+    const slots = `/api/v1/events/${gathering.slug}/admin/time-slots`
+
+    const bulk = await api(slots, { method: 'POST', cookie: owner.cookie, json: { slots: [slot(), slot({ start: '11:00', end: '12:00' }), slot({ start: '25:00', end: '26:00' })] } })
+    expect(bulk.status).toBe(400)
+    // Which one: an editor of two thousand slots cannot act on "one of these is wrong".
+    expect(bulk.body.field).toBe('slots.2.start')
+    const [after] = await raw<{ n: number }[]>`select count(*)::int as n from time_slots where event_id = ${gathering.id}`
+    expect(after.n).toBe(0)
+
+    // The single-slot form keeps its plain field names, which the slot form reads.
+    const one = await api(slots, { method: 'POST', cookie: owner.cookie, json: slot({ start: '25:00' }) })
+    expect(one.status).toBe(400)
+    expect(one.body.field).toBe('start')
+  })
+
   test('PUT validates the shape and the size, then replaces the whole list', async () => {
     for (const templates of [
       'nope',
@@ -272,10 +402,19 @@ test.describe('slot templates and the bulk block editor', () => {
       [{ name: 'a', days: [{ rooms: [{ start: '9am', end: '5pm', slotMinutes: 60 }] }] }],
       [{ name: 'a', days: [{ rooms: [{ start: '09:00', end: '17:00', slotMinutes: 1000 }] }] }],
       Array.from({ length: 11 }, (_, i) => ({ name: `t${i}`, days: [{ rooms: [] }] })),
+      // Past the serialized ceiling: a plain 400 naming the field, never the column's own
+      // constraint text leaking out of Postgres.
+      Array.from({ length: 10 }, (_, t) => ({
+        name: `shape ${t}`,
+        days: Array.from({ length: MAX_TEMPLATE_DAYS }, () => ({
+          rooms: Array.from({ length: MAX_TEMPLATE_ROOMS }, (_, r) => ({ room: `Room ${'n'.repeat(100)} ${r}`, start: '09:00', end: '17:00', slotMinutes: 60, breakMinutes: 0, closed: false })),
+        })),
+      })),
     ]) {
       const res = await api(url(gathering.slug), { method: 'PUT', cookie: owner.cookie, json: { templates } })
       expect(res.status, JSON.stringify(templates).slice(0, 50)).toBe(400)
       expect(res.body.field).toBe('templates')
+      expect(JSON.stringify(res.body)).not.toMatch(/constraint|violates|pg_column_size|slot_templates_/i)
     }
 
     const saved = await api(url(gathering.slug), { method: 'PUT', cookie: owner.cookie, json: { templates: [TEMPLATE, { ...TEMPLATE, name: 'Weekend shape' }] } })
@@ -284,6 +423,15 @@ test.describe('slot templates and the bulk block editor', () => {
     // Stored on this gathering only, and read back as it was written.
     const [row] = await raw<{ slot_templates: unknown[] }[]>`select slot_templates from events where id = ${gathering.id}`
     expect(row.slot_templates).toHaveLength(2)
+
+    // One gathering's list is its own: a PUT here never reaches the other one.
+    const untouched = await api(url(other.slug), { method: 'PUT', cookie: owner.cookie, json: { templates: [{ ...TEMPLATE, name: 'Other shape' }] } })
+    expect(untouched.status).toBe(200)
+    const [mine] = await raw<{ slot_templates: { name: string }[] }[]>`select slot_templates from events where id = ${gathering.id}`
+    expect(mine.slot_templates.map((t) => t.name)).toEqual(['Weekday shape', 'Weekend shape'])
+    const [theirs] = await raw<{ slot_templates: { name: string }[] }[]>`select slot_templates from events where id = ${other.id}`
+    expect(theirs.slot_templates.map((t) => t.name)).toEqual(['Other shape'])
+    expect((await api(url(gathering.slug), { cookie: owner.cookie })).body.templates).toHaveLength(2)
 
     // PUT is the whole list: one entry replaces both.
     const replaced = await api(url(gathering.slug), { method: 'PUT', cookie: owner.cookie, json: { templates: [TEMPLATE] } })
@@ -324,14 +472,23 @@ test.describe('slot templates and the bulk block editor', () => {
       await rows.nth(0).getByLabel('End').fill('15:00')
       await expect(editor.getByTestId('slot-total')).toContainText('36 slots in total')
 
-      // Then the second day on its own, with one room shut.
-      await editor.getByRole('switch', { name: 'Same times every day' }).click()
+      // The second day, with one room shut. "Same times every day" stays on: closing a room is a
+      // fact about that day, and must not follow the hours across to the other one.
       await editor.getByTestId('slot-day-tab').nth(1).click()
       const closedRow = editor.getByTestId('slot-room-row').nth(2)
       const closedVenueId = await closedRow.getAttribute('data-venue-id')
       await closedRow.getByRole('switch').click()
-      await expect(closedRow).toContainText('Closed')
+      await expect(closedRow.getByRole('switch')).toHaveAttribute('aria-checked', 'true')
+      await expect(closedRow).toHaveAttribute('data-closed', 'true')
+      await expect(closedRow.getByTestId('slot-room-summary')).toHaveText('Closed this day')
       await expect(editor.getByTestId('slot-total')).toContainText('30 slots in total')
+
+      // Back on the first day that room is open, and its hours still match the rest.
+      await editor.getByTestId('slot-day-tab').nth(0).click()
+      const sameRoomDayOne = editor.getByTestId('slot-room-row').nth(2)
+      await expect(sameRoomDayOne).toHaveAttribute('data-closed', 'false')
+      await expect(sameRoomDayOne.getByTestId('slot-room-summary')).toHaveText('6 slots')
+      await editor.getByTestId('slot-day-tab').nth(1).click()
 
       await page.getByRole('button', { name: 'Add 30 slots' }).click()
       await expect(page.getByTestId('slot-block-editor')).toBeHidden()
@@ -365,6 +522,48 @@ test.describe('slot templates and the bulk block editor', () => {
       await expect(again.getByRole('button', { name: /^Add \d+ slots$/ })).toBeDisabled()
     } finally {
       await raw`delete from time_slots where event_id = ${gathering.id}`
+      await context.close()
+    }
+  })
+
+  test('saving a template over an existing name says so and asks first', async ({ browser }) => {
+    const [name, ...rest] = owner.cookie.split('=')
+    const context = await browser.newContext({ baseURL: base, viewport: { width: 1400, height: 1000 } })
+    await context.addCookies([{ name, value: rest.join('='), url: base }])
+    const page = await context.newPage()
+    try {
+      // The route tests left one saved shape on this gathering.
+      await raw`update events set slot_templates = ${raw.json([{ name: 'Weekday shape', days: [{ rooms: [{ room: 'Main Hall', start: '09:00', end: '15:00', slotMinutes: 60, breakMinutes: 0, closed: false }] }] }] as never)} where id = ${gathering.id}`
+      await page.goto(`/e/${gathering.slug}/admin/setup`)
+      await page.getByRole('button', { name: 'Generate slots' }).first().click()
+      const editor = page.getByTestId('slot-block-editor')
+      await editor.getByRole('button', { name: 'Save as template' }).click()
+
+      // A new name saves outright; no confirmation for something that replaces nothing.
+      await editor.getByLabel('Template name').fill('Weekend shape')
+      await expect(editor.getByTestId('slot-template-replaces')).toBeHidden()
+      await editor.getByRole('button', { name: 'Save', exact: true }).click()
+      await expect.poll(async () => (await raw<{ n: number }[]>`select jsonb_array_length(slot_templates) as n from events where id = ${gathering.id}`)[0].n).toBe(2)
+
+      // The same name again is a replacement, and says so before it goes.
+      await editor.getByRole('button', { name: 'Save as template' }).click()
+      await editor.getByLabel('Template name').fill('weekday SHAPE')
+      await expect(editor.getByTestId('slot-template-replaces')).toContainText('Replaces')
+      await editor.getByRole('button', { name: 'Save', exact: true }).click()
+      await expect(editor).toContainText('Replace the saved template')
+      await editor.getByRole('button', { name: 'Replace' }).click()
+
+      // Still two shapes: the old one was replaced, not added alongside.
+      await expect.poll(async () => {
+        const [row] = await raw<{ names: string[] }[]>`
+          select coalesce(array_agg(t.entry ->> 'name'), '{}') as names
+          from events e, lateral jsonb_array_elements(e.slot_templates) as t(entry) where e.id = ${gathering.id}
+        `
+        // Sorted here, not in SQL: the order of two names differing only in case is a collation.
+        return [...row.names].sort()
+      }).toEqual(['Weekend shape', 'weekday SHAPE'].sort())
+    } finally {
+      await raw`update events set slot_templates = '[]'::jsonb where id = ${gathering.id}`
       await context.close()
     }
   })

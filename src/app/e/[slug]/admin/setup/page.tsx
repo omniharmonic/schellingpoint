@@ -378,6 +378,7 @@ export default function AdminSetupPage() {
               <BulkSlotGenerator
                 venues={venues.map((v) => ({ id: v.id, name: v.name, capacity: v.capacity }))}
                 eventDays={eventDays}
+                timezone={event.timezone}
                 existingSlots={timeSlots.filter(slot => slot.venue_id).map(slot => ({
                   venueId: slot.venue_id!, dayDate: toEventLocalParts(slot.start_time, event.timezone).date,
                   startTime: toEventLocalParts(slot.start_time, event.timezone).time,

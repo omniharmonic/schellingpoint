@@ -10,6 +10,8 @@
  * slots the previous single-pattern generator produced; `generateSlots` is the only walker.
  */
 
+import { parseTimeInTimezone } from '@/lib/events/timezone'
+
 /** One room's day: its hours, its slot length, the gap between slots, or closed. */
 export interface RoomPattern {
   venueId: string
@@ -132,6 +134,38 @@ export function conflictKeys(generated: readonly GeneratedSlot[], existing: read
   return out
 }
 
+/**
+ * Wall-clock times in the plan that the gathering's timezone does not have. On the morning the
+ * clocks go forward there is no 02:30 in America/Denver, and `parseTimeInTimezone` refuses to
+ * move a slot silently — so the whole save would fail on one impossible row. The editor asks the
+ * same question the route will ask, before the POST, and says which day and time to change.
+ *
+ * Keyed `YYYY-MM-DD|HH:MM`, so both ends of a slot can be checked against one set, and each
+ * distinct time in a day is resolved once however many rooms share it.
+ */
+export function skippedTimes(slots: readonly GeneratedSlot[], timezone: string): Set<string> {
+  const skipped = new Set<string>()
+  const seen = new Set<string>()
+  for (const slot of slots) {
+    for (const time of [slot.startTime, slot.endTime]) {
+      const key = `${slot.dayDate}|${time}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      try {
+        parseTimeInTimezone(time, slot.dayDate, timezone)
+      } catch {
+        skipped.add(key)
+      }
+    }
+  }
+  return skipped
+}
+
+/** Does this room's day contain a time the timezone skips? */
+export function roomSkips(skipped: ReadonlySet<string>, slots: readonly GeneratedSlot[]): boolean {
+  return slots.some((s) => skipped.has(`${s.dayDate}|${s.startTime}`) || skipped.has(`${s.dayDate}|${s.endTime}`))
+}
+
 /* ─────────────────────────── editor-side plan edits ─────────────────────────── */
 
 const TIMING: Array<keyof RoomPattern> = ['start', 'end', 'slotMinutes', 'breakMinutes']
@@ -149,12 +183,28 @@ export function syncRooms(rooms: readonly RoomPattern[]): RoomPattern[] {
   })
 }
 
-/** The same hours in another day's rooms, matched room by room (`closed` travels with them). */
+/**
+ * The same hours in another day's rooms, matched room by room, for the explicit "copy from
+ * <day>" action: `closed` travels with them, because copying a day means copying the day.
+ */
 export function copyDayRooms(from: readonly RoomPattern[], to: readonly RoomPattern[]): RoomPattern[] {
   return to.map((room, i) => {
     const source = from[i] ?? from[from.length - 1]
     if (!source) return { ...room }
     return { ...room, start: source.start, end: source.end, slotMinutes: source.slotMinutes, breakMinutes: source.breakMinutes, closed: source.closed, sameAsFirst: source.sameAsFirst }
+  })
+}
+
+/**
+ * "Same times every day": only the four timing keys travel. A room shut on the Sunday is shut on
+ * the Sunday alone — closing it would otherwise silently close it on every other day too — and
+ * the lockstep tick stays an editing affordance of the day it was ticked on.
+ */
+export function mirrorTiming(from: readonly RoomPattern[], to: readonly RoomPattern[]): RoomPattern[] {
+  return to.map((room, i) => {
+    const source = from[i] ?? from[from.length - 1]
+    if (!source) return { ...room }
+    return { ...room, start: source.start, end: source.end, slotMinutes: source.slotMinutes, breakMinutes: source.breakMinutes }
   })
 }
 
@@ -183,6 +233,12 @@ export const MAX_TEMPLATES = 10
 export const MAX_TEMPLATE_NAME = 60
 export const MAX_TEMPLATE_DAYS = 31
 export const MAX_TEMPLATE_ROOMS = 60
+/**
+ * Serialized ceiling, under the column's own (0039 caps `slot_templates` at 262,144 characters).
+ * Checked here so an oversized list is a plain 400 naming the field, never a constraint violation
+ * surfacing as raw Postgres text.
+ */
+export const MAX_TEMPLATES_CHARS = 200_000
 
 export function planToTemplate(name: string, days: readonly DayPlan[], venueName: (id: string) => string | null): SlotTemplate {
   return {
@@ -200,10 +256,19 @@ export function planToTemplate(name: string, days: readonly DayPlan[], venueName
   }
 }
 
+/** Names that occur exactly once in a list — the only ones a match by name can be sure of. */
+function uniqueNames(names: readonly (string | null | undefined)[]): Set<string> {
+  const counts = new Map<string, number>()
+  for (const name of names) if (name) counts.set(name, (counts.get(name) ?? 0) + 1)
+  return new Set([...counts].filter(([, n]) => n === 1).map(([name]) => name))
+}
+
 /**
  * Fill a plan from a template. A day beyond the template's length repeats its last day; a room
- * beyond its width repeats the last room. A room whose name matches one in the template takes
- * that room's hours wherever it sits, so adding a room in the middle does not shuffle the rest.
+ * beyond its width repeats the last room. A room whose name is unambiguous on both sides — once
+ * in the template, once in this gathering — takes that room's hours wherever it now sits, so
+ * adding a room in the middle does not shuffle the rest. Two rooms called "Studio" are matched by
+ * position instead: a name that names two things names neither.
  * `sameAsFirst` is derived: a row equal to the first room's hours stays in lockstep.
  */
 export function applyTemplate(
@@ -213,7 +278,11 @@ export function applyTemplate(
 ): DayPlan[] {
   return dayDates.map((dayDate, dayIndex) => {
     const day = template.days[Math.min(dayIndex, template.days.length - 1)]
-    const byName = new Map((day?.rooms ?? []).filter((r) => r.room).map((r) => [r.room as string, r]))
+    const shared = uniqueNames((day?.rooms ?? []).map((r) => r.room))
+    const here = uniqueNames(venues.map((v) => v.name))
+    const byName = new Map(
+      (day?.rooms ?? []).filter((r) => r.room && shared.has(r.room) && here.has(r.room)).map((r) => [r.room as string, r]),
+    )
     const rooms = venues.map((venue, i) => {
       const source = byName.get(venue.name) ?? day?.rooms[Math.min(i, (day?.rooms.length ?? 1) - 1)]
       const base = newRoomPattern(venue.id, i)
@@ -287,6 +356,10 @@ export function checkTemplates(value: unknown): TemplateCheck {
       days.push({ rooms })
     }
     templates.push({ name, days })
+  }
+  const size = JSON.stringify(templates).length
+  if (size > MAX_TEMPLATES_CHARS) {
+    return { ok: false, error: 'These templates are too large to save. Delete one, or drop a day or some rooms from them.' }
   }
   return { ok: true, templates }
 }

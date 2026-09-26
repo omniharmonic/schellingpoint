@@ -21,6 +21,7 @@ import { Ban, CalendarPlus, Coffee, Copy, Save, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Checkbox } from '@/components/ui/checkbox'
+import { ConfirmInline } from '@/components/ui/confirm-inline'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select } from '@/components/ui/select'
@@ -38,8 +39,11 @@ import {
   MAX_SLOTS_PER_SAVE,
   MAX_TEMPLATES,
   MAX_TEMPLATE_NAME,
+  mirrorTiming,
   newPlan,
   planToTemplate,
+  roomSkips,
+  skippedTimes,
   slotKey,
   slotsForRoom,
   SLOT_LENGTH_OPTIONS,
@@ -56,6 +60,8 @@ export type { GeneratedSlot }
 interface BulkSlotGeneratorProps {
   venues: { id: string; name: string; capacity: number | null }[]
   eventDays: { date: string; label: string }[]
+  /** The gathering's timezone: the editor resolves every generated slot against it before saving. */
+  timezone: string
   onGenerate: (slots: GeneratedSlot[]) => void
   onCancel: () => void
   isSaving?: boolean
@@ -72,6 +78,7 @@ const lengthLabel = (minutes: number) =>
 export function BulkSlotGenerator({
   venues,
   eventDays,
+  timezone,
   onGenerate,
   onCancel,
   isSaving = false,
@@ -90,6 +97,7 @@ export function BulkSlotGenerator({
   const [templateChoice, setTemplateChoice] = React.useState('')
   const [templateName, setTemplateName] = React.useState('')
   const [namingTemplate, setNamingTemplate] = React.useState(false)
+  const [confirmReplace, setConfirmReplace] = React.useState(false)
   const [templateError, setTemplateError] = React.useState<string | null>(null)
 
   // Rooms added or dates changed while the editor is open: start that shape from the defaults
@@ -113,7 +121,9 @@ export function BulkSlotGenerator({
       const rows = syncRooms(current.rooms.map((room, i) => (i === index ? { ...room, ...patch } : room)))
       return prev.map((d) => {
         if (d.dayDate === day.dayDate) return { ...d, rooms: rows }
-        return sameEveryDay ? { ...d, rooms: copyDayRooms(rows, d.rooms) } : d
+        // "Same times every day" mirrors the hours, never a closure: a room shut on the Sunday
+        // is shut on the Sunday alone.
+        return sameEveryDay ? { ...d, rooms: mirrorTiming(rows, d.rooms) } : d
       })
     })
   }
@@ -132,7 +142,7 @@ export function BulkSlotGenerator({
     setPlan((prev) => {
       const source = prev.find((d) => d.dayDate === day.dayDate)
       if (!source) return prev
-      return prev.map((d) => (d.dayDate === source.dayDate ? d : { ...d, rooms: copyDayRooms(source.rooms, d.rooms) }))
+      return prev.map((d) => (d.dayDate === source.dayDate ? d : { ...d, rooms: mirrorTiming(source.rooms, d.rooms) }))
     })
   }
 
@@ -145,6 +155,10 @@ export function BulkSlotGenerator({
   )
   const tooMany = counts.total > MAX_SLOTS_PER_SAVE
   const invalidRows = rooms.filter((room) => !room.closed && room.end <= room.start)
+  // Times the gathering's timezone does not have (the morning the clocks go forward). The route
+  // refuses to move a slot silently, so the editor has to ask before the POST, not after it.
+  const skipped = React.useMemo(() => skippedTimes(allSlots, timezone), [allSlots, timezone])
+  const firstSkipped = skipped.size > 0 ? [...skipped].sort()[0]!.split('|') : null
 
   /* ─────────────────────────── templates ─────────────────────────── */
 
@@ -158,12 +172,18 @@ export function BulkSlotGenerator({
     }
   }
 
-  const saveTemplate = async () => {
+  /** The saved template this name would overwrite, if any. */
+  const replacing = saved.find((t) => t.name.toLowerCase() === templateName.trim().toLowerCase()) ?? null
+
+  const saveTemplate = async (confirmedReplace = false) => {
     const name = templateName.trim()
     if (!name) { setTemplateError('Give the template a name.'); return }
+    // Saving over a name is a replacement, and a saved shape is work: say so before it goes.
+    if (replacing && !confirmedReplace) { setConfirmReplace(true); return }
     const kept = saved.filter((t) => t.name.toLowerCase() !== name.toLowerCase())
     if (kept.length >= MAX_TEMPLATES) { setTemplateError(`Keep at most ${MAX_TEMPLATES} templates — delete one first.`); return }
     await commitTemplates([...kept, planToTemplate(name, plan, (venueId) => nameOf(venueId))])
+    setConfirmReplace(false)
     setNamingTemplate(false)
     setTemplateName('')
     setTemplateChoice(name)
@@ -259,10 +279,13 @@ export function BulkSlotGenerator({
                   maxLength={MAX_TEMPLATE_NAME}
                   placeholder="e.g. Weekday shape"
                   className="h-9 w-48"
-                  onChange={(e) => setTemplateName(e.target.value)}
+                  onChange={(e) => { setTemplateName(e.target.value); setConfirmReplace(false) }}
                 />
+                {replacing && !confirmReplace && (
+                  <span className="text-xs text-signal-amber" data-testid="slot-template-replaces">Replaces “{replacing.name}”</span>
+                )}
                 <Button size="sm" onClick={() => void saveTemplate()} loading={templatesBusy}>Save</Button>
-                <Button size="sm" variant="ghost" onClick={() => { setNamingTemplate(false); setTemplateError(null) }}>Cancel</Button>
+                <Button size="sm" variant="ghost" onClick={() => { setNamingTemplate(false); setConfirmReplace(false); setTemplateError(null) }}>Cancel</Button>
               </>
             ) : (
               <Button size="sm" variant="outline" onClick={() => setNamingTemplate(true)} disabled={templatesBusy}>
@@ -270,6 +293,17 @@ export function BulkSlotGenerator({
               </Button>
             )}
           </div>
+          {confirmReplace && replacing && (
+            <ConfirmInline
+              layout="inline"
+              className="w-full"
+              message={<>Replace the saved template “{replacing.name}” with this configuration? The old shape is not kept.</>}
+              confirmLabel="Replace"
+              loading={templatesBusy}
+              onConfirm={() => void saveTemplate(true)}
+              onCancel={() => setConfirmReplace(false)}
+            />
+          )}
           {templateError && <p role="alert" className="w-full text-sm text-destructive">{templateError}</p>}
         </div>
       )}
@@ -280,19 +314,26 @@ export function BulkSlotGenerator({
           const locked = index > 0 && room.sameAsFirst
           const generated = slotsForRoom(room, day?.dayDate ?? '')
           const rowConflicts = generated.filter((s) => conflicts.has(slotKey(s))).length
+          const rowSkipped = roomSkips(skipped, generated)
           return (
             <div
               key={room.venueId}
               data-testid="slot-room-row"
               data-venue-id={room.venueId}
-              className={cn('rounded-lg border p-3', room.closed && 'bg-muted/40', rowConflicts > 0 && 'border-destructive/40')}
+              data-closed={room.closed ? 'true' : 'false'}
+              className={cn('rounded-lg border p-3', room.closed && 'bg-muted/40', (rowConflicts > 0 || rowSkipped) && 'border-destructive/40')}
             >
               <div className="flex flex-wrap items-end gap-3">
                 <div className="min-w-32 flex-1">
                   <p className="text-sm font-medium">{nameOf(room.venueId)}</p>
-                  <p className="text-xs text-muted-foreground">
-                    {room.closed ? 'Closed' : `${plural(generated.filter((s) => !s.isBreak).length, 'slot')}${generated.some((s) => s.isBreak) ? `, ${plural(generated.filter((s) => s.isBreak).length, 'break')}` : ''}`}
+                  <p className="text-xs text-muted-foreground" data-testid="slot-room-summary">
+                    {room.closed ? 'Closed this day' : `${plural(generated.filter((s) => !s.isBreak).length, 'slot')}${generated.some((s) => s.isBreak) ? `, ${plural(generated.filter((s) => s.isBreak).length, 'break')}` : ''}`}
                   </p>
+                  {rowSkipped && (
+                    <p className="text-xs text-destructive" data-testid="slot-room-skipped">
+                      The clocks change this morning: one of these times does not exist. Start later, or use a different slot length.
+                    </p>
+                  )}
                 </div>
                 <div className="space-y-1">
                   <Label htmlFor={`${rowId}-start`} className="text-xs">Start</Label>
@@ -403,6 +444,12 @@ export function BulkSlotGenerator({
           {invalidRows.length === 1 ? 'One room ends' : `${invalidRows.length} rooms end`} before it starts — no slots are generated there.
         </p>
       )}
+      {firstSkipped && (
+        <p role="alert" className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-sm text-destructive">
+          {formatClock(firstSkipped[1]!)} does not exist on {eventDays.find((d) => d.date === firstSkipped[0])?.label ?? firstSkipped[0]} in {timezone}: the
+          clocks go forward that morning. Change the hours or the slot length for the rooms marked below before adding slots.
+        </p>
+      )}
       {tooMany && (
         <p role="alert" className="text-sm text-destructive">
           That is {plural(counts.total, 'slot')}; at most {MAX_SLOTS_PER_SAVE.toLocaleString()} can be saved at once. Shorten the hours or do one day at a time.
@@ -414,7 +461,7 @@ export function BulkSlotGenerator({
         <Button
           onClick={() => onGenerate(allSlots)}
           loading={isSaving}
-          disabled={counts.total === 0 || conflicts.size > 0 || tooMany}
+          disabled={counts.total === 0 || conflicts.size > 0 || tooMany || skipped.size > 0}
         >
           {!isSaving && <CalendarPlus className="h-4 w-4 mr-2" aria-hidden="true" />}
           Add {plural(counts.total, 'slot')}

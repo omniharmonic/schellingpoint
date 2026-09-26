@@ -22,12 +22,14 @@ import {
 import { parseSlot } from '@/lib/scheduling/inputs'
 import { assertNoOverlap } from '@/lib/scheduling/slots'
 import { loadEvent, selectTimeSlots, syncProgramRecords } from '@/lib/scheduling/program'
+import { MAX_SLOTS_PER_SAVE } from '@/lib/scheduling/slot-blocks'
 
 export const dynamic = 'force-dynamic'
 
 const READ_ROLES = rolesWithAny('manageVenues', 'manageSchedule', 'approveProposals')
 const WRITE_ROLES = rolesWith('manageVenues')
-const MAX_SLOTS = 2000
+// One number, shared with the editor that builds these bodies (src/lib/scheduling/slot-blocks.ts).
+const MAX_SLOTS = MAX_SLOTS_PER_SAVE
 
 export async function GET(request: Request, { params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params
@@ -49,12 +51,18 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
 
   try {
     const event = await loadEvent(ctx.event.id)
-    const rawSlots = Array.isArray(body.slots) ? body.slots : [body]
+    // A bulk save names the offending slot in `field` (`slots.3.start`): one impossible time in
+    // two thousand — a wall clock the timezone skips on the morning the clocks go forward, say —
+    // must say which one, not just that the batch was refused.
+    const bulk = Array.isArray(body.slots)
+    const rawSlots = bulk ? (body.slots as unknown[]) : [body]
     if (rawSlots.length === 0) return fail(400, 'Add at least one time slot')
     if (rawSlots.length > MAX_SLOTS) return fail(400, `At most ${MAX_SLOTS} slots can be saved at once`)
     const slots = rawSlots.map((raw, i) => {
-      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new InputError(`Slot ${i + 1} is not an object`, 'slots')
-      return parseSlot(raw as Record<string, unknown>, event)
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+        throw new InputError(`Slot ${i + 1} is not an object`, bulk ? `slots.${i}` : 'slots')
+      }
+      return parseSlot(raw as Record<string, unknown>, event, bulk ? `slots.${i}.` : '')
     })
 
     const created = await asAccount(ctx.viewer.accountId, async (tx) => {
