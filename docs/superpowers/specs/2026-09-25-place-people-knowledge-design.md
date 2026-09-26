@@ -193,3 +193,17 @@ Stripe sandbox verification runs in parallel and is reported separately.
 - Profile route is per gathering (`/e/[slug]/people/[did]`), not a global profile page, so the
   members-only boundary stays where it is.
 - Interests cap 15.
+
+## 8. Follow-ups noted during review (not in this release)
+
+- Onboarding is per account (`profiles.onboarding_completed`), so the per-gathering sharing
+  switches are only offered in the first gathering a person lands on; later gatherings take the
+  defaults (handle shared, email not). A per-gathering `event_members.onboarded_at` would let the
+  step run once per gathering. The switches remain reachable in Account → "What you share at …".
+- `GET /api/v1/members/[did]` uses "shared in any gathering we both belong to"; the per-gathering
+  card is scoped exactly. Revisit if "every" turns out to be the expectation.
+- Fall-back DST days: `parseTimeInTimezone` resolves a repeated wall-clock hour to its first
+  occurrence, so a 60-minute slot spanning it is stored as 120 real minutes. Pre-existing; needs a
+  decision on which occurrence a gathering means.
+- Production sends no Content-Security-Policy header. Adding one must allow the MapLibre worker
+  (same origin), tile host for connect-src/img-src, `data:` and `blob:` images, and `worker-src`.
