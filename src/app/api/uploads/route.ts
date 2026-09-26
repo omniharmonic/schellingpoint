@@ -4,10 +4,11 @@ import { assertSameOrigin, requireViewer } from '@/lib/auth/viewer'
 import { canRolePerform } from '@/lib/permissions'
 import { isHiddenEvent } from '@/lib/events'
 import { MAX_UPLOAD_BYTES, sniffImage, storeImage } from '@/lib/storage/files'
+import { readUploadBody } from '@/lib/storage/body'
 import type { EventRoleName } from '@/types/event'
 
 /**
- * POST /api/uploads  multipart/form-data: file, and one of
+ * POST /api/uploads: binary image bytes with query parameters, or legacy multipart fields:
  *
  *   event=<slug|id>   an event asset (logo, banner); the viewer must be one of its organizers
  *                     (owner/admin). ≤ 5 MB.
@@ -69,24 +70,16 @@ export async function POST(request: Request) {
     return err(413, `Images can be at most ${FLOORPLAN_MAX_BYTES / (1024 * 1024)} MB.`, 'TooLarge')
   }
 
-  // Two different failures used to share one message, and it was the wrong message for the one
-  // that actually happens: a body that arrives short (a stalled upload, a file whose bytes ran
-  // out) parses no better than JSON would, and the uploader was told to send multipart — which
-  // is what it had just sent. Separate them, and log the parse failure: nothing about it reaches
-  // the browser otherwise, so production had no way to tell the two apart.
-  const contentType = (request.headers.get('content-type') ?? '').toLowerCase()
-  if (!contentType.includes('multipart/form-data')) {
-    return err(415, 'Send the image as multipart/form-data with a "file" field.', 'InvalidBody')
-  }
-
   let form: FormData
   try {
-    form = await request.formData()
+    form = await readUploadBody(request, FLOORPLAN_MAX_BYTES + 64 * 1024)
   } catch (e) {
-    console.error('[uploads] multipart body could not be read:', e instanceof Error ? e.message : e)
-    return err(400, 'The upload did not finish. Check your connection and try again.', 'IncompleteUpload')
+    if (e instanceof Error && e.message === 'TooLarge') return err(413, 'Images can be at most 8 MB.', 'TooLarge')
+    if (e instanceof Error && e.message === 'InvalidBody') return err(415, 'Send image bytes or multipart/form-data.', 'InvalidBody')
+    // Log structure only: never log a person's filename, image bytes or session.
+    console.error('[uploads] body read failed:', e instanceof Error ? e.name : 'error')
+    return err(400, 'The upload did not finish. Choose the image again and retry.', 'IncompleteUpload')
   }
-
   const eventRef = form.get('event')
   const purpose = form.get('purpose')
   if ((eventRef !== null && typeof eventRef !== 'string') || (purpose !== null && typeof purpose !== 'string')) {

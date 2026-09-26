@@ -27,7 +27,7 @@ export interface PageHeaderProps extends Omit<React.HTMLAttributes<HTMLDivElemen
 export function PageHeader({ title, subtitle, actions, eyebrow, as: Heading = 'h1', className, ...props }: PageHeaderProps) {
   return (
     <div
-      className={cn('mb-6 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between', className)}
+      className={cn('mb-6 flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between', className)}
       {...props}
     >
       <div className="min-w-0 flex-1">
@@ -35,7 +35,7 @@ export function PageHeader({ title, subtitle, actions, eyebrow, as: Heading = 'h
         <Heading className="page-title text-balance">{title}</Heading>
         {subtitle && <p className="mt-2 max-w-2xl text-base leading-relaxed text-muted-foreground">{subtitle}</p>}
       </div>
-      {actions && <div className="flex shrink-0 flex-wrap items-center gap-2 sm:justify-end">{actions}</div>}
+      {actions && <div className="flex shrink-0 flex-wrap items-center gap-2 lg:justify-end">{actions}</div>}
     </div>
   )
 }

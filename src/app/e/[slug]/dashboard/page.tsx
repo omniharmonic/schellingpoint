@@ -6,6 +6,7 @@
  * from `useVoting` in the client component. No vote counts are shown here, ever: there is
  * no leaderboard and no "top sessions" (spec §3 "attestations, not scores"; §5.3).
  */
+import { loadEventActivity } from '@/lib/events/activity'
 import { notFound } from 'next/navigation'
 import { sql } from '@/lib/db'
 import { eventRole, getViewer } from '@/lib/auth/viewer'
@@ -73,6 +74,7 @@ export default async function DashboardPage({ params }: PageProps) {
   }
 
   const data: DashboardData = {
+    activity: await loadEventActivity(event.id),
     stats: {
       sessions: counts?.public_sessions ?? 0,
       scheduled: counts?.scheduled ?? 0,

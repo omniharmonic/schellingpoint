@@ -1,3 +1,5 @@
+import { loadEventActivity } from '@/lib/events/activity'
+import { GatheringPulse } from '@/components/home/GatheringPulse'
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { ArrowRight, Calendar, Globe, MapPin, MessagesSquare, Users, Vote, FileText } from 'lucide-react'
@@ -24,6 +26,7 @@ import { plural } from '@/lib/format'
  */
 
 interface EventStats {
+  scheduledCount: number
   sessionCount: number
   participantCount: number
   trackCount: number
@@ -39,10 +42,11 @@ interface RecentSession {
 
 async function loadStats(eventId: string): Promise<{ stats: EventStats; recent: RecentSession[] }> {
   const [[counts], recent] = await Promise.all([
-    sql<{ sessions: number; participants: number; tracks: number }[]>`
+    sql<{ sessions: number; scheduled: number; participants: number; tracks: number }[]>`
       select
         (select count(*) from sessions where event_id = ${eventId} and status in ('approved', 'scheduled')
            and not coalesce(hidden_by_moderation, false))::int as sessions,
+        (select count(*) from sessions where event_id = ${eventId} and status = 'scheduled' and not coalesce(hidden_by_moderation, false))::int as scheduled,
         (select count(*) from event_members where event_id = ${eventId})::int as participants,
         (select count(*) from tracks where event_id = ${eventId} and coalesce(is_active, true))::int as tracks
     `,
@@ -57,7 +61,7 @@ async function loadStats(eventId: string): Promise<{ stats: EventStats; recent: 
     `,
   ])
   return {
-    stats: { sessionCount: counts?.sessions ?? 0, participantCount: counts?.participants ?? 0, trackCount: counts?.tracks ?? 0 },
+    stats: { scheduledCount: counts?.scheduled ?? 0, sessionCount: counts?.sessions ?? 0, participantCount: counts?.participants ?? 0, trackCount: counts?.tracks ?? 0 },
     recent,
   }
 }
@@ -80,6 +84,7 @@ export default async function EventPage({ params }: { params: Promise<{ slug: st
   ])
   const canJoin = Boolean(viewer) && !isMember && block === null
 
+  const activity = await loadEventActivity(event.id)
   const eventIsOver = event.status === 'completed' || event.status === 'archived'
   const badge = eventStatusBadge(event.status)
   const scheduleFirst = event.status === 'live' || event.status === 'completed'
@@ -287,6 +292,7 @@ export default async function EventPage({ params }: { params: Promise<{ slug: st
             </section>
           )}
         </div>
+        <div className="container mx-auto px-5 pb-12"><GatheringPulse activity={activity} slug={event.slug} sessions={stats.sessionCount} scheduled={stats.scheduledCount} participants={isMember ? stats.participantCount : null} /></div>
       </main>
       <Footer variant="minimal" event={event} />
     </div>

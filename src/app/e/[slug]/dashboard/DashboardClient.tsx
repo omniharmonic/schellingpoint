@@ -9,10 +9,11 @@
  *   6. Recently proposed · Sessions you're supporting · the assistant card
  *   7. the organizer banner, with "N of M sessions placed" while the schedule is unpublished
  *
- * The stat tiles are gone: the two counts they carried are the Now line's second line. No vote
- * totals and no leaderboard — those were removed on purpose and stay removed (spec §5.3).
+ * The overview never reveals live ballot totals. Public endorsements and finalized, k-suppressed results are shown separately.
  */
 
+import type { EventActivity } from '@/lib/events/activity'
+import { GatheringPulse } from '@/components/home/GatheringPulse'
 import * as React from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
@@ -26,7 +27,7 @@ import {
   MessagesSquare,
   Mic,
   Navigation,
-  Sparkles,
+  Compass,
   UserPlus,
   Zap,
 } from 'lucide-react'
@@ -50,6 +51,7 @@ import type { Announcement } from '@/app/api/v1/events/[slug]/announcements/rout
 import type { NextUpResponse } from '@/app/api/v1/events/[slug]/next-up/route'
 
 export interface DashboardData {
+  activity: EventActivity
   stats: {
     /** Approved + scheduled sessions. */
     sessions: number
@@ -343,6 +345,7 @@ function Dashboard({ data }: { data: DashboardData }) {
   return (
     <div className="space-y-6">
       <NowLine input={nowInput} />
+      <GatheringPulse activity={data.activity} slug={event.slug} sessions={data.stats.sessions} scheduled={data.stats.scheduled} participants={data.stats.participants} />
 
       {showJoinCard && (
         <Card accent="left" accentColor="hsl(var(--signal))">
@@ -375,7 +378,7 @@ function Dashboard({ data }: { data: DashboardData }) {
           <CardContent className="pt-6">
             <div className="flex items-start gap-4">
               <div className="p-3 rounded-lg bg-primary/10">
-                <Sparkles className="h-6 w-6 text-primary" aria-hidden />
+                <Compass className="h-6 w-6 text-primary" aria-hidden />
               </div>
               <div className="min-w-0 flex-1">
                 <h2 className="font-semibold">Nothing here yet — here’s what to do first</h2>

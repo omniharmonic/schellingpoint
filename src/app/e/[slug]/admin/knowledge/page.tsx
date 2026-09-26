@@ -8,7 +8,7 @@
 
 import * as React from 'react'
 import Link from 'next/link'
-import { Archive, BellRing, Bot, Check, CheckCircle2, Copy, Cpu, Download, FileText, Loader2, RefreshCw, Sparkles, XCircle } from 'lucide-react'
+import { Archive, BellRing, Bot, Check, CheckCircle2, Copy, Cpu, Download, FileText, Loader2, RefreshCw, XCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -326,7 +326,7 @@ export default function AdminKnowledgePage() {
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <Button variant="outline" size="sm" loading={working === 'summaries'} disabled={!data.providers.chat.configured || !data.totals.with_transcript} onClick={() => run('summaries')}>
-                <Sparkles className="mr-1.5 h-4 w-4" aria-hidden />Generate summaries and themes
+                <FileText className="mr-1.5 h-4 w-4" aria-hidden />Generate summaries and themes
               </Button>
               <JobBadge job={summariesJob} />
             </div>

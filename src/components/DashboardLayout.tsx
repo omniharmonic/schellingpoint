@@ -1,5 +1,7 @@
 'use client'
 
+import { EventLogo } from '@/components/EventLogo'
+
 import { isParticipationOpen } from '@/lib/events/lifecycle'
 import * as React from 'react'
 import { WorkspaceHeader, type WorkspaceBack } from '@/components/WorkspaceHeader'
@@ -206,13 +208,7 @@ function DashboardShell({ children }: DashboardLayoutProps) {
         {/* Event branding */}
         <div className="p-5 min-h-[100px] border-b border-border">
           <Link href={`/e/${event.slug}`} className="flex items-center gap-2.5 group">
-            {event.logoUrl ? (
-              <img src={event.logoUrl} alt="" className="h-8 w-8 rounded object-contain flex-shrink-0" />
-            ) : (
-              <div className="h-8 w-8 rounded bg-primary/10 flex items-center justify-center text-primary font-display font-bold text-sm flex-shrink-0" aria-hidden="true">
-                {event.name.charAt(0)}
-              </div>
-            )}
+            <EventLogo url={event.logoUrl} name={event.name} className="h-9 w-9 shrink-0 rounded-lg" />
             <div className="min-w-0">
               <div className="font-display font-bold text-sm leading-tight truncate group-hover:text-primary transition-colors">
                 {event.name}
@@ -247,9 +243,7 @@ function DashboardShell({ children }: DashboardLayoutProps) {
       <div className="md:hidden fixed top-0 left-0 right-0 z-30 border-b border-border bg-background">
         <div className="flex items-center justify-between h-16 px-4">
           <Link href={`/e/${event.slug}`} className="flex items-center gap-2 min-w-0 flex-1 mr-2">
-            <div className="h-6 w-6 rounded bg-primary/10 flex items-center justify-center text-primary font-display font-bold text-xs flex-shrink-0" aria-hidden="true">
-              {event.name.charAt(0)}
-            </div>
+            <EventLogo url={event.logoUrl} name={event.name} className="h-8 w-8 shrink-0 rounded-lg" />
             <span className="font-display font-bold text-sm truncate">{event.name}</span>
           </Link>
           <div className="flex items-center gap-0.5">

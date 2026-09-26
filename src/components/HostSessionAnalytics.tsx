@@ -64,9 +64,9 @@ export function HostSessionAnalytics({ eventSlug, sessionId }: { eventSlug: stri
       {!data ? (
         <div className="flex justify-center py-4" role="status" aria-label="Loading your session’s numbers"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>
       ) : <>
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+        <div className="grid grid-cols-3 gap-2 sm:gap-3">
           <Stat label="RSVPs" value={data.rsvps} />
-          <Stat label="On the waitlist" value={data.waitlist} />
+          <Stat label="Waitlist" value={data.waitlist} />
           <Stat label="Saved it" value={data.favorites} />
         </div>
 

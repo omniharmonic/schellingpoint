@@ -1,5 +1,6 @@
 'use client'
 
+import { PushNotifications } from '@/components/PushNotifications'
 import * as React from 'react'
 import Link from 'next/link'
 import { Mail, Bell, Smartphone, Loader2, ChevronRight } from 'lucide-react'
@@ -24,7 +25,7 @@ const ROW_GRID = 'grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_5rem_5rem_6
 const CHANNELS: { key: NotificationChannel; label: string; icon: React.ComponentType<{ className?: string }>; comingSoon?: boolean }[] = [
   { key: 'email_enabled', label: 'Email', icon: Mail },
   { key: 'in_app_enabled', label: 'In-app', icon: Bell },
-  { key: 'push_enabled', label: 'Push', icon: Smartphone, comingSoon: true },
+  { key: 'push_enabled', label: 'Push', icon: Smartphone },
 ]
 
 function PreferenceRow({ category, pref, saving, onToggle }: {
@@ -80,6 +81,7 @@ export default function NotificationSettingsPage() {
         <span aria-current="page" className="text-foreground">Notification preferences</span>
       </nav>
       <PageHeader title="Notification preferences" subtitle={`How you hear about ${event.name}. Each switch saves on its own.`} />
+      <PushNotifications />
       <Card>
         <CardContent className="p-4 sm:p-6">
           {isLoading ? <div className="flex items-center justify-center py-8" role="status" aria-label="Loading preferences">
@@ -96,7 +98,7 @@ export default function NotificationSettingsPage() {
             </div>
             {categories.map(category => <PreferenceRow key={category} category={category} pref={getPreference(category)} saving={savingCategory === category} onToggle={toggleChannel} />)}
             <p className="mt-4 border-t border-border pt-4 text-xs text-muted-foreground">
-              Ticket confirmations are always emailed, since they are your receipt. Push notifications are not available yet.
+              Ticket confirmations are always emailed, since they are your receipt. Push updates are delivered to devices you have enabled, usually within five minutes.
             </p>
           </>}
         </CardContent>

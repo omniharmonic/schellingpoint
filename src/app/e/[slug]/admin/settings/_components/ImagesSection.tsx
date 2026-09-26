@@ -27,11 +27,12 @@ function ImageField({ id, label, hint, url, upload, onPersist, previewClassName 
     const file = e.target.files?.[0]
     if (!file) return
     setBusy(true); setError(null)
-    const result = await upload(file)
-    if (!result.success || !result.url) setError(result.error || 'Upload failed. Try again.')
-    else if (!(await onPersist(result.url))) setError('Uploaded, but the event could not be updated. Try again.')
-    setBusy(false)
-    if (inputRef.current) inputRef.current.value = ''
+    try {
+      const result = await upload(file)
+      if (!result.success || !result.url) setError(result.error || 'Upload failed. Try again.')
+      else if (!(await onPersist(result.url))) setError('Uploaded, but the event could not be updated. Try again.')
+    } catch { setError('The image could not be saved. Please try again.') }
+    finally { setBusy(false); if (inputRef.current) inputRef.current.value = '' }
   }
   const handleRemove = async () => {
     setBusy(true); setError(null)

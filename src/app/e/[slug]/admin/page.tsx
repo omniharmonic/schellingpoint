@@ -15,6 +15,7 @@ import { apiFetch, ApiError } from '@/lib/api/client'
 import { SESSION_STATUS } from '@/lib/labels'
 import { plural } from '@/lib/format'
 import { cn } from '@/lib/utils'
+import { PhaseOverview } from '@/components/admin/PhaseOverview'
 import { AdminStats } from '@/components/admin/AdminStats'
 import { SessionCard } from '@/components/admin/SessionCard'
 import { SessionTable, type SortDirection, type SortField } from '@/components/admin/SessionTable'
@@ -324,6 +325,8 @@ export default function AdminPage() {
             </Button>
           )}
         />
+
+        {isAdmin && <PhaseOverview />}
 
         {justCreated && (
           <Alert variant="success">

@@ -46,9 +46,10 @@ export function LifecycleSection({ event, status, onChanged, hasIdentity }: Life
   const toggleAuto = async (next: boolean) => {
     setAuto(next)
     setSavingAuto(true)
-    await save({ auto_lifecycle: next }, next
+    const result = await save({ auto_lifecycle: next }, next
       ? 'Phases will move on the dates you set.'
       : 'Phase changes are yours again.')
+    if (!result) setAuto(!next)
     setSavingAuto(false)
   }
 

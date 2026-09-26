@@ -12,13 +12,13 @@
   "theme_color": "#245043",
   "categories": ["productivity", "social", "education"],
   "icons": [
-    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
-    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
-    { "src": "/icons/maskable-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
-    { "src": "/icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+    { "src": "/icons/unconference-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/unconference-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/unconference-maskable-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
+    { "src": "/icons/unconference-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
   ],
   "shortcuts": [
-    { "name": "Your gatherings", "url": "/", "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" }] },
-    { "name": "Browse gatherings", "url": "/events", "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" }] }
+    { "name": "Your gatherings", "url": "/", "icons": [{ "src": "/icons/unconference-192.png", "sizes": "192x192", "type": "image/png" }] },
+    { "name": "Browse gatherings", "url": "/events", "icons": [{ "src": "/icons/unconference-192.png", "sizes": "192x192", "type": "image/png" }] }
   ]
 }

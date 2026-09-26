@@ -14,7 +14,7 @@
 
 import * as React from 'react'
 import Link from 'next/link'
-import { MessageCircleQuestion, Send, Sparkles } from 'lucide-react'
+import { MessageCircleQuestion, Send, LoaderCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { Card, CardContent } from '@/components/ui/card'
@@ -288,7 +288,7 @@ export function AskPanel({ eventSlug, variant = 'member', showThemes = false, ad
                       <AnswerText text={x.answer} />
                     ) : (
                       <span className="inline-flex items-center gap-2 text-muted-foreground">
-                        <Sparkles className="h-4 w-4 animate-pulse" aria-hidden />
+                        <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden />
                         Reading the transcripts…
                       </span>
                     )}

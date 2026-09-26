@@ -20,15 +20,15 @@
  *   · POST, PUT, PATCH, DELETE — a write is never served from, or written to, a cache.
  */
 
-const VERSION = 'v1'
+const VERSION = 'v2'
 const SHELL = `unconference-shell-${VERSION}`
 const SCHEDULE = `unconference-schedule-${VERSION}`
 
 const SHELL_ASSETS = [
   '/offline',
   '/manifest.webmanifest',
-  '/icons/icon-192.png',
-  '/icons/icon-512.png',
+  '/icons/unconference-192.png',
+  '/icons/unconference-512.png',
 ]
 
 self.addEventListener('install', (event) => {
@@ -117,4 +117,25 @@ self.addEventListener('fetch', (event) => {
       }),
     )
   }
+})
+
+// Payloads contain no private message text. Opening the destination still requires app auth.
+self.addEventListener('push', (event) => {
+  let data = {}
+  try { data = event.data ? event.data.json() : {} } catch { /* still show a generic update */ }
+  event.waitUntil(self.registration.showNotification('unconference', {
+    body: 'You have a new gathering update. Open the app to read it.',
+    icon: '/icons/unconference-192.png',
+    tag: typeof data.tag === 'string' ? data.tag : 'gathering-update',
+    data: { url: typeof data.url === 'string' ? data.url : '/' },
+  }))
+})
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close()
+  let target = new URL('/', self.location.origin)
+  try {
+    const candidate = new URL(event.notification.data?.url || '/', self.location.origin)
+    if (candidate.origin === self.location.origin) target = candidate
+  } catch { /* ignore malformed destinations */ }
+  event.waitUntil(self.clients.openWindow(target.href))
 })

@@ -102,7 +102,10 @@ export async function checkEligibility(
     return { eligible: false, code: 'NotMember', reason: 'Join this gathering to vote.', override: null }
   }
   const override = row.member_credits ?? row.tier_credits ?? null
-  if (row.gated && !row.has_ticket) {
+  // Appointed organizers already have participation rights. They retain the same
+  // ballot budget, deadlines and privacy rules; only admission is exempted.
+  const organizer = row.role === 'owner' || row.role === 'admin'
+  if (row.gated && !row.has_ticket && !organizer) {
     return {
       eligible: false,
       code: 'TicketRequired',
@@ -110,7 +113,7 @@ export async function checkEligibility(
       override,
     }
   }
-  if (phase === 'attendance') {
+  if (phase === 'attendance' && !organizer) {
     const gate = await checkinGate(db, eventId, accountId)
     if (!gate.eligible) return { eligible: false, code: gate.code!, reason: gate.reason!, override }
   }

@@ -91,6 +91,9 @@ services:
     init: true
     # Explicit, least-privilege environment: no PLC rotation key, no backup or database-owner credentials.
     environment: &app-env
+      WEB_PUSH_PUBLIC_KEY: ${WEB_PUSH_PUBLIC_KEY:-}
+      WEB_PUSH_PRIVATE_KEY: ${WEB_PUSH_PRIVATE_KEY:-}
+      WEB_PUSH_SUBJECT: ${WEB_PUSH_SUBJECT:-https://unconference.events}
       NODE_ENV: production
       PORT: '3000'
       HOSTNAME: 0.0.0.0

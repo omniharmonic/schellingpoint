@@ -48,14 +48,8 @@ export async function uploadImage(file: File, options: UploadOptions = {}): Prom
   const validationError = validateFile(file, Math.min(options.maxSize ?? serverCap, serverCap));
   if (validationError) return { success: false, error: validationError };
 
-  // Read the bytes here rather than handing `fetch` the File.
-  //
-  // A File is a handle, not data: a photo still in iCloud, a file moved or re-synced since the
-  // picker returned it, or an iOS HEIC the browser transcodes lazily can report one size and then
-  // deliver fewer bytes. `fetch` has already sent that size as Content-Length, so the multipart
-  // body arrives truncated and the server can only say "that was not a multipart body" — the
-  // upload looks broken for a reason nobody can act on. Reading first turns an unreadable file
-  // into a plain message, and guarantees the request body matches its declared length.
+  // Materialize cloud-backed files before starting the request, so a read failure
+  // produces an actionable message instead of an incomplete network body.
   let bytes: ArrayBuffer;
   try {
     bytes = await file.arrayBuffer();
@@ -64,13 +58,16 @@ export async function uploadImage(file: File, options: UploadOptions = {}): Prom
   }
   if (bytes.byteLength === 0) return { success: false, error: 'That file is empty.' };
 
-  const body = new FormData();
-  body.append('file', new Blob([bytes], { type: file.type || 'application/octet-stream' }), file.name || 'upload');
-  if (options.event) body.append('event', options.event);
-  if (options.purpose) body.append('purpose', options.purpose);
-
+  // Send materialized bytes directly. Filenames and multipart boundaries are not needed
+  // by a content-addressed store and have proved unreliable through some browser/proxy paths.
+  const query = new URLSearchParams();
+  if (options.event) query.set('event', options.event);
+  if (options.purpose) query.set('purpose', options.purpose);
   try {
-    const response = await fetch('/api/uploads', { method: 'POST', body, credentials: 'same-origin' });
+    const response = await fetch(`/api/uploads?${query}`, {
+      method: 'POST', body: bytes, credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/octet-stream' },
+    });
     const data = (await response.json().catch(() => ({}))) as { url?: string; error?: string };
     if (!response.ok || !data.url) {
       if (response.status === 401) return { success: false, error: 'Sign in again to upload images.' };
@@ -97,8 +94,8 @@ export function uploadEventBanner(file: File, event?: string): Promise<UploadRes
  * Upload the signed-in account's own profile photo (≤ 2 MB) and return its URL. Throws an Error
  * with a message fit to show — the profile editors expect that shape.
  *
- * Deliberately the same path as every other image: a multipart body must never travel through the
- * JSON client, which sets `Content-Type` and would leave the server unable to parse the parts.
+ * Deliberately the same path as every other image: image bytes must never travel through the
+ * JSON client, which serializes bodies and sets a different Content-Type.
  */
 export async function uploadAvatar(file: File): Promise<string> {
   const result = await uploadImage(file, { purpose: 'avatar' });

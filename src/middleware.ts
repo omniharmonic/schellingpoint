@@ -12,7 +12,7 @@ import { resolveGatheringHost } from '@/lib/events/hosts'
 
 export const config = {
   runtime: 'nodejs',
-  matcher: ['/((?!_next/|favicon\\.ico$|icon\\.svg$).*)'],
+  matcher: ['/((?!api/|uploads/|_next/|favicon\\.ico$|icon\\.svg$).*)'],
 }
 
 /** App paths that mean the same thing on every host (APIs, auth, assets, site pages). */

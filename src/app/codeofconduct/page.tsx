@@ -1,184 +1,30 @@
-'use client'
-
+import Link from 'next/link'
 import { SiteHeader } from '@/components/SiteHeader'
 import { Footer } from '@/components/Footer'
 
 export default function CodeOfConductPage() {
-  return (
-    <div className="min-h-screen bg-background flex flex-col">
-      <SiteHeader />
-
-      {/* Content */}
-      <main className="container mx-auto px-5 py-12 max-w-3xl flex-1">
-        <h1 className="page-title mb-2">Code of conduct</h1>
-        <p className="text-muted-foreground mb-4">Last updated: February 2026</p>
-        {/*
-          Each gathering may publish its own code of conduct and require people to accept it
-          when they join (MT §12.19). This page is the floor, not the ceiling: a gathering's own
-          document adds to it and never replaces it, and it is linked from that gathering's own
-          join screen and settings.
-        */}
-        <p className="mb-8 rounded-xl border bg-muted/40 p-4 text-sm text-muted-foreground">
-          This is the floor for every gathering on unconference. A gathering may also publish its own code of
-          conduct, and may ask you to accept it when you join — you will find the link on its join screen and
-          under Settings once you are a member. A gathering&apos;s own document adds to this one; it never
-          replaces it.
-        </p>
-
-        <div className="prose prose-invert prose-sm max-w-none space-y-8">
-          {/* 1. Our Pledge */}
-          <section>
-            <h2 className="text-xl font-semibold mb-3">1. Our pledge</h2>
-            <p className="text-muted-foreground leading-relaxed">
-              unconference brings together builders, researchers, organizers, and community members who share a commitment to decentralized technology in service of local communities. We pledge to make participation in our event, online spaces, and ongoing community a harassment-free experience for everyone — regardless of age, body size, disability, ethnicity, sex characteristics, gender identity and expression, level of experience, education, socio-economic status, nationality, personal appearance, race, religion, sexual identity, or orientation.
-            </p>
-            <p className="text-muted-foreground leading-relaxed mt-3">
-              Your safety and comfort are our priority. If you have questions or concerns at any point before, during, or after the event, contact us at{' '}
-              <a href="mailto:kim@impactfulevents.io" className="text-primary underline underline-offset-2">kim@impactfulevents.io</a>{' '}
-              or find an event organizer member at the event information desk.
-            </p>
-          </section>
-
-          {/* 2. Scope */}
-          <section>
-            <h2 className="text-xl font-semibold mb-3">2. Scope</h2>
-            <p className="text-muted-foreground leading-relaxed mb-3">
-              This code of conduct applies across all unconference spaces, including:
-            </p>
-            <ul className="list-disc list-inside text-muted-foreground space-y-2">
-              <li><strong className="text-foreground">In-person events</strong> — the main conference, workshops, fireside chats, side events, and social gatherings, including setup and teardown</li>
-              <li><strong className="text-foreground">Online spaces</strong> — chat groups and other community channels, forum threads, and any other digital channels operated by or affiliated with a gathering</li>
-              <li><strong className="text-foreground">Public representation</strong> — when an individual is representing unconference or its community in public (e.g., posting via official social media accounts, using an official email address, or acting as a representative at external events)</li>
-            </ul>
-          </section>
-
-          {/* 3. Expected Behavior */}
-          <section>
-            <h2 className="text-xl font-semibold mb-3">3. Expected behavior</h2>
-
-            <h3 className="text-lg font-medium mt-5 mb-2">Respect</h3>
-            <ul className="list-disc list-inside text-muted-foreground space-y-2">
-              <li>Treat every participant, speaker, volunteer, and organizer with dignity and respect.</li>
-              <li>Respect the physical and digital privacy of others.</li>
-              <li>If you want to take a photo or record, get consent first. A red lanyard signifies someone who has asked not to be photographed.</li>
-              <li>Follow the Chatham House Rule when indicated: you may share information from a session, but do not attribute it to a specific speaker.</li>
-            </ul>
-
-            <h3 className="text-lg font-medium mt-5 mb-2">Collaboration</h3>
-            <ul className="list-disc list-inside text-muted-foreground space-y-2">
-              <li>Be open to new ideas and learning from others — we are stronger when we share.</li>
-              <li>In moments of disagreement, stay focused on the substance of the discussion. Agree to disagree when necessary and move toward shared goals.</li>
-              <li>Talk to people you don&apos;t know. They are friends you haven&apos;t met yet.</li>
-            </ul>
-
-            <h3 className="text-lg font-medium mt-5 mb-2">Inclusion</h3>
-            <ul className="list-disc list-inside text-muted-foreground space-y-2">
-              <li>Mingle. We all carry perspectives that can help each other in unexpected ways.</li>
-              <li>Avoid jargon, acronyms, and unnecessarily complex language when simpler phrasing will do.</li>
-              <li>Follow the &quot;Rule of 1/n&quot;: in a group of n people, speak roughly 1/nth of the time. Make one point, then let others speak.</li>
-            </ul>
-
-            <h3 className="text-lg font-medium mt-5 mb-2">Communication</h3>
-            <ul className="list-disc list-inside text-muted-foreground space-y-2">
-              <li>Assume the most generous interpretation of what someone says. If a comment seems off, ask for clarification before reacting.</li>
-              <li>Listen actively. Don&apos;t interrupt. The more concise and relatable your point, the greater its impact.</li>
-              <li>Whether on a panel or in informal conversation, avoid grandstanding and create space for others to participate.</li>
-            </ul>
-
-            <h3 className="text-lg font-medium mt-5 mb-2">Integrity (online spaces)</h3>
-            <ul className="list-disc list-inside text-muted-foreground space-y-2">
-              <li>Demonstrate transparency and honesty in all interactions.</li>
-              <li>Take responsibility for mistakes — acknowledge them, learn, and move on.</li>
-              <li>Keep discussions organized by posting in their appropriate channels or threads.</li>
-              <li>Never share API keys, secret keys, or other sensitive credentials.</li>
-              <li>Do not post unsolicited referral links, invitations to other communities, or promotional content unless specifically requested.</li>
-              <li>Do not impersonate organizers, moderators, or other community members.</li>
-              <li>Buy tickets only through the event’s official ticket page. Report unsolicited payment requests to the event organizers.</li>
-            </ul>
-          </section>
-
-          {/* 4. Unacceptable Behavior */}
-          <section>
-            <h2 className="text-xl font-semibold mb-3">4. Unacceptable behavior</h2>
-            <p className="text-muted-foreground leading-relaxed mb-3">
-              The following will not be tolerated in any unconference space:
-            </p>
-            <ul className="list-disc list-inside text-muted-foreground space-y-2">
-              <li>Harassment in any form, including sustained unwanted contact after being asked to stop</li>
-              <li>The use of sexualized language or imagery, and unwelcome sexual attention or advances</li>
-              <li>Trolling, insults, derogatory comments, and personal or political attacks</li>
-              <li>Racial slurs or discriminatory language, regardless of claimed intent or context</li>
-              <li>Publishing others&apos; private information (physical address, email, etc.) without explicit permission</li>
-              <li>Predatory behavior or disregard for the safety and dignity of others</li>
-              <li>Threats of violence — even framed as jokes</li>
-              <li>Posting NSFW content or using gratuitously offensive language</li>
-              <li>Discussing or facilitating illegal activities, including tax evasion or market manipulation</li>
-              <li>Any other conduct that would reasonably be considered inappropriate in a professional community setting</li>
-            </ul>
-          </section>
-
-          {/* 5. Enforcement */}
-          <section>
-            <h2 className="text-xl font-semibold mb-3">5. Enforcement</h2>
-
-            <h3 className="text-lg font-medium mt-5 mb-2">Reporting</h3>
-            <p className="text-muted-foreground leading-relaxed">
-              If you experience or witness a violation of this Code of Conduct:
-            </p>
-            <ul className="list-disc list-inside text-muted-foreground space-y-2 mt-2">
-              <li><strong className="text-foreground">At the event:</strong> Find an event organizer member (identifiable by a blue wristband) or go to the information desk.</li>
-              <li><strong className="text-foreground">Online or after the event:</strong> Email <a href="mailto:kim@impactfulevents.io" className="text-primary underline underline-offset-2">kim@impactfulevents.io</a> with a description of the incident, the time and location (or channel), and any supporting documentation.</li>
-            </ul>
-            <p className="text-muted-foreground leading-relaxed mt-3">
-              All reports will be reviewed and investigated. The event organizer is obligated to maintain confidentiality regarding the identity of the reporter.
-            </p>
-
-            <h3 className="text-lg font-medium mt-5 mb-2">Response: warning, then removal</h3>
-            <p className="text-muted-foreground leading-relaxed mb-3">
-              unconference uses a straightforward two-step enforcement model:
-            </p>
-            <ol className="list-decimal list-inside text-muted-foreground space-y-3">
-              <li>
-                <strong className="text-foreground">Warning</strong> — A private, direct communication to the individual explaining the nature of the violation and why the behavior is unacceptable. The individual will be given an opportunity to correct course.
-              </li>
-              <li>
-                <strong className="text-foreground">Removal</strong> — If the behavior continues after a warning — or if the initial violation is severe enough to warrant immediate action — the individual may be removed from the event and/or banned from online community spaces. This may include:
-                <ul className="list-disc list-inside ml-6 mt-2 space-y-1">
-                  <li>Expulsion from the in-person event with no refund</li>
-                  <li>Removal from chat groups and other community channels</li>
-                  <li>A ban from future unconference events and activities</li>
-                </ul>
-              </li>
-            </ol>
-            <p className="text-muted-foreground leading-relaxed mt-3">
-              The duration and conditions of any ban will be determined by the severity of the violation. The event organizer reserves the right to skip the warning step for serious violations (e.g., threats, harassment, or behavior that endangers others).
-            </p>
-
-            <h3 className="text-lg font-medium mt-5 mb-2">Appeal</h3>
-            <p className="text-muted-foreground leading-relaxed">
-              Individuals subject to enforcement actions may appeal by submitting additional context or evidence in writing to{' '}
-              <a href="mailto:conduct@schellingpoint.xyz" className="text-primary underline underline-offset-2">conduct@schellingpoint.xyz</a>{' '}
-              within 14 days of the action. Appeals will be reviewed by a member of the organizing team who was not involved in the original decision.
-            </p>
-          </section>
-
-          {/* 6. Acknowledgments */}
-          <section>
-            <h2 className="text-xl font-semibold mb-3">6. Acknowledgments</h2>
-            <p className="text-muted-foreground leading-relaxed mb-3">
-              This code of conduct is adapted from and inspired by:
-            </p>
-            <ul className="list-disc list-inside text-muted-foreground space-y-2">
-              <li>DWeb Camp Code of Conduct</li>
-              <li>Gitcoin Code of Conduct</li>
-              <li>Contributor Covenant</li>
-              <li>Mozilla Community Participation Guidelines</li>
-            </ul>
-          </section>
-        </div>
-      </main>
-
-      <Footer variant="minimal" className="mt-auto" />
-    </div>
-  )
+  const contact = process.env.NEXT_PUBLIC_CONTACT_EMAIL
+  return <div className="flex min-h-screen flex-col bg-background">
+    <SiteHeader />
+    <main className="mx-auto w-full max-w-3xl flex-1 px-5 py-12 sm:py-16">
+      <h1 className="page-title">Code of conduct</h1>
+      <p className="mt-3 text-lg leading-relaxed text-muted-foreground">Make room for people. Respect their boundaries. Take care of the gathering.</p>
+      <p className="mt-4 text-sm text-muted-foreground">Updated September 2026</p>
+      <div className="mt-8 space-y-9 text-base leading-7">
+        <section><h2 className="mb-3 text-xl font-semibold">A shared baseline</h2><p>unconference is a platform for independent, participant-led gatherings of all kinds. Everyone deserves to take part without harassment or discrimination, regardless of their background, identity, ability, beliefs or experience.</p><p className="mt-3">These expectations apply to participation on the platform and at gatherings hosted here. Each organizer is responsible for their own event and may add an event-specific code of conduct. Look for it on the gathering’s join screen or in its settings.</p></section>
+        <section><h2 className="mb-3 text-xl font-semibold">How we participate</h2><ul className="list-disc space-y-2 pl-5">
+          <li>Share the space and the conversation. Listen, make room for quieter voices, and welcome newcomers.</li>
+          <li>Discuss ideas without attacking people. Disagreement is welcome; intimidation is not.</li>
+          <li>Ask before photographing, recording or sharing someone’s words or personal information. Respect a refusal.</li>
+          <li>Respect accessibility needs, personal space and requests to stop contact.</li>
+          <li>Be honest about who you are. Do not impersonate others, spam participants or make misleading payment requests.</li>
+        </ul></section>
+        <section><h2 className="mb-3 text-xl font-semibold">What is not acceptable</h2><p>Harassment, discriminatory abuse, threats, stalking, unwanted sexual attention, sustained disruption, retaliation against someone who reports a concern, and disclosure of private information without consent are not acceptable. Organizers may intervene when conduct makes participation unsafe, whether it happens in person or online.</p></section>
+        <section className="rounded-2xl border bg-secondary/40 p-5 sm:p-6"><h2 className="mb-3 text-xl font-semibold">If something happens</h2><p>Contact the gathering’s organizers using the contact details or reporting process they provide. For content in the app, use the report action where available. Include what happened, when and where, and any information you are comfortable sharing.</p><p className="mt-3">For immediate danger, contact local emergency services or venue staff. The platform is not an emergency response service.</p>{contact && <p className="mt-3">For a concern about the platform itself, contact <a className="break-all text-primary underline underline-offset-4" href={`mailto:${contact}`}>{contact}</a>.</p>}</section>
+        <section><h2 className="mb-3 text-xl font-semibold">Responding to concerns</h2><p>Organizers should handle reports with care, limit sharing to people who need to respond, and explain their process. Responses may include a request to stop, a warning, removal of content, or restriction of participation. Serious concerns may require immediate action. Refunds are handled under the gathering’s stated ticket policy.</p><p className="mt-3">Ask the relevant organizers how to request a review of a decision. Platform moderation and event moderation are separate responsibilities.</p></section>
+        <section><h2 className="mb-3 text-xl font-semibold">For organizers</h2><p>Make your reporting contact easy to find before the event. Tell participants who can help, how concerns are handled, and any event-specific expectations. Do not rely on an unannounced wristband, lanyard color or information desk as the only way to get help.</p><p className="mt-3">Read our <Link href="/privacy" className="text-primary underline underline-offset-4">privacy policy</Link> for how the platform handles information.</p></section>
+      </div>
+    </main>
+    <Footer variant="minimal" />
+  </div>
 }

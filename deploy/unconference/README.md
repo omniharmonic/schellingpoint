@@ -243,3 +243,9 @@ instructions live at `/help/assistants`.
 - `https://pds.unconference.events/xrpc/_health` → PDS version
 - `https://<handle>.unconference.events/.well-known/atproto-did` → that account's DID
 - Relay: `https://bsky.network/xrpc/com.atproto.sync.getRepoStatus?did=<did>` once the PDS has requested a crawl
+
+## Device notifications
+
+Set `WEB_PUSH_PUBLIC_KEY` and `WEB_PUSH_PRIVATE_KEY` to a single generated VAPID key pair in the protected deployment environment. Keep the pair stable across releases: rotating it requires people to subscribe again. `WEB_PUSH_SUBJECT` defaults to `https://unconference.events`. The existing five-minute notification dispatcher also processes push deliveries.
+
+People opt in from gathering Settings → Notifications, then choose push categories. Permission is requested only after they press Enable. iPhone/iPad require the app to be installed on the Home Screen (iOS/iPadOS 16.4+). Delivery uses generic lock-screen text; gathering details are read after opening the app. Device registrations are bound to the current login session and removed on sign-out or expiry. Failed devices retry up to three times; expired provider endpoints are removed. Verify actual receipt on an opted-in device before claiming end-to-end push delivery.

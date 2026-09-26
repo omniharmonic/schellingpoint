@@ -30,7 +30,7 @@ export const metadata: Metadata = {
     icon: '/icon.svg',
     // iOS reads only `apple-touch-icon`, and only a PNG: an SVG favicon gets a screenshot of the
     // page on the home screen instead. 180×180 is the size every current iPhone asks for.
-    apple: [{ url: '/icons/apple-touch-icon.png', sizes: '180x180', type: 'image/png' }],
+    apple: [{ url: '/icons/unconference-apple.png', sizes: '180x180', type: 'image/png' }],
   },
   openGraph: {
     title: 'unconference',

@@ -20,7 +20,7 @@ import {
   Lock,
   EyeOff,
   Compass,
-  Sparkles,
+  Network,
   ArrowUpRight,
 } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
@@ -292,7 +292,7 @@ function ParticipantsContent() {
         {sharedPeople.length > 0 && !filtering && (
           <section aria-labelledby="shared-heading">
             <h2 id="shared-heading" className="font-semibold mb-1 flex items-center gap-2">
-              <Sparkles className="h-4 w-4 text-primary" aria-hidden="true" />
+              <Network className="h-4 w-4 text-primary" aria-hidden="true" />
               People who share your interests
             </h2>
             <p className="text-sm text-muted-foreground mb-3">Matched on the interests in your profile. Only you see this.</p>

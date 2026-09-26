@@ -411,8 +411,8 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
           </WarningBox>
         )}
 
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-3 lg:grid-rows-[auto_auto_1fr]">
-          <Card className="lg:col-span-2 lg:col-start-1 lg:row-start-1">
+        <div className="grid min-w-0 grid-cols-1 items-start gap-6 xl:gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(260px,0.85fr)] lg:grid-rows-[auto_auto_1fr]">
+          <Card className="min-w-0 lg:col-span-2 lg:col-start-1 lg:row-start-1">
             <CardContent className="p-4 pt-4 sm:p-6 sm:pt-6">
               {/* Edit, save and share left the header card: they are rows in Quick actions
                   (design §5.2). */}
@@ -443,7 +443,7 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
                 )}
               </div>
 
-              <h1 className="page-title mb-4 break-anywhere">{session.title}</h1>
+              <h1 className="mb-5 text-3xl font-semibold leading-tight tracking-tight sm:text-4xl break-anywhere">{session.title}</h1>
 
               {hosts.length === 0 ? (
                 <p className="italic text-muted-foreground">{hostByline(session)}</p>
@@ -571,9 +571,9 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
           </Card>
 
           {/* The one stack: under the header card here, column three on a desktop. */}
-          <div className="lg:col-start-3 lg:row-start-1 lg:row-span-2 lg:self-start">{quickActions}</div>
+          <div className="min-w-0 lg:col-start-3 lg:row-start-1 lg:row-span-2 lg:self-start">{quickActions}</div>
 
-          <div className="space-y-6 lg:col-span-2 lg:col-start-1 lg:row-start-2 lg:row-span-2">
+          <div className="order-2 min-w-0 space-y-6 lg:order-none lg:col-span-2 lg:col-start-1 lg:row-start-2 lg:row-span-2">
             {(session.venue || session.time_slot || session.is_self_hosted) && (
               <Card className="border-primary/20 bg-primary/5">
                 <CardContent className="p-4 pt-4 sm:p-6 sm:pt-6">
@@ -683,7 +683,7 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
                 <CardTitle className="text-xl">About this session</CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="prose prose-sm max-w-none break-anywhere">
+                <div className="max-w-prose space-y-4 text-base leading-7 break-anywhere">
                   {session.description ? (
                     session.description.split('\n').map((paragraph, i) => (
                       <p key={i} className="mb-3 text-muted-foreground">{paragraph}</p>
@@ -709,10 +709,37 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
               <HostSessionAnalytics eventSlug={event.slug} sessionId={sessionId} />
             )}
 
+            <SessionResources sessionId={sessionId} eventSlug={event.slug} canManage={viewer.can_manage} />
+            <TranscriptPanel sessionId={sessionId} eventSlug={event.slug} sessionTitle={session.title} canManage={viewer.can_manage} />
+
+            <div className="grid items-start gap-6 xl:grid-cols-2">
+            {(viewer.is_host || viewer.is_cohost || viewer.is_organizer || session.merged_into) && (
+              <SessionMerge
+                eventSlug={event.slug}
+                sessionId={sessionId}
+                sessionTitle={session.title}
+                isHost={viewer.is_host}
+                canRead={viewer.is_host || viewer.is_cohost || viewer.is_organizer}
+                mergedInto={session.merged_into}
+              />
+            )}
+
+            {(viewer.is_host || viewer.is_cohost || viewer.is_organizer) && (
+              <ManageCohostsSection
+                sessionId={sessionId}
+                cohosts={session.cohosts}
+                isHost={viewer.is_host}
+                isOrganizer={viewer.is_organizer}
+                onCohostsChange={refresh}
+              />
+            )}
+
+            </div>
+
             {sessionHasStarted && <SessionFeedback sessionId={sessionId} eventSlug={event.slug} />}
           </div>
 
-          <div className="space-y-6 lg:col-start-3 lg:row-start-3 lg:self-start">
+          <div className="order-1 min-w-0 space-y-6 lg:order-none lg:col-start-3 lg:row-start-3 lg:self-start">
             {votingOpen && session.status !== 'rejected' && session.status !== 'pending' && (
               <Card>
                 <CardHeader className="pb-3">
@@ -739,8 +766,6 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
               </Card>
             )}
 
-            <SessionResources sessionId={sessionId} eventSlug={event.slug} canManage={viewer.can_manage} />
-            <TranscriptPanel sessionId={sessionId} eventSlug={event.slug} sessionTitle={session.title} canManage={viewer.can_manage} />
 
             <AtprotoSessionActions
               sessionId={sessionId}
@@ -748,27 +773,6 @@ export function SessionDetailClient({ sessionId, initialSession }: SessionDetail
               signedIn={!!user}
               userRsvpStatus={session.my_rsvp?.status ?? null}
             />
-
-            {(viewer.is_host || viewer.is_cohost || viewer.is_organizer || session.merged_into) && (
-              <SessionMerge
-                eventSlug={event.slug}
-                sessionId={sessionId}
-                sessionTitle={session.title}
-                isHost={viewer.is_host}
-                canRead={viewer.is_host || viewer.is_cohost || viewer.is_organizer}
-                mergedInto={session.merged_into}
-              />
-            )}
-
-            {(viewer.is_host || viewer.is_cohost || viewer.is_organizer) && (
-              <ManageCohostsSection
-                sessionId={sessionId}
-                cohosts={session.cohosts}
-                isHost={viewer.is_host}
-                isOrganizer={viewer.is_organizer}
-                onCohostsChange={refresh}
-              />
-            )}
 
             {viewer.can_edit && (
               <EditSessionModal
